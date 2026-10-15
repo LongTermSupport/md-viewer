@@ -48,10 +48,11 @@ func main() {
 }
 ```
 
-```
-indented code block
-second line
-```
+Setext heading level 2
+----------------------
+
+    indented code block
+    second line
 
 | Left | Centre | Right | None |
 | :--- | :----: | ----: | ---- |
@@ -68,6 +69,12 @@ second line
 ![A missing image](img/missing.png)
 
 ![A remote image](https://example.com/remote.png)
+
+[![A linked red rectangle](img/red-4x3.png)](https://example.com/)
+
+A [reference link][ref].
+
+[ref]: https://example.com/ref
 
 <div align="center">HTML is not rendered.</div>
 
