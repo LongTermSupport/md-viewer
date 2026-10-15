@@ -420,8 +420,10 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 		descent = max(descent, g.Descent.Ceil())
 	}
 	baseY := f.top + f.baseOff
-	originX := f.cursor + padX - lo
-	glyphRect := image.Rect(originX+lo, baseY-ascent, originX+hi, baseY+descent)
+	// The outline's origin is the fragment's left edge on the baseline (STYLE-TEXT-7); its glyph
+	// box is derived from it, so the box, the decorations and the ink share one baseline.
+	origin := image.Pt(f.cursor+padX-lo, baseY)
+	glyphRect := image.Rect(origin.X+lo, origin.Y-ascent, origin.X+hi, origin.Y+descent)
 
 	if code {
 		bg := image.Rect(glyphRect.Min.X-padX, glyphRect.Min.Y-padY, glyphRect.Max.X+padX, glyphRect.Max.Y+padY)
@@ -429,7 +431,6 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 		f.tr.add(Mark{Kind: MarkCodeBg, Rect: bg, Colour: f.fp.palette.CodeBg})
 	}
 
-	origin := image.Pt(originX, baseY-int(glyphs[0].Y))
 	pop := pushGlyphs(f.gtx, f.fp.shaper, glyphs, origin)
 	paint.ColorOp{Color: ts.Colour}.Add(f.gtx.Ops)
 	paint.PaintOp{}.Add(f.gtx.Ops)
