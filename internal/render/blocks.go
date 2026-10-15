@@ -27,10 +27,25 @@ type blockCtx struct {
 	tight  bool // this block is a direct child of a tight list's item (STYLE-LIST-4)
 }
 
-// quoteCtx is the context of a quote's children: their text is FgMuted (STYLE-QUOTE-1).
+// quoteCtx is the context of a quote's children: their text is FgMuted (STYLE-QUOTE-1). A quote is
+// not an item of a tight list, so its children are not tight, but it does not end a list's
+// nesting, so its depth is kept.
 func quoteCtx(c blockCtx) blockCtx {
 	c.text.Fg = c.root.FgMuted
+	c.tight = false
 	return c
+}
+
+// stackMargins are a block's top and bottom margins in a stack. In a tight list item a paragraph
+// or an image has none (STYLE-LIST-4). Any other block has its DOC-LAYOUT-4 margins, with a list
+// nested when it is inside a list at any depth.
+func stackMargins(ctx blockCtx, b doc.Block) (top, bottom unit.Dp, err error) {
+	_, para := b.(doc.Paragraph)
+	_, img := b.(doc.Image)
+	if ctx.tight && (para || img) {
+		return 0, 0, nil
+	}
+	return Margins(b, ctx.depth > 0)
 }
 
 // flow is the flow parameters for text laid out in this context.
@@ -220,7 +235,7 @@ func layoutStack(gtx layout.Context, ctx blockCtx, blocks []doc.Block, tr *Trace
 	var prevBottom unit.Dp
 	firstTop := 0 // the first block's first baseline, from the top of the first block
 	for i, b := range blocks {
-		top, bottom, err := Margins(b, false)
+		top, bottom, err := stackMargins(ctx, b)
 		if err != nil {
 			return layout.Dimensions{}, err
 		}

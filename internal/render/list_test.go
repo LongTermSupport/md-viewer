@@ -375,7 +375,8 @@ func TestOrderedNumbers(t *testing.T) {
 	})
 
 	t.Run("beyond roman", func(t *testing.T) {
-		e := newViewEnv(t, "1. x\n   4000. a", Light, metric1)
+		// A list that does not start at 1 cannot interrupt a paragraph, so the blank line is needed.
+		e := newViewEnv(t, "1. x\n\n   4000. a", Light, metric1)
 		_, tr := e.layout(0, 800)
 		numberNamed(t, tr, "4000.")
 	})
