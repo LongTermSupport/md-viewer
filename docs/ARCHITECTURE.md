@@ -226,15 +226,15 @@ const (
 )
 
 func BulletShape(depth int) Bullet // STYLE-LIST-2, M6 (F2); depth below 1 is disc
-// ColumnWidths: floor(N × W ÷ ΣN) with a minimum of minCol; "fits" is ΣN <= W; overflow is
-// clipped in M7 (F9).
+// ColumnWidths: floor(N × W ÷ ΣN) with a minimum of minCol; "fits" is ΣN <= W. table.go passes
+// W less the closing border; the table clips the overflow (F9).
 func ColumnWidths(natural []int, width int, minCol int) []int // STYLE-TABLE-5
 
 // Trace records what layout drew. Its origin is the top-left corner of what the trace was made
 // for: the flow's in a flow trace, the list element's (gap and padding included) in a View
 // trace. Nested layout translates by its origin (push and pop), so a sub-layout records in the
 // coordinates of the trace it was given. Tests read it to assert structure.
-type Trace struct{ Marks []Mark }
+type Trace struct{ Marks []Mark } // shiftFrom(i, d) moves Marks[i:] by d; count() is len(Marks) (M7)
 type Mark struct {
 	Kind   MarkKind        // MarkGlyphs, MarkCodeBg, MarkCodeBlockBg, MarkHeadingRule, MarkQuoteBar, MarkRuleBar,
 	                       // MarkBullet, MarkNumber, MarkTaskBox, MarkTableLine, MarkRowFill, MarkImageBox,
@@ -314,10 +314,17 @@ Flow rules:
   `paint.ColorOp` and `paint.PaintOp` under a rounded clip; no recorded macro is used.
   `Strike`: as above, height max(1 dp, round(size px ÷ 16)). `LinkArea`: the fragment's X span
   × the full line box; `Link` is the run's target.
+- **Alignment.** `flowParams.align` is `alignStart` (the zero value), `alignCentre` or `alignEnd`
+  (STYLE-TABLE-4); `newFlow` rejects any other value by name. A non-start line is recorded as a
+  macro from its first fragment, and when it closes the macro is replayed under an offset of
+  `floor((box − line width) ÷ 2)` for centre, or `box − line width` for end, and the marks it
+  recorded move by the same offset (`Trace.shiftFrom`). The line width includes its trailing
+  space. A line wider than the box gets no offset. Start alignment records nothing extra. Every
+  error return of `layoutFlow` stops an open line macro.
 - **Signature.** `layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace)
   (layout.Dimensions, error)`, with `flowParams{shaper *text.Shaper; base TextStyle; palette
-  Palette; inHeading bool; links *links}`. `inHeading` is needed because `RunStyle` takes it.
-  `tr` may be nil. An unknown `RunKind` is an error naming the kind.
+  Palette; inHeading bool; links *links; wrap wrapMode; align textAlign}`. `inHeading` is needed
+  because `RunStyle` takes it. `tr` may be nil. An unknown `RunKind` is an error naming the kind.
 - **Links.** `links` holds one `*gesture.Click` per `*doc.Target`, shared by every fragment of
   that link, in a fixed order. `clicked(gtx)` drains them once per frame and returns the first
   `KindClick`. M5's `View` owns the `links` and `View.Clicked` delegates to it.
@@ -329,11 +336,29 @@ Flow rules:
 
 **Lists** are laid out by `list.go` from the same primitives. Each item's content is laid out with
 a `blockCtx` whose `depth` counts the lists around the block and whose `tight` is set for a direct
-child of a tight list's item; `quoteCtx` clears `tight` and keeps `depth`. **Tables and images**
-are laid out by `table.go` and `image.go`. Until M7 and M8 each is a placeholder: height 0 content
-with its DOC-LAYOUT-4 margins, and no marks. Images use `paint.NewImageOp` with `op.Affine`
+child of a tight list's item; `quoteCtx` clears `tight` and keeps `depth`. **Tables** are laid
+out by `table.go` (below). **Images** are laid out by `image.go`; until M8 each is a placeholder:
+height 0 content with its DOC-LAYOUT-4 margins, and no marks. Images use `paint.NewImageOp` with `op.Affine`
 scaling, or `widget.Image` with `Fit: widget.ScaleDown` and `Scale: 1` (one image pixel per dp
 before zoom).
+
+**Tables** (`table.go`). `checkTable` first: no columns, a count of alignments other than the
+header's, or a body row whose length is not the header's is an error naming it. The header row's
+cells use `headerStyle` (the body style, bold); `cellAlign` maps each column's alignment (an
+exhaustive switch, whose default names the value). For each column, N is the widest cell's
+natural width (its flow laid out unwrapped into a scratch op list) plus 2 × 13 dp and 1 dp.
+`ColumnWidths(N, W − 1 dp, 64 dp)` gives the widths w. Line i (vertical) is at x_i = Σ w before
+it, for i = 0..m, and T = x_m + 1 dp. Row r's top line is y_r, with y_0 = 0 and
+y_{r+1} = y_r + 1 dp + 2 × 6 dp + h_r, where h_r is its tallest cell's flow height; H = y_{n+1} + 1 dp
+for n body rows. A cell's flow is at (x_i + 1 dp + 13 dp, y_r + 1 dp + 6 dp), wide
+max(w_i − 1 dp − 26 dp, 0). Each row's cells are recorded, its fill painted, then the cells are
+replayed; the lines are painted last. The whole table is under `clip.Rect(0, 0, min(T, W), H)`.
+Marks: `MarkTableLine` for each whole line (vertical `(x_i, 0)-(x_i + 1, H)`, horizontal
+`(0, y_r)-(T, y_r + 1)`) in `Border`, and `MarkRowFill` for each row, `(0, y_r + 1)-(T, y_{r+1})`,
+in `Canvas` for the header and body rows 1, 3, … and `BgMuted` for body rows 2, 4, …. Marks are
+intersected with the clip and dropped when empty. `Size` is `(min(T, W), H)`, and `Baseline` is
+H − (1 dp + 6 dp + the header's first baseline). Colours come from the block's root palette, text
+from its text palette (STYLE-QUOTE-1).
 
 ### internal/app
 

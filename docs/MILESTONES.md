@@ -531,14 +531,25 @@ is removed.
 - `TestTableTooWide`: a table of long cells at 400 px is at most 400 wide and its cell text
   wraps (taller rows).
 - `TestTableLines`: `TableLine` marks, 1 px, `Border`, on every cell edge, shared between
-  neighbours (an n × m table has m + 1 vertical and n + 2 horizontal lines, counting the
-  header row).
+  neighbours (a table of m columns and n body rows has m + 1 vertical and n + 2 horizontal
+  lines).
 - `TestTableHeaderBold` and `TestTableStripes`: header glyphs use the Bold face; body rows 2
-  and 4 have a `RowFill` in `BgMuted`, rows 1 and 3 in `Canvas`.
+  and 4 have a `RowFill` in `BgMuted`, rows 1 and 3 in `Canvas`, and the header has one in
+  `Canvas` too.
 - `TestTableAlignment`: in a wide column, `Right` text ends 13 px from the cell's right
   edge, `Centre` is centred, `None` body text starts 13 px from the left and `None` header
   text is centred.
 - `TestTableRowHeight`: a row is as tall as its tallest cell; short cells' text is at the top.
+- `TestTraceShiftFrom` (`trace_test.go`) and `TestFlowAlign` (`flow_test.go`): a flow's centred
+  and end-aligned lines, with their marks moved, and an overflowing line not moved.
+- `TestCellAlign`, `TestTableEmptyCells`, `TestTableTinyWidth`, `TestTableNested` and
+  `TestTableError` (`table_test.go`): the alignment map, empty and short cells, widths from 0
+  to 77 px at three metrics, tables in quotes and lists, and each malformed model's error.
+- `TestListError` (`list_test.go`): a list's layout errors name the task state and the level
+  (a pin of M6 behaviour).
+- Changed rows: `TestBlockBaseline` gains a table row, `TestLeadsWithText` makes a table true,
+  `TestListMarkerBaseline` gains a table row, `TestViewElements` gets a table case,
+  `TestViewClicked` gains a table row, and `TestViewPlaceholders` loses its table row.
 
 **Verification:** the standard checks.
 

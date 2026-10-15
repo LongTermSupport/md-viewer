@@ -382,7 +382,8 @@ height at the left edge, and lay out their child blocks with 20 dp of left inset
 .25em solid }`). Text inside a quote is drawn in `FgMuted`, except links (`Accent`) and code
 blocks (`Fg`), which set their own colour. Inside a quote, headings of levels 1 to 5, inline
 code and list markers are `FgMuted` as well; heading rules keep `BorderMuted`, rules and quote
-bars keep `Border`, and task boxes keep their own colours (STYLE-LIST-5). Nested quotes nest.
+bars keep `Border`, task boxes keep their own colours (STYLE-LIST-5), and table lines and row
+fills keep theirs (STYLE-TABLE-1, STYLE-TABLE-3). Nested quotes nest.
 
 **STYLE-RULE-1. A rule** is a 4 dp tall bar (`.25em`) in `Border` across the full content
 width (`hr { height: .25em; background-color; border: 0 }`).
@@ -409,8 +410,9 @@ not change for unordered lists. Depth counts ordered and unordered lists alike.
 
 The first line's baseline in STYLE-LIST-2, 3 and 5 is that of the item's first text line. The
 font is the body style (STYLE-TEXT-1) whatever the first block is. The line is found
-recursively through quotes and nested lists, code block text included. When the first block has
-no text line (for example a rule, an image or a table), the baseline is that of an empty body
+recursively through quotes and nested lists, code block text included. A table's first line is
+its header row's. When the first block has no text line (for example a rule or an image), the
+baseline is that of an empty body
 line at the item's top, and the item's height is unchanged. An empty item (`-`) is one empty
 body line.
 
@@ -444,7 +446,9 @@ has non-task items is still drawn as a task item, and the others keep their bull
 **STYLE-TABLE-1. Cells** have 6 dp vertical and 13 dp horizontal padding and a 1 dp `Border`
 line on every edge; adjacent cells share one line (`table th, table td { padding: 6px 13px; border: 1px solid }`, `border-collapse: collapse`).
 
-**STYLE-TABLE-2. The header row** is Bold. Its background is `Canvas`.
+**STYLE-TABLE-2. The header row** is Bold. Its background is `Canvas`, filled as a row
+(STYLE-TABLE-3), so a table with n body rows has n + 1 fills. A fill is the band between its row's
+horizontal lines across the table's width; the lines are painted over the fills.
 
 **STYLE-TABLE-3. Body rows** alternate: the 2nd, 4th, 6th … body row (counting from 1) is
 filled `BgMuted`, the others `Canvas` (`table tr { background-color }`,
@@ -453,18 +457,27 @@ count restarts in `tbody`).
 
 **STYLE-TABLE-4. Alignment.** A column marked `Left`, `Centre` or `Right` aligns every cell's
 text that way. A column marked `None` aligns body cells left and header cells centred: the
-browser's default for `th`, which github-markdown-css does not override.
+browser's default for `th`, which github-markdown-css does not override. Alignment is per line: each
+line of a wrapped cell is aligned in its box, by the line as laid out, its trailing space included.
+A centred line leaves the spare whole pixels, rounded down, on its right. A line wider than its box
+is start-aligned.
 
 **STYLE-TABLE-5. Column widths.** Let W be the content width, and for each column let N be its
 natural width: the widest of its cells laid out on one line, plus 26 dp padding and 1 dp of
-border. If the sum of N fits in W, each column is N wide and the table is that sum wide,
-left-aligned (`table { width: max-content; max-width: 100% }`). Otherwise each column is
-max(64 dp, ⌊N × W ÷ ΣN⌋) wide, in whole dp, and cell text wraps. "Fits" means ΣN ≤ W. If the
-64 dp minimums still exceed W, the table is clipped at the content's right edge. GitHub scrolls a
-too-wide table sideways; md-viewer has no horizontal scrolling.
+border. Each column owns the border on its left, and the table has a closing 1 dp border on its
+right. "Fits" means ΣN + 1 dp ≤ W. If it fits, each column is N wide and the table is ΣN + 1 dp
+wide, left-aligned (`table { width: max-content; max-width: 100% }`). Otherwise the columns are
+fitted to W − 1 dp: each is max(64 dp, ⌊N × (W − 1 dp) ÷ ΣN⌋) wide, in whole px, and cell text
+wraps. Each length (the minimum, the padding and the border) is rounded to whole px once. If the
+columns and the closing border are still wider than W, the table is clipped at W. GitHub scrolls
+a too-wide table sideways; md-viewer has no horizontal scrolling.
 
-**STYLE-TABLE-6.** A row's height is its tallest cell. Cell text is vertically aligned to the
-top of the cell.
+**STYLE-TABLE-6. Rows.** A row is its tallest cell's text, with 6 dp above and below it, and a
+1 dp border above it: the next row's border is 1 dp + 6 dp + that text + 6 dp below. Cell text is
+vertically aligned to the top of the cell. A cell is laid out on one line, unwrapped, for its
+natural width: a hard break (which GFM cannot give a cell) makes it as wide as its widest line.
+An empty cell is one empty line. An image in a cell is its alt text (DOC-11), and inline code's
+padding counts in its width.
 
 ### 3.8 Images
 
