@@ -83,8 +83,8 @@ func readLarge(t testing.TB) []byte {
 }
 
 // TestParseLargeDeterministic: large.md parses to the same model twice (DOC-14), and to 2600
-// top-level blocks, 26 per copy. A join without its blank line would merge blocks across copies
-// and change that count.
+// top-level blocks, 26 per copy, which pins the copy count. The count does not pin the joins;
+// the join count below does.
 func TestParseLargeDeterministic(t *testing.T) {
 	src := readLarge(t)
 	checkDeterministic(t, string(src))

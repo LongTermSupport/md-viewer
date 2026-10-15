@@ -783,7 +783,9 @@ headed "container (Xvfb, information only)" and the desktop column left as "to b
 - `TestLargeFixtureIsCurrent`: `large.md` is exactly 100 copies of `elements.md` joined by
   one blank line; with `MDV_UPDATE_FIXTURES=1` it is rewritten.
 - `TestParseLargeDeterministic`: `large.md` parses to the same model twice (DOC-14) and has
-  2600 top-level blocks, 26 per copy, which pins the blank-line join.
+  2600 top-level blocks, 26 per copy, which pins the copy count; the 99 blank-line joins
+  (`The end.`, a blank line, then `# Heading level 1`) are counted separately, since the
+  block count alone does not see a missing blank line.
 - `TestNoSystemFonts`: a shaper from `NewShaper` lays out "日" and "☃" as one missing-glyph
   cluster each (glyph id 0; a control row "a" has a non-zero id). A subprocess, with `HOME`,
   `XDG_CACHE_HOME` and `LocalAppData` set to one empty temporary directory, shapes text, and
