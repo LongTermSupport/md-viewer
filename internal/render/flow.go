@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"math"
 	"strings"
 	"unicode/utf8"
@@ -47,6 +48,24 @@ type flowParams struct {
 	links     *links
 }
 
+// Inline code padding in em of the run's size (STYLE-TEXT-5).
+const (
+	codePadXEm        = 0.4 // STYLE-TEXT-5: .4em left and right
+	codePadYEm        = 0.2 // STYLE-TEXT-5: .2em above and below
+	codePadXHeadingEm = 0.2 // STYLE-TEXT-5: .2em left and right inside a heading, none vertical
+)
+
+// codeRadius is the corner radius of a code background (STYLE-TEXT-5).
+const codeRadius unit.Dp = 6 // STYLE-TEXT-5: 6 dp
+
+// Strikethrough (STYLE-TEXT-4): the top edge's height above the baseline in em, and the
+// thickness's divisor of the size in px, with its minimum in dp.
+const (
+	strikeRiseEm  = 0.3 // STYLE-TEXT-4: 0.3 em above the baseline
+	strikeDivisor = 16  // STYLE-TEXT-4: size ÷ 16
+	strikeMin     = 1   // STYLE-TEXT-4: at least 1 dp
+)
+
 // truncator is the text shaping puts where a line was cut. It is a zero-width space, so it takes
 // no room (a shaper with the default truncator reserves room for it, and the glyph of the
 // truncator is skipped).
@@ -84,8 +103,15 @@ func layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace) (l
 		return layout.Dimensions{}, err
 	}
 	for _, r := range runs {
-		if err := f.textRun(r); err != nil {
-			return layout.Dimensions{}, err
+		switch r.Kind {
+		case doc.TextRun:
+			if err := f.textRun(r); err != nil {
+				return layout.Dimensions{}, err
+			}
+		case doc.BreakRun:
+			f.closeLine()
+		default:
+			return layout.Dimensions{}, fmt.Errorf("render: no text flow for run kind %d", r.Kind)
 		}
 	}
 	if f.hasContent || f.lines == 0 {
@@ -160,6 +186,7 @@ func fixedPx(v fixed.Int26_6) float64 {
 func (f *flow) textRun(r doc.Run) error {
 	ts := RunStyle(f.fp.base, r.Style, r.Link != nil, f.fp.palette, f.fp.inHeading)
 	code := r.Style&doc.Code != 0
+	padX, padY := f.codePads(ts, code)
 	rest := r.Text
 	for rest != "" {
 		if !f.hasContent && !code {
@@ -168,7 +195,8 @@ func (f *flow) textRun(r doc.Run) error {
 				break
 			}
 		}
-		glyphs, n, err := f.shape(ts, rest, text.WrapWords, f.width-f.cursor)
+		width := f.width - f.cursor - 2*padX
+		glyphs, n, err := f.shape(ts, rest, text.WrapWords, width)
 		if err != nil {
 			return err
 		}
@@ -178,7 +206,7 @@ func (f *flow) textRun(r doc.Run) error {
 				continue
 			}
 			// The first word is wider than a whole line: break it at a character.
-			glyphs, n, err = f.shape(ts, rest, text.WrapHeuristically, f.width-f.cursor)
+			glyphs, n, err = f.shape(ts, rest, text.WrapHeuristically, width)
 			if err != nil {
 				return err
 			}
@@ -192,7 +220,7 @@ func (f *flow) textRun(r doc.Run) error {
 				return err
 			}
 		}
-		f.place(ts, rest[:n], glyphs)
+		f.place(r, ts, rest[:n], glyphs, padX, padY)
 		rest = rest[n:]
 		if rest != "" {
 			f.closeLine()
@@ -204,6 +232,9 @@ func (f *flow) textRun(r doc.Run) error {
 // shape lays out s as one line at most maxWidth px wide. It returns the glyphs without the
 // truncator, and the number of bytes of s that the glyphs show.
 func (f *flow) shape(ts TextStyle, s string, policy text.WrapPolicy, maxWidth int) ([]text.Glyph, int, error) {
+	if maxWidth <= 0 {
+		return nil, 0, nil // no room at all: nothing is shown
+	}
 	f.fp.shaper.LayoutString(text.Parameters{
 		Font:       ts.Font,
 		PxPerEm:    pxPerEm(f.gtx, ts.Size),
@@ -236,11 +267,29 @@ func byteLen(s string, runes int) int {
 	return n
 }
 
-// place draws the glyphs of s at the cursor, on the current line, and records a Glyphs mark.
-func (f *flow) place(ts TextStyle, s string, glyphs []text.Glyph) {
+// codePads is a code run's horizontal and vertical padding, in px (STYLE-TEXT-5). The em
+// products use the run's own size, so body code (13.6 sp) pads 0.4 × 13.6 across. Inside a
+// heading the padding is 0.2 em across and none up or down. Other runs have no padding.
+func (f *flow) codePads(ts TextStyle, code bool) (padX, padY int) {
+	if !code {
+		return 0, 0
+	}
+	size := pxOf(f.gtx, ts.Size)
+	if f.fp.inHeading {
+		return int(math.Round(codePadXHeadingEm * size)), 0
+	}
+	return int(math.Round(codePadXEm * size)), int(math.Round(codePadYEm * size))
+}
+
+// place draws the glyphs of s, a fragment of run r, at the cursor on the current line, and records
+// their marks. A code run's fragment is padded on both sides, and its background is painted
+// before its glyphs (STYLE-TEXT-5). A struck fragment gets its line across its whole advance,
+// padding included (STYLE-TEXT-4). The fragment's advance includes the padding.
+func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, padX, padY int) {
 	if len(glyphs) == 0 {
 		return
 	}
+	code := r.Style&doc.Code != 0
 	lo, hi := math.MaxInt, math.MinInt
 	ascent, descent := 0, 0
 	for _, g := range glyphs {
@@ -250,8 +299,14 @@ func (f *flow) place(ts TextStyle, s string, glyphs []text.Glyph) {
 		descent = max(descent, g.Descent.Ceil())
 	}
 	baseY := f.top + f.baseOff
-	originX := f.cursor - lo
+	originX := f.cursor + padX - lo
 	glyphRect := image.Rect(originX+lo, baseY-ascent, originX+hi, baseY+descent)
+
+	if code {
+		bg := image.Rect(glyphRect.Min.X-padX, glyphRect.Min.Y-padY, glyphRect.Max.X+padX, glyphRect.Max.Y+padY)
+		f.paintBackground(bg)
+		f.tr.add(Mark{Kind: MarkCodeBg, Rect: bg, Colour: f.fp.palette.CodeBg})
+	}
 
 	stack := op.Offset(image.Pt(originX, baseY-int(glyphs[0].Y))).Push(f.gtx.Ops)
 	paint.ColorOp{Color: ts.Colour}.Add(f.gtx.Ops)
@@ -261,8 +316,40 @@ func (f *flow) place(ts TextStyle, s string, glyphs []text.Glyph) {
 	stack.Pop()
 
 	f.tr.add(Mark{Kind: MarkGlyphs, Rect: glyphRect, Colour: ts.Colour, Text: fragmentText(s)})
-	f.cursor += hi - lo
+
+	boxStart := f.cursor
+	f.cursor += 2*padX + hi - lo
+	if r.Style&doc.Strike != 0 {
+		f.strike(ts, baseY, boxStart, f.cursor)
+	}
 	f.hasContent = true
+}
+
+// strike draws the line through a struck fragment that spans x from start to end (STYLE-TEXT-4):
+// its top edge is 0.3 em above the baseline, and it is max(1 dp, size ÷ 16) thick.
+func (f *flow) strike(ts TextStyle, baseY, start, end int) {
+	size := pxOf(f.gtx, ts.Size)
+	top := baseY - int(math.Round(strikeRiseEm*size))
+	thick := max(f.gtx.Dp(strikeMin), int(math.Round(size/strikeDivisor)))
+	rect := image.Rect(start, top, end, top+thick)
+	f.fillRect(rect, ts.Colour)
+	f.tr.add(Mark{Kind: MarkStrike, Rect: rect, Colour: ts.Colour})
+}
+
+// fillRect fills r with colour c.
+func (f *flow) fillRect(r image.Rectangle, c color.NRGBA) {
+	stack := clip.Rect(r).Push(f.gtx.Ops)
+	paint.ColorOp{Color: c}.Add(f.gtx.Ops)
+	paint.PaintOp{}.Add(f.gtx.Ops)
+	stack.Pop()
+}
+
+// paintBackground fills r with the code background colour, with rounded corners (STYLE-TEXT-5).
+func (f *flow) paintBackground(r image.Rectangle) {
+	stack := clip.UniformRRect(r, f.gtx.Dp(codeRadius)).Push(f.gtx.Ops)
+	paint.ColorOp{Color: f.fp.palette.CodeBg}.Add(f.gtx.Ops)
+	paint.PaintOp{}.Add(f.gtx.Ops)
+	stack.Pop()
 }
 
 // fragmentText is s with each invalid byte shown as U+FFFD (DOC-15).
