@@ -35,6 +35,14 @@ const (
 	checkStroke   unit.Dp = 1.5  // STYLE-LIST-5: the check mark is a 1.5 dp stroke
 )
 
+// Task box mark texts (STYLE-LIST-5, ARCHITECTURE Mark.Text): the kind of a task box mark.
+const (
+	taskMarkOpen   = "open"   // the box of an open task
+	taskMarkDone   = "done"   // the box of a done task
+	taskMarkBorder = "border" // the border of an open box
+	taskMarkCheck  = "check"  // the check mark of a done box
+)
+
 // checkPoints is the check mark's polyline, in dp from the box's top-left corner (STYLE-LIST-5). It
 // is a variable, because Go has no constant arrays.
 var checkPoints = [3]f32.Point{{X: 3, Y: 6.5}, {X: 5.5, Y: 9}, {X: 10, Y: 4}}
@@ -242,11 +250,11 @@ func drawTaskBox(gtx layout.Context, ctx blockCtx, edge, base int, task doc.Task
 		border := gtx.Dp(taskBoxBorder)
 		fillClip(gtx, clip.UniformRRect(box, rad), ctx.root.FgMuted)
 		fillClip(gtx, clip.UniformRRect(box.Inset(border), rad-border), ctx.root.Canvas)
-		tr.add(Mark{Kind: MarkTaskBox, Rect: box, Colour: ctx.root.Canvas, Text: "open"})
-		tr.add(Mark{Kind: MarkTaskBox, Rect: box, Colour: ctx.root.FgMuted, Text: "border"})
+		tr.add(Mark{Kind: MarkTaskBox, Rect: box, Colour: ctx.root.Canvas, Text: taskMarkOpen})
+		tr.add(Mark{Kind: MarkTaskBox, Rect: box, Colour: ctx.root.FgMuted, Text: taskMarkBorder})
 	case doc.Done:
 		fillClip(gtx, clip.UniformRRect(box, rad), ctx.root.Accent)
-		tr.add(Mark{Kind: MarkTaskBox, Rect: box, Colour: ctx.root.Accent, Text: "done"})
+		tr.add(Mark{Kind: MarkTaskBox, Rect: box, Colour: ctx.root.Accent, Text: taskMarkDone})
 		drawCheck(gtx, ctx, box, tr)
 	default:
 		return fmt.Errorf("render: no task box for state %d", task)
@@ -281,7 +289,7 @@ func drawCheck(gtx layout.Context, ctx blockCtx, box image.Rectangle, tr *Trace)
 		int(math.Floor(minX-half)), int(math.Floor(minY-half)),
 		int(math.Ceil(maxX+half)), int(math.Ceil(maxY+half)),
 	)
-	tr.add(Mark{Kind: MarkTaskBox, Rect: r, Colour: ctx.root.OnAccent, Text: "check"})
+	tr.add(Mark{Kind: MarkTaskBox, Rect: r, Colour: ctx.root.OnAccent, Text: taskMarkCheck})
 }
 
 // leadsWithText reports whether a block's first line is text, found through quotes and nested

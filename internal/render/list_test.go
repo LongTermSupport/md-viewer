@@ -206,6 +206,32 @@ func TestLeadsWithText(t *testing.T) {
 	}
 }
 
+// TestListError: an item whose task state or block cannot be drawn is a layout error that names
+// it, and the element is Dimensions{} (STYLE-LIST-2, STYLE-LIST-5). This pins M6's behaviour.
+func TestListError(t *testing.T) {
+	tests := []struct {
+		name string
+		item doc.Item
+		want string
+	}{
+		{"task state 9", doc.Item{Task: 9, Blocks: []doc.Block{doc.Paragraph{}}}, "task state 9"},
+		{"heading level 7", doc.Item{Blocks: []doc.Block{doc.Heading{Level: 7}}}, "level 7"},
+		{"quote holding heading level 0", doc.Item{Blocks: []doc.Block{doc.Quote{Blocks: []doc.Block{doc.Heading{Level: 0}}}}}, "level 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			list := doc.List{Tight: true, Start: 1, Items: []doc.Item{tt.item}}
+			e := newViewEnvDoc(t, &doc.Document{Blocks: []doc.Block{list}}, Light, metric1)
+			if dims := e.view.Layout(e.context(800), 0, nil); dims != (layout.Dimensions{}) {
+				t.Fatalf("failing element is %+v, want Dimensions{}", dims)
+			}
+			if err := e.view.Err(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Err() = %v, want an error containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
 // TestListIndent: an item's content starts 32 dp right of the list's left edge (STYLE-LIST-1), and
 // a nested list indents again from its item's content edge. A list in a quote starts past the
 // quote's 20 dp inset. A wrapped line hangs at the content edge.
