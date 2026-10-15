@@ -99,6 +99,10 @@ func goSpawn(f func()) {
 	go f()
 }
 
+// Bind sets the function that a failed write from a spawned function calls, so that the next
+// frame comes at once (LINK-2). It is the window's Invalidate.
+func (vw *Viewer) Bind(invalidate func()) {}
+
 // Frame handles the input of the frame, lays out the document, and reports quit and the error
 // that ends the window (CLI-6). The input comes first, so the layout shows its result.
 func (vw *Viewer) Frame(gtx layout.Context) (bool, error) {

@@ -1059,6 +1059,59 @@ func TestOpenerFailureNextFrame(t *testing.T) {
 	}
 }
 
+// TestViewerAsyncErrorInvalidates: a failed write from the opener's function invalidates the
+// window, so the frame that reports the error comes at once, not at the next input event (LINK-2).
+// The other two outcomes invalidate nothing: an opener that fails with its message written, and
+// an opener that succeeds.
+func TestViewerAsyncErrorInvalidates(t *testing.T) {
+	d := linkDoc(t, "[e](https://e.org/x)")
+
+	t.Run("failed write invalidates", func(t *testing.T) {
+		e := newEnv(t, d, defaultSize, failWriter{})
+		e.opener.err = errors.New("exit status 3")
+		invalidates := 0
+		e.vw.Bind(func() { invalidates++ })
+		e.frame()
+		e.click(linkCentre(t, d, e.images, defaultSize.X-10))
+		e.frame()
+		e.runSpawned()
+		if invalidates != 1 {
+			t.Errorf("invalidate was called %d times, want 1", invalidates)
+		}
+		if _, err := e.step(); err == nil || !strings.Contains(err.Error(), "write failed") {
+			t.Errorf("the frame after the failed write returned err %v, want the write error", err)
+		}
+	})
+
+	t.Run("failure with the line written does not invalidate", func(t *testing.T) {
+		var stderr bytes.Buffer
+		e := newEnv(t, d, defaultSize, &stderr)
+		e.opener.err = errors.New("exit status 3")
+		invalidates := 0
+		e.vw.Bind(func() { invalidates++ })
+		e.frame()
+		e.click(linkCentre(t, d, e.images, defaultSize.X-10))
+		e.frame()
+		e.runSpawned()
+		if invalidates != 0 {
+			t.Errorf("invalidate was called %d times, want 0", invalidates)
+		}
+	})
+
+	t.Run("success does not invalidate", func(t *testing.T) {
+		e := newEnv(t, d, defaultSize, failWriter{})
+		invalidates := 0
+		e.vw.Bind(func() { invalidates++ })
+		e.frame()
+		e.click(linkCentre(t, d, e.images, defaultSize.X-10))
+		e.frame()
+		e.runSpawned()
+		if invalidates != 0 {
+			t.Errorf("invalidate was called %d times, want 0", invalidates)
+		}
+	})
+}
+
 // signalBuffer is a writer that is not safe for concurrent use. It tells the test each write
 // has ended, on wrote, so the test can read it after the writes without a sleep.
 type signalBuffer struct {
