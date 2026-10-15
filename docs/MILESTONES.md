@@ -33,13 +33,28 @@ it completely, then stop. [SPEC.md](SPEC.md) says what to build (the numbered ex
 
 The work happens inside md-viewer's own ccy container, built from `.claude/ccy/Dockerfile`. It
 has Go 1.26.9, gcc, Gio's build headers, Xvfb with Mesa's software renderer, and `gh`. It has
-no real display. So:
+no display of its own, but it can reach a live Wayland compositor: a socket under the user's
+`XDG_RUNTIME_DIR`, which Gio prefers to X11. The owner decides whether the container may reach
+that compositor at all. Until then, every command that starts the binary, and every test that
+does, hides it:
+
+```bash
+env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u DISPLAY XDG_RUNTIME_DIR="$(mktemp -d)" ...
+```
+
+(`xvfb-run -a` sets `DISPLAY` itself, so it is unset here too). Without the empty runtime
+directory, libwayland falls back to `$XDG_RUNTIME_DIR/wayland-0`, and the window opens on the
+compositor. So:
 
 - everything builds, including the window code and the binary;
-- every test runs, because tests never open a window;
+- every unit test runs without a window, and the binary tests run the binary with the
+  environment above: one with no display, which must fail, and one under `xvfb-run -a`;
 - the binary can be run under a virtual display, `xvfb-run -a`, which proves it opens a window
   and draws a frame, but its timings are information only (SPEC section 9);
 - the speed targets are measured by the owner on the desktop (M11).
+
+The binary tests need `xvfb-run` on `PATH`; the container and CI have it, and a missing `xvfb-run`
+fails the test rather than skipping it, so the owner's desktop needs the same package.
 
 The GitHub Actions workflow (`.github/workflows/ci.yml`) repeats the build, the tests and the
 smoke run on `ubuntu-24.04` and uploads the binary as an artifact. That run is the proof that
@@ -65,7 +80,7 @@ also the **smoke run**:
 
 ```bash
 go build -trimpath -o dist/md-viewer ./cmd/md-viewer
-xvfb-run -a dist/md-viewer --time testdata/elements.md
+env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u DISPLAY XDG_RUNTIME_DIR="$(mktemp -d)" xvfb-run -a dist/md-viewer --time testdata/elements.md
 ```
 
 which must exit 0 and print one line matching
@@ -678,42 +693,67 @@ started with `Start`; the wait runs in a goroutine.
 **Covers:** WIN-1, WIN-2, WIN-3, WIN-6, CLI-6, CLI-9, STYLE-PAL-2, STYLE-PAL-3 (the window
 fills `Canvas`; the view paints none), SPEED-1, SPEED-2, SPEED-6.
 
-**Files:** `internal/window/window.go` (with `FrameError` and `Run`'s error, ARCHITECTURE
-"internal/window"); `internal/app/prepare.go` completed (fonts, images,
-view, viewer, timings, `Prepared.Window`); `internal/app/timing.go`; `cmd/md-viewer/main.go`
-in the shape of ARCHITECTURE.md (the `not implemented yet` line is removed); in
-`.github/workflows/ci.yml`, after the `go build` step of the `build` job, add:
+**Files:** `internal/window/window.go` (the loop, `Config`, `FrameError`, `Source`, `Loop`; no
+cgo, no `gioui.org/app`) and `internal/window/gioapp/gioapp.go` (the only importer of
+`gioui.org/app`: `Run` and `Main`), as ARCHITECTURE "internal/window and internal/window/gioapp"
+says; `internal/app/prepare.go` completed (palette, fonts, images, view, viewer, timings,
+`Prepared.Window`); `internal/app/timing.go`; `internal/app/viewer.go` gains `Bind` for a failed
+async write; `cmd/md-viewer/main.go` in the shape of ARCHITECTURE.md (the `not implemented yet`
+line is removed); in `.github/workflows/ci.yml`, after the `go build` step of the `build` job, add:
 
 ```yaml
       - name: Smoke run under Xvfb (information only; speed is judged on a real desktop)
-        run: xvfb-run -a dist/md-viewer --time testdata/elements.md
+        run: env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u DISPLAY XDG_RUNTIME_DIR="$(mktemp -d)" xvfb-run -a dist/md-viewer --time testdata/elements.md
 ```
 
 **Tests first:**
 
 - `TestTimingsLine`: `Timings{Read: 400µs, Parse: 12.34ms, Fonts: 6.1ms, FirstFrame: 88ms}`
   gives `read_ms=0.4 parse_ms=12.3 fonts_ms=6.1 first_frame_ms=88.0`.
-- `TestPrepareTimings`: with a fake clock, `Prepare` records read, parse and fonts from the
-  clock, and `OnFirst` in the window config prints the line to stdout only when `--time` is
-  given.
+- `TestPrepareTimings`: with a scripted clock that counts any reading past its script, the
+  load takes three readings and the faces two, and `OnFirst` in the window config writes the
+  line to stdout only when `--time` is given, and its write error is returned (CLI-6).
 - `TestPrepareTitleAndPalette`: the config's title is `elements.md - md-viewer`; `Canvas`
-  is the light palette's, and the dark one with `--dark`.
-- `TestNoInitFunctions`: parses every non-test `.go` file of the module with `go/parser` and
-  fails if any declares `func init()` (SPEED-6).
+  is the light palette's, and the dark one with `--dark`; the viewer's theme text colour follows
+  the palette; `ExitAfterFirst` is set only with `--time`.
+- `TestPrepareBindsInvalidate`: `Bind` reaches the images, so one headless frame of a local
+  image makes the window invalidate when its pixels are ready (SPEED-5).
+- `TestPrepareFontError`: a font error prints `md-viewer: ` and the error, and exits 1 with no
+  window.
+- `TestViewerAsyncErrorInvalidates` (`internal/app/viewer_test.go`): a failed write from the
+  opener's function invalidates the window, and the next frame returns that write error (LINK-2).
+- `TestWindowOptions` (`internal/window/gioapp`): the options set the title and the size and
+  minimum size in dp (WIN-1, WIN-2).
 - `TestBinaryNoDisplay` in `cmd/md-viewer/main_test.go`: run the built binary on
-  `testdata/elements.md` with `DISPLAY` and `WAYLAND_DISPLAY` removed from its environment:
-  exit 1 and stderr starting with `md-viewer: cannot open a window: `.
-- `TestBinaryTimeUnderXvfb`: when `xvfb-run` is on `PATH`, run
-  `xvfb-run -a <binary> --time testdata/elements.md`: exit 0 and stdout matching the smoke
-  regular expression. When `xvfb-run` is not on `PATH` the test fails with a message saying
-  the image lacks it (the container and CI both have it, so it must never skip).
+  `testdata/elements.md` with `DISPLAY`, `WAYLAND_DISPLAY` and `WAYLAND_SOCKET` removed from its
+  environment and `XDG_RUNTIME_DIR` set to an empty temporary directory: exit 1, empty stdout, and
+  stderr is the three lines printed before the window (DOC-9's and the two image lines, byte for
+  byte), then one line starting `md-viewer: cannot open a window: ` (CLI-9). Run with `--time` too.
+- `TestBinaryTimeUnderXvfb`: run `xvfb-run -a <binary> --time testdata/elements.md` (and with
+  `--dark`) in the same environment, with `DISPLAY` removed, so Gio cannot reach a Wayland
+  compositor: exit 0, stdout matching the smoke regular expression, and the `md-viewer: ` lines on
+  stderr are exactly the three lines printed before the window. Other stderr lines, such as Mesa
+  warnings, are ignored. When `xvfb-run` is not on `PATH` the test fails with a message saying
+  the image lacks it. It never skips.
 - `TestFrameErrorMapping` (`internal/window`, `cmd/md-viewer`): a `Config.Frame` error comes out
-  of `Run` as a `*FrameError` that unwraps to it, and `main` prints `md-viewer: ` and that
-  error's text and exits 1 (CLI-6). Without a failed frame, `Run` returns nil on close.
+  of `Loop` as a `*FrameError` that unwraps to it, and `main` prints `md-viewer: ` and that
+  error's text and exits 1 (CLI-6). Without a failed frame, `Loop` returns nil on close.
+- `TestNoInitFunctions` (`cmd/md-viewer/init_test.go`): no non-test file of the module declares
+  `func init()`, checked with `go/parser` over every non-test `.go` file, with a fixture row that
+  must fail (SPEED-6).
+- `TestGoStatements` (`cmd/md-viewer/init_test.go`): the `go` statements in non-test files are
+  exactly the spawn of image decoding, the spawn of the opener's wait, and the window loop's
+  goroutine in `main` (SPEED-6, with its fixture row).
+
+The window tests (`internal/window/window_test.go`) drive `Loop` through a fake `Source`, with
+no goroutines: a close, a frame error, the `--time` line, the canvas fill and the binding are
+each checked in the order the loop calls them (`TestLoop*`). `gioapp` has one unit test of the
+options it applies to `app.Config` (`TestWindowOptions`: WIN-1, WIN-2).
 
 **Verification:** the standard checks and the smoke run. Push and check that CI's `build` job
 runs the smoke step green and uploads the artifact; download it with
-`gh run download <id> -n md-viewer-linux-amd64` and run `./md-viewer --version` on it.
+`gh run download <id> -n md-viewer-linux-amd64`, which drops the executable bit, so run
+`chmod +x md-viewer` first, then `./md-viewer --version`.
 
 **Done when:** the standard checks and the smoke run pass in the container, and CI's `build`
 job is green with the artifact uploaded.
