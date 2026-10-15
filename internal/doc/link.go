@@ -22,7 +22,12 @@ const mailtoPrefix = schemeMailto + ":"
 // escapes and references in dest are resolved first, as DOC-3 resolves them in text (P6), so
 // the Dest of the result is the resolved destination.
 func ResolveLink(dir, dest string) Target {
-	dest = resolveText([]byte(dest))
+	return classify(dir, resolveText([]byte(dest)))
+}
+
+// classify applies DOC-5's table to a destination whose escapes are already resolved. An
+// autolink's URL has no escapes (CommonMark), so it is classified without resolving them.
+func classify(dir, dest string) Target {
 	if strings.HasPrefix(dest, "#") {
 		return Target{Kind: Fragment, Value: dest, Dest: dest}
 	}

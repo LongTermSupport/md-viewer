@@ -330,6 +330,9 @@ func TestLinkRuns(t *testing.T) {
 		{"a@example.com", []Block{para(lnk("a@example.com", 0, Target{
 			External, "mailto:a@example.com", "mailto:a@example.com",
 		}))}},
+		{"<https://e.org/a\\_b>", []Block{para(lnk("https://e.org/a\\_b", 0, Target{
+			External, "https://e.org/a\\_b", "https://e.org/a\\_b",
+		}))}},
 		{"www.e.org", []Block{para(lnk("www.e.org", 0, Target{
 			External, "http://www.e.org", "http://www.e.org",
 		}))}},

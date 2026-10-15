@@ -362,7 +362,7 @@ func (c *converter) collectRuns(parent ast.Node, st Style, link *Target, f *inli
 				return err
 			}
 		case *ast.AutoLink:
-			tg := ResolveLink(c.dir, autoLinkDest(ch, c.src))
+			tg := classify(c.dir, autoLinkDest(ch, c.src))
 			f.add(Run{Kind: TextRun, Text: string(ch.Label(c.src)), Style: st, Link: &tg})
 		case *ast.Image:
 			if err := c.addImage(ch, st, link, f); err != nil {
