@@ -3,9 +3,13 @@ package render
 import (
 	"fmt"
 	"image"
+	"image/color"
+	"strings"
 
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/text"
 	"gioui.org/unit"
 
@@ -39,10 +43,12 @@ func (c blockCtx) flow(base TextStyle, inHeading bool, wrap wrapMode) flowParams
 	}
 }
 
-// Quote sizes in dp (STYLE-QUOTE-1).
+// Block sizes in dp (STYLE-CODE-1, STYLE-QUOTE-1).
 const (
-	quoteBarWidth unit.Dp = 4  // STYLE-QUOTE-1: .25em of 16, the bar's width
-	quotePadding  unit.Dp = 16 // STYLE-QUOTE-1: the padding after the bar, and on the right
+	codeBlockPadding unit.Dp = 16 // STYLE-CODE-1: 16 dp on all sides of the text
+	codeBlockRadius  unit.Dp = 6  // STYLE-CODE-1: 6 dp corner radius
+	quoteBarWidth    unit.Dp = 4  // STYLE-QUOTE-1: .25em of 16, the bar's width
+	quotePadding     unit.Dp = 16 // STYLE-QUOTE-1: the padding after the bar, and on the right
 )
 
 // at lays out fn with its ops and its trace offset by pt, so that the marks fn records are in the
@@ -81,7 +87,9 @@ func layoutBlock(gtx layout.Context, ctx blockCtx, b doc.Block, tr *Trace) (layo
 		return layoutHeading(gtx, ctx, b, tr)
 	case doc.Quote:
 		return layoutQuote(gtx, ctx, b, tr)
-	case doc.CodeBlock, doc.Rule, doc.List, doc.Table, doc.Image:
+	case doc.CodeBlock:
+		return layoutCodeBlock(gtx, ctx, b, tr)
+	case doc.Rule, doc.List, doc.Table, doc.Image:
 		// Placeholders until their milestones: height 0, with the margins the caller gives.
 		return layout.Dimensions{Size: image.Pt(width, 0)}, nil
 	default:
@@ -107,6 +115,59 @@ func layoutHeading(gtx layout.Context, ctx blockCtx, h doc.Heading, tr *Trace) (
 		tr.add(Mark{Kind: MarkHeadingRule, Rect: r, Colour: rule.Colour})
 	}
 	return layout.Dimensions{Size: image.Pt(dims.Size.X, ruleTop+thick)}, nil
+}
+
+// layoutCodeBlock lays out a code block: its lines in Go Mono, wrapped at the character that
+// overflows, inside 16 dp of padding, on a rounded background across the content width
+// (STYLE-CODE-1, STYLE-CODE-2). The text is recorded first and the background painted before it,
+// since the height is known only after the layout (a recorded macro replays the text on top).
+func layoutCodeBlock(gtx layout.Context, ctx blockCtx, c doc.CodeBlock, tr *Trace) (layout.Dimensions, error) {
+	width := gtx.Constraints.Max.X
+	pad := gtx.Dp(codeBlockPadding)
+	igtx := gtx
+	igtx.Constraints = layout.Constraints{Max: image.Pt(max(width-2*pad, 0), gtx.Constraints.Max.Y)}
+	fp := ctx.flow(codeBlockStyle(ctx.root), false, wrapCode)
+	fp.palette = ctx.root
+
+	rec := op.Record(gtx.Ops)
+	dims, err := at(gtx, tr, image.Pt(pad, pad), func() (layout.Dimensions, error) {
+		return layoutFlow(igtx, fp, codeRuns(c.Text), tr)
+	})
+	call := rec.Stop()
+	if err != nil {
+		return layout.Dimensions{}, err
+	}
+
+	h := dims.Size.Y + 2*pad
+	bg := image.Rect(0, 0, width, h)
+	fillRoundRect(gtx, bg, codeBlockRadius, ctx.root.BgMuted)
+	tr.add(Mark{Kind: MarkCodeBlockBg, Rect: bg, Colour: ctx.root.BgMuted})
+	call.Add(gtx.Ops)
+	return layout.Dimensions{Size: image.Pt(width, h)}, nil
+}
+
+// codeRuns is a code block's text as runs: a break before each line after the first, and a text
+// run for each line that is not empty. Text with n newlines has n + 1 lines (issue 4), so the
+// empty text is one empty line.
+func codeRuns(src string) []doc.Run {
+	var runs []doc.Run
+	for i, line := range strings.Split(src, "\n") {
+		if i > 0 {
+			runs = append(runs, doc.Run{Kind: doc.BreakRun})
+		}
+		if line != "" {
+			runs = append(runs, doc.Run{Kind: doc.TextRun, Text: line})
+		}
+	}
+	return runs
+}
+
+// fillRoundRect fills r with colour c, with corners of radius rad.
+func fillRoundRect(gtx layout.Context, r image.Rectangle, rad unit.Dp, c color.NRGBA) {
+	stack := clip.UniformRRect(r, gtx.Dp(rad)).Push(gtx.Ops)
+	paint.ColorOp{Color: c}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+	stack.Pop()
 }
 
 // layoutQuote lays out a quote's children, indented past the bar and its padding, in muted text
