@@ -60,13 +60,33 @@ func TestParseArgsDoubleDash(t *testing.T) {
 	cases := []struct {
 		args []string
 		want Options
+		msg  string // the usage error message; empty when ParseArgs must succeed
 	}{
-		{[]string{"--", "--dark"}, Options{Path: "--dark"}},
-		{[]string{"-"}, Options{Path: "-"}},
+		{[]string{"--", "--dark"}, Options{Path: "--dark"}, ""},
+		{[]string{"-"}, Options{Path: "-"}, ""},
+		// After --, an unknown-looking flag is an operand, not an error (CLI-2).
+		{[]string{"--", "--nope"}, Options{Path: "--nope"}, ""},
+		{[]string{"--dark", "--", "-x"}, Options{Path: "-x", Dark: true}, ""},
+		// A second -- after the first is an operand.
+		{[]string{"--", "--"}, Options{Path: "--"}, ""},
+		// Operands after -- still count toward the FILE count.
+		{[]string{"a.md", "--", "--dark"}, Options{}, "md-viewer: expected one FILE, got 2"},
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%q", c.args), func(t *testing.T) {
-			checkParse(t, c.args, c.want)
+			if c.msg == "" {
+				checkParse(t, c.args, c.want)
+				return
+			}
+			_, err := ParseArgs(c.args)
+			var ue *UsageError
+			if !errors.As(err, &ue) {
+				t.Errorf("ParseArgs(%q) error = %v, want a *UsageError", c.args, err)
+				return
+			}
+			if ue.Msg != c.msg {
+				t.Errorf("ParseArgs(%q) message = %q, want %q", c.args, ue.Msg, c.msg)
+			}
 		})
 	}
 }
