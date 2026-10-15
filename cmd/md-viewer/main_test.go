@@ -109,4 +109,20 @@ func TestMainUsageExit(t *testing.T) {
 			t.Errorf("stderr = %q, want empty", stderr)
 		}
 	})
+
+	// Help wins over version (CLI-3): the usage text, not the version line.
+	for _, args := range [][]string{{"--version", "--help"}, {"-h"}} {
+		t.Run("help wins "+strings.Join(args, " "), func(t *testing.T) {
+			stdout, stderr, code := runBinary(t, bin, args...)
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0", code)
+			}
+			if stdout != app.Usage {
+				t.Errorf("stdout = %q, want %q", stdout, app.Usage)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty", stderr)
+			}
+		})
+	}
 }
