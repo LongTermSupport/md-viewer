@@ -110,6 +110,13 @@ ENV GOTOOLCHAIN=local
 # checkout's .tools/bin, the same way CI does. Copying the pins into this file would make a
 # second source that drifts; and while go-qa-ci is private an image build has no credentials
 # to read it.
+#
+# .tools/bin goes on PATH for every process in the container, so the one go-qa-ci install is
+# what a shell, scripts/qa.sh and the hooks daemon's lint_on_edit (which finds golangci-lint
+# on PATH) all use. There is no second copy of any tool. The directory does not exist until
+# scripts/install-qa-tools.sh has run, and a missing PATH entry is harmless. ccy mounts the
+# project at /workspace.
+ENV PATH="/workspace/.tools/bin:${PATH}"
 
 # Verify the toolchain, and that every pkg-config module Gio's cgo lines name resolves.
 RUN go version \
