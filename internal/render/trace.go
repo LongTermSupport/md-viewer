@@ -49,4 +49,8 @@ type Mark struct {
 // add appends m to the trace. A nil Trace records nothing, so layout code need not check for
 // one (ARCHITECTURE "internal/render": tr may be nil).
 func (t *Trace) add(m Mark) {
+	if t == nil {
+		return
+	}
+	t.Marks = append(t.Marks, m)
 }
