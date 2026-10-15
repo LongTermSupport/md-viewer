@@ -80,7 +80,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M1 Document model: blocks and inline runs
 - [x] M2 Document model: links, tables, images, HTML, loading
 - [x] M3 Render styles, palettes and fonts
-- [ ] M4 Inline text flow
+- [x] M4 Inline text flow
 - [ ] M5 The view and simple blocks
 - [ ] M6 Lists
 - [ ] M7 Tables
