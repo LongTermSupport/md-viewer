@@ -76,7 +76,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 
 ## Status
 
-- [ ] M0 Scaffolding, CI and the command line
+- [x] M0 Scaffolding, CI and the command line
 - [ ] M1 Document model: blocks and inline runs
 - [ ] M2 Document model: links, tables, images, HTML, loading
 - [ ] M3 Render styles, palettes and fonts
