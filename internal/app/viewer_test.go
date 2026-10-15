@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gioui.org/f32"
 	"gioui.org/io/input"
@@ -873,6 +874,43 @@ func TestViewerLinks(t *testing.T) {
 			}
 			if got := stderr.String(); got != wantStderr {
 				t.Errorf("stderr is %q, want %q", got, wantStderr)
+			}
+		})
+	}
+}
+
+// TestViewerLocalLinksAbsolute checks that every LocalFile target reaches the opener as an
+// absolute path. The document is loaded by a relative name, from its own directory, through
+// doc.Load, which makes its directory absolute, so the targets are absolute too.
+func TestViewerLocalLinksAbsolute(t *testing.T) {
+	for _, src := range []string{"[f](f.txt)", "[o](other.md#part)", "[d]()", "[p](sub/../f.txt)"} {
+		t.Run(src, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range []string{"f.txt", "other.md"} {
+				if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte(src+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(dir)
+			d, _, err := doc.Load("doc.md", time.Now)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			e := newEnv(t, d, defaultSize, io.Discard)
+			e.frame()
+			e.click(linkCentre(t, d, e.images, defaultSize.X-10))
+			if _, err := e.step(); err != nil {
+				t.Fatalf("click frame returned %v", err)
+			}
+			e.runSpawned()
+			if len(e.opener.calls) != 1 {
+				t.Fatalf("opener was called %d times, want 1", len(e.opener.calls))
+			}
+			if got := e.opener.calls[0]; !filepath.IsAbs(got) {
+				t.Errorf("opener was called with %q, want an absolute path", got)
 			}
 		})
 	}
