@@ -277,7 +277,8 @@ system fonts, which cost a font scan at start (SPEED-4); the Go fonts are the su
 font's missing-glyph box. This is a known cost of STYLE-FONT-1.
 
 **STYLE-FONT-3.** `Strong` uses the Bold face. GitHub asks for weight 600 (`b, strong`,
-`h1`…`h6`); the Go fonts have 400 and 700 only, so 700 is used. Headings are Bold.
+`h1`…`h6`); Go Bold declares weight 600, so it is used, requested as `font.SemiBold`. Headings
+are Bold.
 
 **STYLE-FONT-4.** `Emphasis` uses the Italic face; `Emphasis|Strong` uses Bold Italic. `Code`
 uses Go Mono (Go Mono Bold when also `Strong`; Go Mono has no italic in this set, so `Code`
@@ -314,7 +315,8 @@ item has a top margin of 0; the last has a bottom margin of 0 (`.markdown-body>*
 | Rule                       | 24 dp | 24 dp  | `hr { margin: 1.5rem 0 }`                                                |
 | Image                      | 0     | 16 dp  | it sits in a paragraph, so a paragraph's margins                         |
 
-`1rem` is 16 dp; it does not change with the element's own font size.
+`1rem` is 16 dp; it does not change with the element's own font size. Only the List row depends
+on `nested`.
 
 ### 3.4 Text
 
@@ -346,9 +348,10 @@ hover.
 0.3 em above the baseline, max(1 dp, size ÷ 16) thick, across the run's width.
 
 **STYLE-TEXT-5. Inline code** is Go Mono at 85% of the surrounding font size (13.6 sp in body
-text), colour unchanged, on a `CodeBg` rounded rectangle with a 6 dp corner radius. The
-rectangle extends 0.2 em above and below the glyph line box without changing the line height,
-and 0.4 em to the left and right, and this horizontal padding is part of the run's width
+text), colour unchanged, on a `CodeBg` rounded rectangle with a 6 dp corner radius. A code run
+keeps the line height of its block (the run does not change it). The rectangle extends 0.2 em
+above and below the glyph line box without changing the line height, and 0.4 em to the left and
+right, and this horizontal padding is part of the run's width
 (`code, tt { padding: .2em .4em; font-size: 85%; background-color; border-radius: 6px }`).
 Inside a heading the code is 100% of the heading size with 0.2 em horizontal padding and none
 vertical (`h1 code, … { padding: 0 .2em; font-size: inherit }`). When a code run wraps across
@@ -382,9 +385,10 @@ width (`hr { height: .25em; background-color; border: 0 }`).
 **STYLE-LIST-1.** A list indents its items' content by 32 dp from the list's left edge
 (`ul, ol { padding-left: 2em }`); nested lists indent again from their item's content edge.
 
-**STYLE-LIST-2. Unordered markers** are shapes drawn with clip operations, not glyphs (the Go
-fonts lack ◦ and ▪), centred horizontally 11 dp left of the item's content edge and vertically
-at the first line's baseline minus 0.27 × the item's font size:
+**STYLE-LIST-2. Unordered markers** are shapes drawn with clip operations, not glyphs. The
+shapes are drawn by choice: the Go fonts do have ◦ and ▪. They are centred horizontally 11 dp
+left of the item's content edge and vertically at the first line's baseline minus 0.27 × the
+item's font size:
 
 | Nesting depth (lists around this one) | Marker                                           |
 | ------------------------------------- | ------------------------------------------------ |
@@ -401,6 +405,8 @@ on the first line's baseline. Numbering starts at `Start` and counts up. The num
 depends on the depth (lists around this one, ordered or not): depth 0 decimal (`1.`), depth 1
 lower-roman (`i.`), depth 2 or more lower-alpha (`a.`; after `z.` comes `aa.`)
 (`ol ol, ul ol { list-style-type: lower-roman }`, `ul ul ol, ul ol ol, ol ul ol, ol ol ol { list-style-type: lower-alpha }`).
+A number with no CSS style in that range prints in decimal: 0 or less at any depth (`0.`), and
+roman numerals above 3999 (`4000.`).
 
 **STYLE-LIST-4. Item spacing.** In a tight list, consecutive items are 4 dp apart
 (`li+li { margin-top: .25em }`) and the paragraphs of an item have no margins. In a loose
@@ -437,9 +443,9 @@ browser's default for `th`, which github-markdown-css does not override.
 natural width: the widest of its cells laid out on one line, plus 26 dp padding and 1 dp of
 border. If the sum of N fits in W, each column is N wide and the table is that sum wide,
 left-aligned (`table { width: max-content; max-width: 100% }`). Otherwise each column is
-max(64 dp, N × W ÷ ΣN) wide and cell text wraps. If the 64 dp minimums still exceed W, the
-table is clipped at the content's right edge. GitHub scrolls a too-wide table sideways;
-md-viewer has no horizontal scrolling.
+max(64 dp, ⌊N × W ÷ ΣN⌋) wide, in whole dp, and cell text wraps. "Fits" means ΣN ≤ W. If the
+64 dp minimums still exceed W, the table is clipped at the content's right edge. GitHub scrolls a
+too-wide table sideways; md-viewer has no horizontal scrolling.
 
 **STYLE-TABLE-6.** A row's height is its tallest cell. Cell text is vertically aligned to the
 top of the cell.
