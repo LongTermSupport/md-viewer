@@ -35,6 +35,13 @@ func TestResolveLink(t *testing.T) {
 		{"ftp", "ftp://e.org/f", Target{Refused, "ftp://e.org/f", "ftp://e.org/f"}},
 		{"bad escape", "%zz", Target{Refused, "%zz", "%zz"}},
 		{"bad host", "http://[::1", Target{Refused, "http://[::1", "http://[::1"}},
+		// The entity is resolved before the scheme is read, so it cannot hide javascript (P6).
+		{"entity-built scheme", "javascript&colon;alert(1)", Target{Refused, "javascript:alert(1)", "javascript:alert(1)"}},
+		{"file URL with localhost", "file://localhost/x", Target{LocalFile, "/x", "file://localhost/x"}},
+		// No path part: the document's directory, as an empty destination (DOC-5, P8).
+		{"query alone", "?q", Target{LocalFile, "/doc", "?q"}},
+		{"file URL percent escape", "file:///x%20y", Target{LocalFile, "/x y", "file:///x%20y"}},
+		{"Windows path", "C:\\x.md", Target{Refused, "C:\\x.md", "C:\\x.md"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
