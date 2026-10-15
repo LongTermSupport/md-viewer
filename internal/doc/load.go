@@ -17,11 +17,14 @@ const MaxFileSize = 64 << 20
 // nulByte is the byte that makes a file binary rather than text (CLI-8).
 const nulByte = 0
 
+// errNotRegular is the reason for a path that is neither a regular file nor a directory (CLI-8).
+var errNotRegular = errors.New("not a regular file")
+
 // LoadStats are the two timings of Load, for --time (SPEED-2, DOC-13). Read covers the stat,
 // the read and the NUL check; Parse covers Parse.
 type LoadStats struct{ Read, Parse time.Duration }
 
-// ReadError is a file that cannot be stat'ed or read (CLI-8). Path is as passed to Load. Err is
+// ReadError is a file that cannot be stat'ed or read, or is not a regular file (CLI-8). Path is as passed to Load. Err is
 // the operating system's error under the *fs.PathError.
 type ReadError struct {
 	Path string
@@ -54,7 +57,7 @@ type BinaryError struct{ Path string }
 func (e *BinaryError) Error() string { return e.Path + " contains a NUL byte" }
 
 // Load reads and parses the file at path (DOC-13). It applies CLI-8's checks in order: stat,
-// directory, size, read, NUL byte. The errors of those checks are the typed errors above, as
+// directory, regular file, size, read, NUL byte. The errors of those checks are the typed errors above, as
 // pointers. now is called three times on success: before the stat, after the NUL check, and
 // after Parse. Document.Name is the base name of path and Document.Dir the absolute directory.
 func Load(path string, now func() time.Time) (*Document, LoadStats, error) {
@@ -66,12 +69,23 @@ func Load(path string, now func() time.Time) (*Document, LoadStats, error) {
 	if info.IsDir() {
 		return nil, LoadStats{}, &DirectoryError{Path: path}
 	}
+	// A device, FIFO or socket is never opened: reading it could block or never end (CLI-8).
+	if !info.Mode().IsRegular() {
+		return nil, LoadStats{}, readError(path, errNotRegular)
+	}
 	if info.Size() > MaxFileSize {
 		return nil, LoadStats{}, &TooLargeError{Path: path, Size: info.Size()}
 	}
-	src, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, LoadStats{}, readError(path, err)
+	}
+	src, err := readCapped(f, path)
+	if cerr := f.Close(); err == nil && cerr != nil {
+		err = readError(path, cerr)
+	}
+	if err != nil {
+		return nil, LoadStats{}, err
 	}
 	if bytes.IndexByte(src, nulByte) >= 0 {
 		return nil, LoadStats{}, &BinaryError{Path: path}
@@ -90,12 +104,16 @@ func Load(path string, now func() time.Time) (*Document, LoadStats, error) {
 	return d, LoadStats{Read: t1.Sub(t0), Parse: t2.Sub(t1)}, nil
 }
 
-// readCapped is a stub for the red run: it reads at most MaxFileSize bytes and does not detect
-// the overflow.
+// readCapped reads the file at path from r, at most MaxFileSize bytes (CLI-8). It reads one byte
+// more than the limit, so a file that grew after its stat is refused too: the TooLargeError
+// gives the bytes read.
 func readCapped(r io.Reader, path string) ([]byte, error) {
-	src, err := io.ReadAll(io.LimitReader(r, MaxFileSize))
+	src, err := io.ReadAll(io.LimitReader(r, MaxFileSize+1))
 	if err != nil {
 		return nil, readError(path, err)
+	}
+	if len(src) > MaxFileSize {
+		return nil, &TooLargeError{Path: path, Size: int64(len(src))}
 	}
 	return src, nil
 }

@@ -80,6 +80,24 @@ func TestLoadErrors(t *testing.T) {
 		}
 	})
 
+	// /dev/zero is never read to the end: Load refuses it on its Stat (CLI-8).
+	t.Run("not a regular file", func(t *testing.T) {
+		d, _, err := Load("/dev/zero", clock.Now)
+		var re *ReadError
+		if !errors.As(err, &re) {
+			t.Fatalf("Load(%q) error = %v, want a *ReadError", "/dev/zero", err)
+		}
+		if d != nil {
+			t.Fatalf("Load(%q) document = %v, want nil", "/dev/zero", d)
+		}
+		if re.Path != "/dev/zero" {
+			t.Errorf("ReadError.Path = %q, want %q", re.Path, "/dev/zero")
+		}
+		if re.Err.Error() != "not a regular file" {
+			t.Errorf("ReadError.Err = %q, want %q", re.Err.Error(), "not a regular file")
+		}
+	})
+
 	t.Run("too large", func(t *testing.T) {
 		p := filepath.Join(dir, "big.md")
 		writeTestFile(t, p, "")

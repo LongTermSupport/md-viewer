@@ -129,6 +129,11 @@ func TestPrepareFileErrors(t *testing.T) {
 			stderr: "md-viewer: cannot read " + tmp + ": is a directory\n",
 		},
 		{
+			name:   "not a regular file",
+			path:   "/dev/zero",
+			stderr: "md-viewer: cannot read /dev/zero: not a regular file\n",
+		},
+		{
 			name:   "too large",
 			path:   big,
 			stderr: "md-viewer: " + big + " is too large: 67108865 bytes, the limit is 67108864\n",
