@@ -112,7 +112,7 @@ type Target struct {
 }
 
 func Parse(src []byte, dir string) (*Document, error) // DOC-1..12, DOC-14
-func ResolveLink(dir, dest string) Target            // DOC-5
+func ResolveLink(dir, dest string) Target            // DOC-5; dest as written: escapes and references are resolved first
 func Load(path string, now func() time.Time) (*Document, LoadStats, error) // DOC-13; sets Name and Dir
 type LoadStats struct{ Read, Parse time.Duration }   // for --time (SPEED-2)
 
@@ -123,6 +123,9 @@ type DirectoryError struct{ Path string }
 type TooLargeError struct{ Path string; Size int64 }
 type BinaryError   struct{ Path string }
 const MaxFileSize = 64 << 20
+
+// The error types are returned as pointers (*ReadError and so on). Their Error texts are for
+// developers; the CLI-8 wording is written by internal/app (P11).
 ```
 
 `Load` takes the clock as a parameter, so tests
@@ -147,6 +150,8 @@ Conversion rules:
   `Table`, `TableHeader`, `TableRow`, `TableCell`, `Strikethrough`, `TaskCheckBox`
   (`IsChecked`), with alignment from `Table.Alignments` (`AlignLeft`, `AlignRight`,
   `AlignCenter`, `AlignNone`).
+- `ast.String` is created only by the typographer extension, which is not enabled, so no GFM
+  input reaches it (P19). The converter keeps its case; the kind-coverage test does not require it.
 
 ### internal/render
 
@@ -283,6 +288,16 @@ type Timings struct{ Read, Parse, Fonts, FirstFrame time.Duration }
 func (t Timings) Line() string // SPEED-2, byte for byte
 ```
 
+**M2 notes on `Prepare`.** `Clock` and `SystemClock` live in `prepare.go`; `timing.go` holds
+`Timings` from M10. `Prepare` handles the usage errors (stderr, `ExitUsage`) and `--help` and
+`--version` (stdout, `ExitOK`), so `main` only calls it (P16). A file that loads gives
+`OpenWindow` true and `ExitOK` (P14). A file error prints its CLI-8 line and gives `ExitFailure`;
+any other load error prints `md-viewer: ` + the error (P10, P11). If a write to stdout or stderr
+fails, `Prepare` returns `ExitFailure`, and when stdout failed it also writes `md-viewer: ` + the
+error to stderr, best effort (P12). Until M10, a file that loads makes `main` print
+`md-viewer: not implemented yet` to stderr and exit 1, after any DOC-9 line; M10 removes that
+line (P13).
+
 **Input routing in `Viewer.Frame`.** Key events are read with `gtx.Event(key.Filter{Name: …, Required: …, Optional: …})` for each key in the action table (a filter with a nil `Focus`
 matches whatever has focus). Wheel events are taken by a full-window input area added *after*
 the list, so it is on top: inside a `pointer.PassOp` (so presses still reach the scrollbar and
@@ -361,7 +376,7 @@ relations (taller, narrower, inside) so a Gio upgrade breaks fewer tests.
 
 | File               | What                                                                                                                                                                                                |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `elements.md`      | every supported element once (committed with the plan); the smoke run's input                                                                                                                       |
+| `elements.md`      | every supported element once, including a linked image and a reference-style link (committed with the plan); the smoke run's input                                                                                                                       |
 | `large.md`         | `elements.md` repeated 100 times, separated by a blank line; for benchmarks and `--time`; `TestLargeFixtureIsCurrent` fails if it is not exactly that, and rewrites it when `MDV_UPDATE_FIXTURES=1` |
 | `img/red-4x3.png`  | a 4 × 3 PNG, every pixel `#ff0000`                                                                                                                                                                  |
 | `img/blue-8x8.jpg` | an 8 × 8 JPEG, every pixel near `#0000ff`, quality 90                                                                                                                                               |

@@ -319,6 +319,7 @@ on this file in this milestone.
   call gives `Name: "elements.md"`, an absolute `Dir`, and `LoadStats` of whole milliseconds.
 - `TestPrepareFileErrors` (`internal/app`): CLI-8's four messages, byte for byte, exit 1.
 - `TestPrepareHTMLLine`: a file with HTML prints DOC-9's line to stderr.
+- `TestPrepareArgs` (`internal/app`): help, version and usage output, which move into `Prepare`.
 
 **Verification:** the standard checks.
 
