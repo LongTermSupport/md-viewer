@@ -136,11 +136,14 @@ Conversion rules:
   `md.Parser().Parse(text.NewReader(src))`.
 - Text is taken with `(*ast.Text).Value(src)`, `(*ast.String).Value`, segment `Value(src)` and
   `Lines()`. The deprecated `Node.Text(src)` is never used (staticcheck SA1019 fails it).
+  Text runs outside code resolve backslash escapes and references one at a time with goldmark's
+  `util.UnescapePunctuations`, `ResolveNumericReferences` and `ResolveEntityNames` (DOC-3), so
+  `\&amp;` stays `&amp;`; `CodeSpan` text is raw.
 - Node kinds handled: `ast.Document`, `Heading`, `Paragraph`, `TextBlock`, `CodeBlock`,
   `FencedCodeBlock`, `Blockquote`, `List`, `ListItem`, `ThematicBreak`, `HTMLBlock`, `Text`,
   `String`, `CodeSpan`, `Emphasis` (`Level` 1 is Emphasis, 2 is Strong), `Link`, `AutoLink`
   (`URL(src)`, `Label(src)`, `AutoLinkType`), `Image`, `RawHTML`, `LinkReferenceDefinition`
-  is resolved by goldmark and never appears; from `github.com/yuin/goldmark/extension/ast`:
+  (a node goldmark inserts; it produces no block, DOC-2); from `github.com/yuin/goldmark/extension/ast`:
   `Table`, `TableHeader`, `TableRow`, `TableCell`, `Strikethrough`, `TaskCheckBox`
   (`IsChecked`), with alignment from `Table.Alignments` (`AlignLeft`, `AlignRight`,
   `AlignCenter`, `AlignNone`).
