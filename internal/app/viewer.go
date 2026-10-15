@@ -1,10 +1,15 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"image"
 	"io"
+	"io/fs"
 	"math"
+	"os"
+	"sync"
 
 	"gioui.org/io/event"
 	"gioui.org/io/key"
@@ -14,7 +19,16 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
+	"github.com/LongTermSupport/md-viewer/internal/doc"
 	"github.com/LongTermSupport/md-viewer/internal/render"
+)
+
+// Messages of the link actions. Each ends with a newline (LINK-1, LINK-2).
+const (
+	msgLinkNotFound   = progName + ": link target not found: %s\n"
+	msgLinkFragment   = progName + ": in-page links are not followed: %s\n"
+	msgLinkRefused    = progName + ": link not opened: %s: only http, https, mailto and local files are allowed\n"
+	msgLinkOpenFailed = progName + ": cannot open link: %s: %s\n"
 )
 
 // Distances of the keys, in dp at the zoom (SCROLL-2). A line is lineStep. A page is the
@@ -41,6 +55,14 @@ type Viewer struct {
 	zoom     Zoom
 	wheelAcc float32 // the Ctrl+wheel distance not yet zoomed by, in px (ZOOM-4)
 	keys     []event.Filter
+	opener   Opener
+	stderr   io.Writer
+	spawn    func(func())
+
+	// asyncMu guards asyncErr, the error of a write made by a spawned function, which the next
+	// frame returns.
+	asyncMu  sync.Mutex
+	asyncErr error
 }
 
 // NewViewer makes the viewer of v, painted in p, whose links open with o and whose diagnostics go
@@ -56,10 +78,13 @@ func newViewer(v *render.View, p render.Palette, o Opener, stderr io.Writer, spa
 	th := material.NewTheme()
 	th.Palette.Fg = p.Fg
 	return &Viewer{
-		view:  v,
-		theme: th,
-		list:  widget.List{List: layout.List{Axis: layout.Vertical}},
-		keys:  keyFilters(),
+		view:   v,
+		theme:  th,
+		list:   widget.List{List: layout.List{Axis: layout.Vertical}},
+		keys:   keyFilters(),
+		opener: o,
+		stderr: stderr,
+		spawn:  spawn,
 	}
 }
 
@@ -71,17 +96,95 @@ func goSpawn(f func()) {
 // Frame handles the input of the frame, lays out the document, and reports quit and the error
 // that ends the window (CLI-6). The input comes first, so the layout shows its result.
 func (vw *Viewer) Frame(gtx layout.Context) (bool, error) {
+	if err := vw.takeAsyncErr(); err != nil {
+		return false, err
+	}
 	quit, err := vw.keyInput(gtx)
 	if err != nil {
 		return false, err
 	}
 	vw.wheelInput(gtx)
+	linkErr := vw.linkInput(gtx)
 	material.List(vw.theme, &vw.list).Layout(gtx, vw.view.Len(), vw.element)
 	vw.wheelArea(gtx)
-	if err := vw.view.Err(); err != nil {
-		return quit, err
+	return quit, errors.Join(linkErr, vw.view.Err())
+}
+
+// linkInput acts on the link clicked since the last frame, if any (LINK-1). The opener itself
+// runs in a spawned function, so the frame never waits for it.
+func (vw *Viewer) linkInput(gtx layout.Context) error {
+	target, ok := vw.view.Clicked(gtx)
+	if !ok {
+		return nil
 	}
-	return quit, nil
+	return vw.followLink(target)
+}
+
+// followLink does what LINK-1 says for a clicked target. A message that cannot be written is
+// returned.
+func (vw *Viewer) followLink(t doc.Target) error {
+	switch t.Kind {
+	case doc.External:
+		vw.open(t)
+		return nil
+	case doc.LocalFile:
+		_, err := os.Stat(t.Value)
+		switch {
+		case err == nil:
+			vw.open(t)
+			return nil
+		case errors.Is(err, fs.ErrNotExist):
+			return vw.printf(msgLinkNotFound, t.Value)
+		default:
+			return vw.printf(msgLinkOpenFailed, t.Value, statReason(err))
+		}
+	case doc.Fragment:
+		return vw.printf(msgLinkFragment, t.Dest)
+	case doc.Refused:
+		return vw.printf(msgLinkRefused, t.Dest)
+	default:
+		return fmt.Errorf("app: no action for a link of kind %d", uint8(t.Kind))
+	}
+}
+
+// open runs the opener on t in a spawned function (LINK-2). The opener's error, if any, is
+// printed from that function. A failed write there is kept for the next frame.
+func (vw *Viewer) open(t doc.Target) {
+	vw.spawn(func() {
+		err := vw.opener.Open(context.Background(), t.Value)
+		if err == nil {
+			return
+		}
+		if werr := vw.printf(msgLinkOpenFailed, t.Value, err.Error()); werr != nil {
+			vw.asyncMu.Lock()
+			vw.asyncErr = errors.Join(vw.asyncErr, werr)
+			vw.asyncMu.Unlock()
+		}
+	})
+}
+
+// takeAsyncErr returns the error kept from a spawned function, and clears it.
+func (vw *Viewer) takeAsyncErr() error {
+	vw.asyncMu.Lock()
+	defer vw.asyncMu.Unlock()
+	err := vw.asyncErr
+	vw.asyncErr = nil
+	return err
+}
+
+// printf writes a diagnostic to stderr and returns the write's error.
+func (vw *Viewer) printf(format string, args ...any) error {
+	_, err := fmt.Fprintf(vw.stderr, format, args...)
+	return err
+}
+
+// statReason is the operating-system text of a stat error, without the path it names.
+func statReason(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err.Error()
+	}
+	return err.Error()
 }
 
 // wheelInput applies the vertical wheel events of the frame, in order. Without Ctrl a scroll
