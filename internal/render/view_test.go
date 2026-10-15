@@ -271,7 +271,9 @@ func TestViewLayoutError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := newViewEnvDoc(t, &doc.Document{Blocks: []doc.Block{tt.block}}, Light, metric1)
-			e.view.Layout(e.context(800), 0, nil)
+			if dims := e.view.Layout(e.context(800), 0, nil); dims != (layout.Dimensions{}) {
+				t.Fatalf("failing element is %+v, want Dimensions{}", dims)
+			}
 			if err := e.view.Err(); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Err() = %v, want an error containing %q", err, tt.want)
 			}
@@ -291,7 +293,9 @@ func TestViewLayoutError(t *testing.T) {
 	}
 
 	e = newViewEnvDoc(t, &doc.Document{Blocks: []doc.Block{doc.Paragraph{Runs: []doc.Run{plain("a")}}}}, Light, metric1)
-	e.view.Layout(e.context(800), e.view.Len(), nil)
+	if dims := e.view.Layout(e.context(800), e.view.Len(), nil); dims != (layout.Dimensions{}) {
+		t.Fatalf("element at a bad index is %+v, want Dimensions{}", dims)
+	}
 	if err := e.view.Err(); err == nil || !strings.Contains(err.Error(), "index 1") {
 		t.Fatalf("element 1 of a one-block document: Err() = %v, want an error naming index 1", err)
 	}
@@ -322,33 +326,45 @@ func TestViewNilTrace(t *testing.T) {
 }
 
 // TestViewClicked: a link in the View is clicked as in a flow, and its area is in the element's
-// coordinates, so it starts at the 45 px padding (LINK-1, STYLE-TEXT-3).
+// coordinates: at the 45 px padding in a paragraph, and past the quote's 20 px inset (4 px bar and
+// 16 px padding) in a quote (LINK-1, STYLE-TEXT-3, STYLE-QUOTE-1).
 func TestViewClicked(t *testing.T) {
-	tg := doc.Target{Kind: doc.External, Value: "https://e.org/"}
-	e := newViewEnv(t, "[l](https://e.org/)", Light, metric1)
-	// Frame 1 lays out, which makes the link's gesture. Frame 2 polls before it lays out, as
-	// every frame does, so the gesture takes the events queued after it (TestFlowLinkClick).
-	e.frame(0, 800)
-	if early, polled := e.poll(); polled {
-		t.Fatalf("a poll with no input reported %+v", early)
+	tests := []struct {
+		name, src string
+		x         int
+	}{
+		{"paragraph", "[l](https://e.org/)", 45},
+		{"quote", "> [l](https://e.org/)", 65},
 	}
-	tr := e.frame(0, 800)
-	la := needMarks(t, tr, MarkLinkArea, "LinkArea")[0]
-	if la.Rect.Min.X != 45 {
-		t.Fatalf("link area starts at x=%d, want 45 (the element's padding is in its trace)", la.Rect.Min.X)
-	}
-	e.router.Queue(move(centre(la.Rect)), press(centre(la.Rect)), release(centre(la.Rect)))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := doc.Target{Kind: doc.External, Value: "https://e.org/", Dest: "https://e.org/"}
+			e := newViewEnv(t, tt.src, Light, metric1)
+			// Frame 1 lays out, which makes the link's gesture. Frame 2 polls before it lays out, as
+			// every frame does, so the gesture takes the events queued after it (TestFlowLinkClick).
+			e.frame(0, 800)
+			if early, polled := e.poll(); polled {
+				t.Fatalf("a poll with no input reported %+v", early)
+			}
+			tr := e.frame(0, 800)
+			la := needMarks(t, tr, MarkLinkArea, "LinkArea")[0]
+			if la.Rect.Min.X != tt.x {
+				t.Fatalf("link area starts at x=%d, want %d (the element's padding and any quote inset are in its trace)", la.Rect.Min.X, tt.x)
+			}
+			e.router.Queue(move(centre(la.Rect)), press(centre(la.Rect)), release(centre(la.Rect)))
 
-	got, ok := e.poll()
-	if !ok || got.Kind != tg.Kind || got.Value != tg.Value {
-		t.Fatalf("poll after the click = %+v, %t; want %+v and true", got, ok, tg)
-	}
-	if again, more := e.poll(); more {
-		t.Fatalf("second poll in the same frame reported %+v again", again)
-	}
-	e.frame(0, 800)
-	if later, more := e.poll(); more {
-		t.Fatalf("the poll after that frame reported %+v again", later)
+			got, ok := e.poll()
+			if !ok || got != want {
+				t.Fatalf("poll after the click = %+v, %t; want %+v and true", got, ok, want)
+			}
+			if again, more := e.poll(); more {
+				t.Fatalf("second poll in the same frame reported %+v again", again)
+			}
+			e.frame(0, 800)
+			if later, more := e.poll(); more {
+				t.Fatalf("the poll after that frame reported %+v again", later)
+			}
+		})
 	}
 }
 
@@ -373,6 +389,50 @@ func TestViewElements(t *testing.T) {
 			// Placeholders until M6 to M8: height 0 with their margins.
 		default:
 			t.Fatalf("element %d: no expectation for block %T", i, b)
+		}
+	}
+}
+
+// TestViewTinyWidth: a document with every drawn block kind lays out at widths from negative to
+// narrow, at three metrics, with no panic and no layout error. A width too narrow for any text
+// is a degenerate window, not a reason to fail (WRAP-1, STYLE-CODE-2).
+func TestViewTinyWidth(t *testing.T) {
+	src := strings.Join([]string{
+		"# Heading",
+		"",
+		"A [link](https://e.org/) and `code`.",
+		"",
+		"```",
+		"first",
+		"",
+		"    indented",
+		"last",
+		"```",
+		"",
+		"> ## Quoted heading",
+		">",
+		"> ```",
+		"> quoted code",
+		"> ```",
+		">",
+		"> > nested quote",
+		"",
+		"---",
+		"",
+		"- item",
+	}, "\n")
+	widths := []int{-5, 0, 1, 2, 5, 10, 31, 33, 40, 77}
+	metrics := []unit.Metric{
+		{PxPerDp: 1, PxPerSp: 1},
+		{PxPerDp: 1.5, PxPerSp: 1.5},
+		{PxPerDp: 2.25, PxPerSp: 2.25},
+	}
+	for _, m := range metrics {
+		e := newViewEnv(t, src, Light, m)
+		for _, w := range widths {
+			for i := 0; i < e.view.Len(); i++ {
+				e.layout(i, w)
+			}
 		}
 	}
 }
