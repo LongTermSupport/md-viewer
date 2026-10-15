@@ -118,10 +118,10 @@ type Style uint8
 
 // Style flags (DOC-3). Each is a distinct bit.
 const (
-	Emphasis Style = 0
-	Strong   Style = 0
-	Strike   Style = 0
-	Code     Style = 0
+	Emphasis Style = 1 << iota
+	Strong
+	Strike
+	Code
 )
 
 // Run is a string with a style and an optional link (DOC-3). A BreakRun has no text, style or
