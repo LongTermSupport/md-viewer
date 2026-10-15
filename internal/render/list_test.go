@@ -485,6 +485,9 @@ func TestTaskBoxes(t *testing.T) {
 		if n := len(textMarks(tr, MarkTaskBox, "done")); n != 1 {
 			t.Errorf("%d done boxes, want 1", n)
 		}
+		if n := len(marks(tr, MarkTaskBox)); n != 2 {
+			t.Errorf("%d task box marks, want 2 (the done box and its check)", n)
+		}
 	})
 
 	t.Run("number beside a task", func(t *testing.T) {
