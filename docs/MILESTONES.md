@@ -645,14 +645,15 @@ numbers, and the owner has been told the host measurement is theirs to run (READ
 These were chosen so that work can start; each is a one-line change of spec if the owner
 decides otherwise.
 
-01. **Fonts.** Only the embedded Go fonts are used (STYLE-FONT-1), for start-up speed. Emoji
-    and symbols such as ✅ ⬜ 🔄, common in plan files, show as missing-glyph boxes. The
-    alternatives are system fonts (a font scan at every start; its cost is measured in M11 if
-    wanted) or embedding a monochrome emoji font (a larger binary).
-02. **Dark mode.** Gio v0.10.3 does not report the desktop's colour scheme, so it is `--dark`
-    only. md-viewer could read the XDG desktop portal's `org.freedesktop.appearance`
-    `color-scheme` setting over D-Bus (Gio already depends on `godbus`), at the cost of one
-    D-Bus round trip at start.
+01. **Fonts.** (Awaiting the owner; built to the spec default; seam: `goFaceSources()` and
+    `NewShaper`'s options in `internal/render/fonts.go`.) Only the embedded Go fonts are used
+    (STYLE-FONT-1), for start-up speed. Emoji and symbols such as ✅ ⬜ 🔄, common in plan files,
+    show as missing-glyph boxes. The alternatives are system fonts (a font scan at every start;
+    its cost is measured in M11 if wanted) or embedding a monochrome emoji font (a larger binary).
+02. **Dark mode.** (Awaiting the owner; built to `--dark` only; seam: `app.Prepare` in M10.)
+    Gio v0.10.3 does not report the desktop's colour scheme, so it is `--dark` only. md-viewer
+    could read the XDG desktop portal's `org.freedesktop.appearance` `color-scheme` setting over
+    D-Bus (Gio already depends on `godbus`), at the cost of one D-Bus round trip at start.
 03. **`--time` exits after the first frame**, so it can be scripted and benchmarked. The
     alternative is to print and keep the window open.
 04. **HTML is dropped**, with one stderr line counting it. The alternative is to show HTML
