@@ -130,7 +130,7 @@ func Parse(src []byte, dir string) (*Document, error) // DOC-1..12, DOC-14
 func ResolveLink(dir, dest string) Target            // DOC-5; dest as written: escapes and references are resolved first
 func Load(path string, now func() time.Time) (*Document, LoadStats, error) // DOC-13; sets Name and Dir
 func OpenRegular(path string) (*os.File, fs.FileInfo, error) // CLI-8: Stat, then a non-blocking open checked again; used by Load and render's images
-var ErrDirectory, ErrNotRegular error                       // under the *fs.PathError OpenRegular returns
+var ErrDirectory, ErrNotRegular error                       // the Err of the *fs.PathError that OpenRegular wraps
 type LoadStats struct{ Read, Parse time.Duration }   // for --time (SPEED-2)
 
 // Load errors, each a distinct type so the CLI chooses the message (CLI-8)
