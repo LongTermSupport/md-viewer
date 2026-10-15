@@ -229,8 +229,9 @@ func toAlpha(n int) string {
 
 // ColumnWidths gives each table column's width (STYLE-TABLE-5). When the natural widths sum to
 // at most width, each keeps its width. Otherwise each is floor(N × width ÷ ΣN), and at least
-// minCol. The minimums can push the sum above width; the caller clips that (M7). The input is
-// not modified.
+// minCol. The minimums can push the sum above width; the caller clips that (M7). A negative width
+// fits nothing, so with natural widths summing to 0 there is no share to take and each column is
+// minCol. The input is not modified.
 func ColumnWidths(natural []int, width, minCol int) []int {
 	sum := 0
 	for _, n := range natural {
@@ -242,7 +243,11 @@ func ColumnWidths(natural []int, width, minCol int) []int {
 		return out
 	}
 	for i, n := range natural {
-		out[i] = max(n*width/sum, minCol)
+		share := 0
+		if sum > 0 {
+			share = n * width / sum
+		}
+		out[i] = max(share, minCol)
 	}
 	return out
 }

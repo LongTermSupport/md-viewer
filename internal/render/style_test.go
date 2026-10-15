@@ -290,7 +290,8 @@ func TestOrderedMarker(t *testing.T) {
 }
 
 // TestColumnWidths checks STYLE-TABLE-5: natural widths kept when they fit, scaled when not,
-// the 64 dp minimum, and the empty table. The input is not modified.
+// the 64 dp minimum, zero natural widths, a negative width and the empty table. The input is not
+// modified.
 func TestColumnWidths(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -305,6 +306,9 @@ func TestColumnWidths(t *testing.T) {
 		{name: "minimum applied", natural: []int{700, 100}, width: 400, want: []int{350, 64}},
 		{name: "minimums exceed width", natural: []int{100, 100, 100, 100, 100, 100, 100}, width: 400, want: []int{64, 64, 64, 64, 64, 64, 64}},
 		{name: "empty", natural: []int{}, width: 400, want: []int{}},
+		{name: "zero sum fits (pins existing)", natural: []int{0, 0}, width: 400, want: []int{0, 0}},
+		{name: "zero sum at zero width fits (pins existing)", natural: []int{0}, width: 0, want: []int{0}},
+		{name: "negative width, zero sum: minimum applied", natural: []int{0}, width: -1, want: []int{64}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
