@@ -340,8 +340,8 @@ func TestViewClicked(t *testing.T) {
 	e.router.Queue(move(centre(la.Rect)), press(centre(la.Rect)), release(centre(la.Rect)))
 
 	got, ok := e.poll()
-	if !ok || got != tg {
-		t.Fatalf("poll after the click = %+v, %t; want the link's target and true", got, ok)
+	if !ok || got.Kind != tg.Kind || got.Value != tg.Value {
+		t.Fatalf("poll after the click = %+v, %t; want %+v and true", got, ok, tg)
 	}
 	if again, more := e.poll(); more {
 		t.Fatalf("second poll in the same frame reported %+v again", again)
