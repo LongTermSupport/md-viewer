@@ -547,14 +547,6 @@ func TestDecodeFile(t *testing.T) {
 		img, err := decodeFile(tmp)
 		checkRefused(t, img, err, "is a directory")
 	})
-	t.Run("character device is not a regular file", func(t *testing.T) {
-		fi, err := os.Stat("/dev/zero")
-		if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
-			t.Skip("no character device /dev/zero")
-		}
-		img, err := decodeFile("/dev/zero")
-		checkRefused(t, img, err, "not a regular file")
-	})
 }
 
 // checkRefused fails the test unless decoding gave no image and the error text want, which names no

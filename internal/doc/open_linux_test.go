@@ -13,37 +13,39 @@ import (
 	"time"
 )
 
-// openBounded runs call, which opens fifo, in a goroutine, and returns its result. A call that has
-// not returned after a minute is a failure, and only a failure reaches the bound: the test then
-// opens fifo for reading and writing, which does not block on Linux and so releases a blocked open,
-// waits for call to return, and fails. On success the result arrives at once.
+// openBounded is runBounded for a call that returns the file it opened.
 func openBounded(t *testing.T, fifo string, call func() (*os.File, error)) (*os.File, error) {
 	t.Helper()
-	type result struct {
-		f   *os.File
-		err error
-	}
-	done := make(chan result, 1)
+	var f *os.File
+	var err error
+	runBounded(t, fifo, func() { f, err = call() })
+	return f, err
+}
+
+// runBounded runs call, which opens fifo, in a goroutine and waits for it. Only a call that has not
+// returned after a minute reaches the bound, and that is a failure: the test then opens fifo for
+// reading and writing, which does not block on Linux and so releases the blocked open, waits for
+// call to return, and fails. On success call's result is set before the test goes on, and the
+// timer is not consulted. If the release fails, the call stays blocked until the test binary exits.
+func runBounded(t *testing.T, fifo string, call func()) {
+	t.Helper()
+	done := make(chan struct{})
 	go func() {
-		f, err := call()
-		done <- result{f, err}
+		defer close(done)
+		call()
 	}()
 	select {
-	case r := <-done:
-		return r.f, r.err
+	case <-done:
+		return
 	case <-time.After(time.Minute):
 	}
 	release, err := os.OpenFile(fifo, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatalf("open %s to release the blocked call: %v", fifo, err)
 	}
-	r := <-done
-	if r.f != nil {
-		closeOpened(t, r.f)
-	}
+	<-done
 	closeOpened(t, release)
 	t.Fatalf("a call blocked on the FIFO %s with no writer", fifo)
-	return nil, nil
 }
 
 // mkfifo makes a FIFO at path.

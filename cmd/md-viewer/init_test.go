@@ -356,6 +356,78 @@ func windowCreations(root string) ([]string, error) {
 	return found, err
 }
 
+// openCalls lists "file: os.Name" for each call in a non-test .go file under root to os.Open,
+// os.OpenFile, os.ReadFile or os.Create, once per call. os is the local name of "os" in that file.
+func openCalls(root string) ([]string, error) {
+	var found []string
+	err := goFiles(root, func(rel string, f *ast.File) error {
+		local := ""
+		for _, imp := range f.Imports {
+			if imp.Path.Value != `"os"` {
+				continue
+			}
+			local = "os"
+			if imp.Name != nil {
+				local = imp.Name.Name
+			}
+		}
+		if local == "" {
+			return nil
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			x, ok := sel.X.(*ast.Ident)
+			if !ok || x.Name != local {
+				return true
+			}
+			switch sel.Sel.Name {
+			case "Open", "OpenFile", "ReadFile", "Create":
+				found = append(found, rel+": os."+sel.Sel.Name)
+			}
+			return true
+		})
+		return nil
+	})
+	return found, err
+}
+
+// TestFileOpens (CLI-8, M12): the only call in non-test code that opens a file is the os.OpenFile in
+// internal/doc/open.go, which opens without blocking and judges the open file. Every other reader
+// goes through doc.OpenRegular, so no open can block on a FIFO that a path was swapped for. The
+// fixture row shows the check finds an open made through an import alias.
+func TestFileOpens(t *testing.T) {
+	t.Run("fixture with two opens", func(t *testing.T) {
+		dir := writeTree(t, map[string]string{
+			"x.go":      "package x\n\nimport o \"os\"\n\nfunc f() {\n\to.Open(\"a\")\n\to.ReadFile(\"b\")\n}\n",
+			"x_test.go": "package x\n\nimport \"os\"\n\nfunc g() { os.Open(\"c\") }\n",
+		})
+		got, err := openCalls(dir)
+		if err != nil {
+			t.Fatalf("openCalls: %v", err)
+		}
+		if want := []string{"x.go: os.Open", "x.go: os.ReadFile"}; !slices.Equal(got, want) {
+			t.Errorf("openCalls = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("module", func(t *testing.T) {
+		got, err := openCalls(moduleRoot(t))
+		if err != nil {
+			t.Fatalf("openCalls: %v", err)
+		}
+		if want := []string{"internal/doc/open.go: os.OpenFile"}; !slices.Equal(got, want) {
+			t.Errorf("openCalls = %q, want %q", got, want)
+		}
+	})
+}
+
 // writeTree writes files, a map of relative path to content, under a new temporary directory,
 // and returns that directory.
 func writeTree(t *testing.T, files map[string]string) string {

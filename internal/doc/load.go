@@ -59,29 +59,18 @@ func (e *BinaryError) Error() string { return e.Path + " contains a NUL byte" }
 // after Parse. Document.Name is the base name of path and Document.Dir the absolute directory.
 func Load(path string, now func() time.Time) (*Document, LoadStats, error) {
 	t0 := now()
-	info, err := os.Stat(path)
+	f, info, err := OpenRegular(path)
 	if err != nil {
+		if errors.Is(err, ErrDirectory) {
+			return nil, LoadStats{}, &DirectoryError{Path: path}
+		}
 		return nil, LoadStats{}, readError(path, err)
-	}
-	if info.IsDir() {
-		return nil, LoadStats{}, &DirectoryError{Path: path}
-	}
-	// A device, FIFO or socket is never opened: reading it could block or never end (CLI-8).
-	if !info.Mode().IsRegular() {
-		return nil, LoadStats{}, readError(path, ErrNotRegular)
 	}
 	if info.Size() > MaxFileSize {
-		return nil, LoadStats{}, &TooLargeError{Path: path, Size: info.Size()}
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, LoadStats{}, readError(path, err)
+		return nil, LoadStats{}, closeAfter(f, path, &TooLargeError{Path: path, Size: info.Size()})
 	}
 	src, err := readCapped(f, path)
-	if cerr := f.Close(); err == nil && cerr != nil {
-		err = readError(path, cerr)
-	}
-	if err != nil {
+	if err = closeAfter(f, path, err); err != nil {
 		return nil, LoadStats{}, err
 	}
 	if bytes.IndexByte(src, nulByte) >= 0 {
@@ -113,6 +102,15 @@ func readCapped(r io.Reader, path string) ([]byte, error) {
 		return nil, &TooLargeError{Path: path, Size: int64(len(src))}
 	}
 	return src, nil
+}
+
+// closeAfter closes f, which was opened for path, and returns err, or the close error when err is
+// nil.
+func closeAfter(f *os.File, path string, err error) error {
+	if cerr := f.Close(); err == nil && cerr != nil {
+		return readError(path, cerr)
+	}
+	return err
 }
 
 // readError wraps an error from the operating system about path as a ReadError. The error

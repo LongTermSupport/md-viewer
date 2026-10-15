@@ -408,22 +408,18 @@ func layoutPlaceholder(gtx layout.Context, ctx blockCtx, img doc.Image, tr *Trac
 	return r, nil
 }
 
-// openRegular opens the regular file at path. A directory and a non-regular file are judged by Stat
-// and never opened, so a FIFO cannot block the caller (CLI-8). For a file that is not opened, the
-// REASON is returned instead, and it names no path (STYLE-IMG-3).
+// openRegular opens the regular file at path through doc.OpenRegular (CLI-8): Stat first, so a
+// directory or a non-regular file is refused without being opened, then a non-blocking open that is
+// judged again, so a path replaced after its Stat is refused and never read. The REASON of a refused
+// file is returned instead of an error, and it names no path (STYLE-IMG-3).
 func openRegular(path string) (*os.File, string) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil, pathReason(err)
-	}
+	f, _, err := doc.OpenRegular(path)
 	switch {
-	case fi.IsDir():
+	case errors.Is(err, doc.ErrDirectory):
 		return nil, reasonDirectory
-	case !fi.Mode().IsRegular():
+	case errors.Is(err, doc.ErrNotRegular):
 		return nil, reasonNotFile
-	}
-	f, err := os.Open(path)
-	if err != nil {
+	case err != nil:
 		return nil, pathReason(err)
 	}
 	return f, ""
