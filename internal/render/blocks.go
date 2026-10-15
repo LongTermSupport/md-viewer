@@ -111,8 +111,10 @@ func layoutBlock(gtx layout.Context, ctx blockCtx, b doc.Block, tr *Trace) (layo
 		return layoutRule(gtx, ctx, tr)
 	case doc.List:
 		return layoutList(gtx, ctx, b, tr)
-	case doc.Table, doc.Image:
-		// Placeholders until their milestones: height 0, with the margins the caller gives.
+	case doc.Table:
+		return layoutTable(gtx, ctx, b, tr)
+	case doc.Image:
+		// A placeholder until M8: height 0, with the margins the caller gives.
 		return layout.Dimensions{Size: image.Pt(width, 0)}, nil
 	default:
 		return layout.Dimensions{}, fmt.Errorf("render: no layout for block %T", b)

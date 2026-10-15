@@ -152,9 +152,9 @@ func numberNamed(t *testing.T, tr *Trace, s string) Mark {
 }
 
 // TestLeadsWithText: a block leads with a text line when its first line is text, found through
-// quotes and nested lists. An empty item is an empty line of text. A block whose first line is
-// not text (a rule, a table, an image, an empty quote or list) does not, and a block with no
-// layout is an error naming it (STYLE-LIST-2).
+// quotes and nested lists. An empty item is an empty line of text, and a table's first line is its
+// header row's. A block whose first line is not text (a rule, an image, an empty quote or list)
+// does not, and a block with no layout is an error naming it (STYLE-LIST-2).
 func TestLeadsWithText(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -167,7 +167,7 @@ func TestLeadsWithText(t *testing.T) {
 		{"quote of a paragraph", doc.Quote{Blocks: []doc.Block{doc.Paragraph{}}}, true},
 		{"list whose first item is empty", doc.List{Items: []doc.Item{{}}}, true},
 		{"rule", doc.Rule{}, false},
-		{"table", doc.Table{}, false},
+		{"table", doc.Table{Align: []doc.Align{doc.AlignNone}, Header: []doc.Cell{{}}}, true},
 		{"image", doc.Image{}, false},
 		{"empty quote", doc.Quote{}, false},
 		{"quote of a rule", doc.Quote{Blocks: []doc.Block{doc.Rule{}}}, false},
@@ -201,6 +201,32 @@ func TestLeadsWithText(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error %q does not name %s", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+// TestListError: an item whose task state or block cannot be drawn is a layout error that names
+// it, and the element is Dimensions{} (STYLE-LIST-2, STYLE-LIST-5). This pins M6's behaviour.
+func TestListError(t *testing.T) {
+	tests := []struct {
+		name string
+		item doc.Item
+		want string
+	}{
+		{"task state 9", doc.Item{Task: 9, Blocks: []doc.Block{doc.Paragraph{}}}, "task state 9"},
+		{"heading level 7", doc.Item{Blocks: []doc.Block{doc.Heading{Level: 7}}}, "level 7"},
+		{"quote holding heading level 0", doc.Item{Blocks: []doc.Block{doc.Quote{Blocks: []doc.Block{doc.Heading{Level: 0}}}}}, "level 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			list := doc.List{Tight: true, Start: 1, Items: []doc.Item{tt.item}}
+			e := newViewEnvDoc(t, &doc.Document{Blocks: []doc.Block{list}}, Light, metric1)
+			if dims := e.view.Layout(e.context(800), 0, nil); dims != (layout.Dimensions{}) {
+				t.Fatalf("failing element is %+v, want Dimensions{}", dims)
+			}
+			if err := e.view.Err(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Err() = %v, want an error containing %q", err, tt.want)
 			}
 		})
 	}
@@ -551,6 +577,12 @@ func TestListMarkerBaseline(t *testing.T) {
 		if dims.Size.Y != 114 {
 			t.Errorf("- is %d px tall, want 114", dims.Size.Y)
 		}
+	})
+
+	t.Run("table", func(t *testing.T) {
+		e := newViewEnv(t, "- | a |\n  | - |\n  | b |", Light, metric1)
+		_, tr := e.layout(0, 800)
+		markAt(t, tr, MarkBullet, "disc", image.Rect(64, 63, 69, 68))
 	})
 
 	t.Run("rule first", func(t *testing.T) {

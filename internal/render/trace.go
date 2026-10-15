@@ -61,6 +61,25 @@ func (t *Trace) add(m Mark) {
 	t.Marks = append(t.Marks, m)
 }
 
+// count is the number of marks recorded so far. A nil Trace has none.
+func (t *Trace) count() int {
+	if t == nil {
+		return 0
+	}
+	return len(t.Marks)
+}
+
+// shiftFrom moves the marks from index i on by d, so that a line laid out in a macro and then
+// moved takes its marks with it (STYLE-TABLE-4). A nil trace has none.
+func (t *Trace) shiftFrom(i int, d image.Point) {
+	if t == nil {
+		return
+	}
+	for j := i; j < len(t.Marks); j++ {
+		t.Marks[j].Rect = t.Marks[j].Rect.Add(d)
+	}
+}
+
 // push moves the origin by d, so that marks recorded inside a nested layout are in the outer
 // trace's coordinates, and returns the previous origin for pop. A nil Trace has no origin.
 func (t *Trace) push(d image.Point) image.Point {

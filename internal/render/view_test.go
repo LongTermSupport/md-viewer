@@ -225,13 +225,12 @@ func TestNoMaxWidth(t *testing.T) {
 	}
 }
 
-// TestViewPlaceholders: a table and an image are height 0 until M7 and M8, with their margins
-// (DOC-LAYOUT-4) and no marks.
+// TestViewPlaceholders: an image is height 0 until M8, with its margins (DOC-LAYOUT-4) and no
+// marks.
 func TestViewPlaceholders(t *testing.T) {
 	tests := []struct {
 		name, block string
 	}{
-		{"table", "| x |\n| - |\n| y |"},
 		{"image", "![alt](i.png)"},
 	}
 	for _, tt := range tests {
@@ -335,6 +334,7 @@ func TestViewClicked(t *testing.T) {
 		{"paragraph", "[l](https://e.org/)", 45},
 		{"quote", "> [l](https://e.org/)", 65},
 		{"list", "- [l](https://e.org/)", 77},
+		{"table", "| h |\n| - |\n| [l](https://e.org/) |", 59},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -368,6 +368,28 @@ func TestViewClicked(t *testing.T) {
 	}
 }
 
+// TestViewClickedClipped: a link in a table column that the table clips is not clickable: a press
+// and release at the centre of its area report no click. Three columns of at least 64 dp each in a
+// 100 px window put the third column past the window's edge (STYLE-TABLE-6, LINK-1). This pins the
+// current behaviour, which the table's clip gives to a link's input as well as to its drawing.
+func TestViewClickedClipped(t *testing.T) {
+	e := newViewEnv(t, "| a | b | c |\n| - | - | - |\n| 1 | 2 | [l](https://e.org/) |", Light, metric1)
+	// Frame 1 lays out, which makes the link's gesture. Frame 2 polls before it lays out (TestViewClicked).
+	e.frame(0, 100)
+	if early, polled := e.poll(); polled {
+		t.Fatalf("a poll with no input reported %+v", early)
+	}
+	tr := e.frame(0, 100)
+	la := needMarks(t, tr, MarkLinkArea, "LinkArea")[0]
+	if la.Rect.Min.X < 100 {
+		t.Fatalf("link area starts at x=%d, want past the window's 100 px, so that its column is clipped", la.Rect.Min.X)
+	}
+	e.router.Queue(move(centre(la.Rect)), press(centre(la.Rect)), release(centre(la.Rect)))
+	if got, ok := e.poll(); ok {
+		t.Fatalf("a click on a link in a clipped column reported %+v", got)
+	}
+}
+
 // TestViewElements: every element of elements.md lays out 800 px wide with no error, and each
 // block kind that is drawn so far has its marks: text in headings, paragraphs and quotes, the
 // background of a code block and the bar of a rule.
@@ -390,8 +412,15 @@ func TestViewElements(t *testing.T) {
 			if got, want := len(markerMarks(tr)), countItems(t, b); got != want {
 				t.Fatalf("element %d: %d list markers, want %d (one per item)", i, got, want)
 			}
-		case doc.Table, doc.Image:
-			// Placeholders until M7 and M8: height 0 with their margins.
+		case doc.Table:
+			// Lines: m + 1 vertical and n + 2 horizontal (STYLE-TABLE-1). Fills: n + 1 (STYLE-TABLE-2, STYLE-TABLE-3).
+			if got, want := len(vlines(tr))+len(hlines(tr)), (len(b.Align)+1)+(len(b.Rows)+2); got != want {
+				t.Fatalf("element %d: %d table lines, want %d", i, got, want)
+			}
+			needCount(t, "row fills", fills(tr), len(b.Rows)+1)
+			needMarks(t, tr, MarkGlyphs, "Glyphs")
+		case doc.Image:
+			// A placeholder until M8: height 0 with its margins.
 		default:
 			t.Fatalf("element %d: no expectation for block %T", i, b)
 		}

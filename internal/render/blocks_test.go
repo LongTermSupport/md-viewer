@@ -361,6 +361,7 @@ func TestBlockBaseline(t *testing.T) {
 		{name: "code block", src: "```\nx\n```", height: 52, first: 31},
 		{name: "quote of a paragraph", src: "> a", first: 18},
 		{name: "quote of a heading", src: "> # h\n>\n> b", height: 91, first: 32},
+		{name: "table", src: "| a |\n| - |", height: 38, first: 25},
 	}
 	ctx := newBlockCtx(t, Light)
 	for _, tt := range tests {

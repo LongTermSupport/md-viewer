@@ -26,6 +26,39 @@ func TestTraceAdd(t *testing.T) {
 	}
 }
 
+// TestTraceShiftFrom: shiftFrom moves the marks from an index on by a offset and leaves the marks
+// before it, as a centred line's marks move with the line (STYLE-TABLE-4). A nil trace has no
+// marks: shiftFrom does nothing and count is 0.
+func TestTraceShiftFrom(t *testing.T) {
+	var tr Trace
+	for i := 0; i < 3; i++ {
+		tr.add(Mark{Kind: MarkGlyphs, Rect: image.Rect(i*10, 0, i*10+5, 5)})
+	}
+	tr.shiftFrom(1, image.Pt(5, 0))
+	want := []image.Rectangle{
+		image.Rect(0, 0, 5, 5),
+		image.Rect(15, 0, 20, 5),
+		image.Rect(25, 0, 30, 5),
+	}
+	if len(tr.Marks) != len(want) {
+		t.Fatalf("%d marks, want %d", len(tr.Marks), len(want))
+	}
+	for i, r := range want {
+		if got := tr.Marks[i].Rect; got != r {
+			t.Fatalf("mark %d at %v, want %v", i, got, r)
+		}
+	}
+	if n := tr.count(); n != 3 {
+		t.Fatalf("count() = %d, want 3", n)
+	}
+
+	var nilTrace *Trace
+	nilTrace.shiftFrom(0, image.Pt(1, 1))
+	if n := nilTrace.count(); n != 0 {
+		t.Fatalf("nil trace: count() = %d, want 0", n)
+	}
+}
+
 // TestTraceShift: marks are recorded in the trace's origin, which push moves and pop restores,
 // link areas included (ARCHITECTURE "internal/render", Trace). A nil trace takes push and pop
 // without a panic.

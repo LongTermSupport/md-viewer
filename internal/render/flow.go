@@ -77,6 +77,15 @@ const (
 	wrapCode                  // STYLE-CODE-2: at the character that overflows, leading spaces kept
 )
 
+// textAlign is how each line of a flow sits in its box (STYLE-TABLE-4). The zero value is start.
+type textAlign uint8
+
+const (
+	alignStart  textAlign = iota // a line sits at the box's left edge
+	alignCentre                  // a line is centred in the box, the spare pixels rounded down on its right
+	alignEnd                     // a line sits at the box's right edge
+)
+
 // flowParams are the inputs to layoutFlow that do not change within one call.
 type flowParams struct {
 	shaper    *text.Shaper
@@ -84,7 +93,8 @@ type flowParams struct {
 	palette   Palette
 	inHeading bool // RunStyle's code rule (STYLE-TEXT-5)
 	links     *links
-	wrap      wrapMode // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
+	wrap      wrapMode  // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
+	align     textAlign // how each line sits in its box (STYLE-TABLE-4)
 }
 
 // Inline code padding in em of the run's size (STYLE-TEXT-5).
@@ -132,6 +142,10 @@ type flow struct {
 	hasContent bool // a fragment has been placed on the current line
 	lines      int  // lines closed so far
 	widest     int  // the widest closed line
+
+	line     op.MacroOp // the macro of the current line, while lineOpen (STYLE-TABLE-4)
+	lineOpen bool       // the current line is recorded, because the flow is aligned
+	lineMark int        // the trace's mark count when the current line began
 }
 
 // layoutFlow lays out runs as wrapped lines and records what it drew in tr, which may be nil.
@@ -164,18 +178,26 @@ func layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace) (l
 		switch r.Kind {
 		case doc.TextRun:
 			if err := f.textRun(r); err != nil {
+				f.abandon()
 				return layout.Dimensions{}, err
 			}
 		case doc.BreakRun:
-			f.closeLine()
+			if err := f.closeLine(); err != nil {
+				f.abandon()
+				return layout.Dimensions{}, err
+			}
 		default:
+			f.abandon()
 			return layout.Dimensions{}, fmt.Errorf("render: no text flow for run kind %d", r.Kind)
 		}
 	}
 	// A code block closes its last line even after a break, so text ending in a newline shows
 	// the empty line after it (STYLE-CODE-2).
 	if f.hasContent || f.lines == 0 || f.fp.wrap == wrapCode {
-		f.closeLine()
+		if err := f.closeLine(); err != nil {
+			f.abandon()
+			return layout.Dimensions{}, err
+		}
 	}
 	size := image.Pt(max(f.widest, gtx.Constraints.Min.X), f.lines*f.lineH)
 	return layout.Dimensions{Size: size, Baseline: size.Y - f.baseOff}, nil
@@ -189,6 +211,9 @@ func newFlow(gtx layout.Context, fp flowParams, tr *Trace) (*flow, error) {
 		return nil, err
 	}
 	baseOff := int(math.Round((float64(lineH)-(ascent+descent))/2 + ascent))
+	if err := checkAlign(fp.align); err != nil {
+		return nil, err
+	}
 	return &flow{
 		gtx:     gtx,
 		fp:      fp,
@@ -277,7 +302,9 @@ func (f *flow) textRun(r doc.Run) error {
 		glyphs, n := f.shape(ts, rest, first, width)
 		if n == 0 {
 			if f.hasContent {
-				f.closeLine()
+				if err := f.closeLine(); err != nil {
+					return err
+				}
 				continue
 			}
 			// The first word is wider than a whole line: break it at a character.
@@ -297,7 +324,9 @@ func (f *flow) textRun(r doc.Run) error {
 		}
 		rest = rest[n:]
 		if rest != "" {
-			f.closeLine()
+			if err := f.closeLine(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -377,6 +406,9 @@ func (f *flow) codePads(ts TextStyle, code bool) (padX, padY int) {
 func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, padX, padY int) error {
 	if len(glyphs) == 0 {
 		return fmt.Errorf("render: fragment %q has no glyphs", s)
+	}
+	if f.fp.align != alignStart && !f.lineOpen {
+		f.openLine()
 	}
 	code := r.Style&doc.Code != 0
 	lo, hi := math.MaxInt, math.MinInt
@@ -472,10 +504,67 @@ func fragmentText(s string) string {
 }
 
 // closeLine ends the current line and starts the next one below it.
-func (f *flow) closeLine() {
+func (f *flow) closeLine() error {
 	f.widest = max(f.widest, f.cursor)
+	if f.lineOpen {
+		shift, err := lineShift(f.fp.align, f.width, f.cursor)
+		if err != nil {
+			return err
+		}
+		call := f.line.Stop()
+		f.lineOpen = false
+		stack := op.Offset(image.Pt(shift, 0)).Push(f.gtx.Ops)
+		call.Add(f.gtx.Ops)
+		stack.Pop()
+		f.tr.shiftFrom(f.lineMark, image.Pt(shift, 0))
+	}
 	f.top += f.lineH
 	f.cursor = 0
 	f.hasContent = false
 	f.lines++
+	return nil
+}
+
+// openLine starts recording the current line, so that closeLine can move it (STYLE-TABLE-4). The
+// marks the line records are those from the trace's count now.
+func (f *flow) openLine() {
+	f.line = op.Record(f.gtx.Ops)
+	f.lineMark = f.tr.count()
+	f.lineOpen = true
+}
+
+// abandon stops an open line's recording without replaying it, when layoutFlow fails, so that no
+// operations are left inside an unstopped macro.
+func (f *flow) abandon() {
+	if f.lineOpen {
+		f.line.Stop()
+		f.lineOpen = false
+	}
+}
+
+// checkAlign is an error naming an alignment that is not one of the three (STYLE-TABLE-4).
+func checkAlign(a textAlign) error {
+	switch a {
+	case alignStart, alignCentre, alignEnd:
+		return nil
+	default:
+		return fmt.Errorf("render: no line alignment for value %d", a)
+	}
+}
+
+// lineShift is how far a line of width w moves right in a box of width box (STYLE-TABLE-4): the
+// spare pixels rounded down for centre, all of them for end. A line wider than the box, and the
+// start alignment, do not move.
+func lineShift(a textAlign, box, w int) (int, error) {
+	spare := max(box-w, 0)
+	switch a {
+	case alignStart:
+		return 0, nil
+	case alignCentre:
+		return spare / 2, nil
+	case alignEnd:
+		return spare, nil
+	default:
+		return 0, fmt.Errorf("render: no line alignment for value %d", a)
+	}
 }
