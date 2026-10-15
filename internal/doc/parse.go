@@ -117,6 +117,12 @@ func (c *converter) convertBlock(n ast.Node) ([]Block, error) {
 			return nil, err
 		}
 		return []Block{list}, nil
+	case *ast.HTMLBlock:
+		// STUB (M2 red): no count yet.
+		return nil, nil
+	case *extast.Table:
+		// STUB (M2 red): an empty table.
+		return []Block{Table{}}, nil
 	case *ast.LinkReferenceDefinition:
 		return nil, nil
 	default:
@@ -250,6 +256,13 @@ func (c *converter) collectRuns(parent ast.Node, st Style, link *Target, out *[]
 			if err := c.collectRuns(ch, st|Strike, link, out); err != nil {
 				return err
 			}
+		case *ast.Link:
+			// STUB (M2 red): the link is not resolved yet; children keep the inherited link.
+			if err := c.collectRuns(ch, st, link, out); err != nil {
+				return err
+			}
+		case *ast.AutoLink, *ast.Image, *ast.RawHTML:
+			// STUB (M2 red): no run yet.
 		case *extast.TaskCheckBox:
 			// DOC-8: the checkbox sets the item's task state and produces no run.
 		default:
