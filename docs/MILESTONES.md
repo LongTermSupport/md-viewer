@@ -104,6 +104,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M9 The viewer: scroll, zoom, links, quit
 - [x] M10 The window and the binary
 - [x] M11 Speed: fixtures, benchmarks, measurement
+- [ ] M12 Hardening: the label gate on tracked files, non-blocking opens
 
 ---
 
@@ -804,6 +805,52 @@ offset) was measured in M11 and left as it is: no SPEED target needs a change.
 
 **Done when:** the standard checks pass, the benchmarks run, the README holds the container
 numbers, and the owner has been told the host measurement is theirs to run (README "Speed").
+
+---
+
+## M12 Hardening: the label gate on tracked files, non-blocking opens
+
+**Covers:** CLI-8, DOC-13 and STYLE-IMG-3 for a path replaced after its `Stat`; the label gate of
+M11.
+
+**Files:** `internal/doc/open.go` (`OpenRegular`, `ErrDirectory`, `ErrNotRegular`) and
+`open_test.go`, `open_linux_test.go`; `internal/doc/load.go` and `load_linux_test.go`;
+`internal/render/image.go` and `image_linux_test.go`; `cmd/md-viewer/init_test.go`.
+
+**Tests first:**
+
+- `TestTrackedFiles` (`cmd/md-viewer`): in a fixture repository, the list is the tracked files,
+  without an untracked file or a tracked file deleted from the work tree; a directory that is not a
+  git checkout, or a checkout that does not track `go.mod`, is an error that names `git ls-files`.
+- `TestNoPlannerLabels`: its fixture is a git repository, and an untracked file holding a label is
+  not reported. A missing `git`, or a tree that is not a checkout, fails the test; it never skips.
+- `TestOpenRegular`, `TestOpenFlags`: a regular file opens with its size; a missing file gives the
+  operating system's error; a directory gives `ErrDirectory`; the flags hold `O_NONBLOCK` and
+  `O_NOCTTY`.
+- `TestOpenRegularNonRegular` (Linux): `OpenRegular` refuses a FIFO with no writer, `/dev/zero` and a
+  socket with `not a regular file` before any open, and a symbolic link to a regular file opens.
+- `TestOpenStatNonRegular`, `TestOpenStatRegular` (Linux): the open-and-check step, given a path
+  that is not a regular file when it is opened (a FIFO with and without a writer, a symlink to a
+  FIFO, `/dev/null`, `/dev/zero`, a socket, a directory), returns no file without blocking, and a
+  byte in the FIFO stays unread; a regular file and a symlink to it open and read in full.
+- `TestFileOpens` (`cmd/md-viewer`): the only call in non-test code that opens a file is the
+  `os.OpenFile` in `internal/doc/open.go`.
+- `TestLoadNonRegular`, `TestImageNonRegular` (Linux): `Load`, the probe and the decode refuse a
+  FIFO with no writer and a socket with `not a regular file`; a symlink to a regular file loads, and
+  a symlink to a PNG is drawn.
+
+A test that could block (a FIFO with no writer) runs the call in a goroutine, with a one-minute
+bound that only a failure reaches; on the bound, the test opens the FIFO for reading and writing,
+which releases the call, waits for it, and fails. No test sleeps.
+
+**Verification:** the standard checks, the darwin and windows vets of M10, the smoke run, and:
+
+```bash
+go test -race -count=5 -run 'Open|NonRegular|FileOpens|TrackedFiles|PlannerLabels' ./cmd/md-viewer ./internal/doc ./internal/render
+```
+
+**Done when:** the standard checks and the smoke run pass, an untracked file holding a label does
+not fail `go test`, and no open in md-viewer can block on a FIFO.
 
 ---
 

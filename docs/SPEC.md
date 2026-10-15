@@ -107,9 +107,12 @@ as typed.
 
 REASON is the text of the operating system error underneath the `*fs.PathError` (for a missing
 file, `no such file or directory`; for a permission failure, `permission denied`). The size is
-checked with `Stat` before reading, so a huge file is refused without being read. A path that
-`Stat` shows is neither a regular file nor a directory (a device, FIFO or socket) is refused
-without being opened. The read is capped at the limit plus one byte, so a file that grows after
+checked on the open file before reading, so a huge file is refused without being read. A path
+that `Stat` shows is neither a regular file nor a directory (a device, FIFO or socket) is refused
+without being opened. The file is then opened without blocking and checked again, on the open
+file, so a path replaced after its `Stat` by a directory, device or FIFO gets the same message,
+and a socket, which cannot be opened, gets the operating system's REASON; nothing is read in
+either case. The read is capped at the limit plus one byte, so a file that grows after
 its `Stat` is refused too, with SIZE the bytes read.
 
 **CLI-9.** If the window cannot be opened (no display, no GPU driver), or Gio reports an error
@@ -227,8 +230,9 @@ neighbours.
 thematic break maps to `Rule`.
 
 **DOC-13. Loading.** `doc.Load(path, now)` applies CLI-8's checks in that order (stat, directory,
-regular file, size, read, NUL) and returns typed errors, as pointers, that the CLI turns into the messages of
-CLI-8 (the CLI owns the wording). `Document.Dir` is the absolute directory of the file, and
+regular file, open, directory and regular file again on the open file, size, read, NUL) and
+returns typed errors, as pointers, that the CLI turns into the messages of CLI-8 (the CLI owns the
+wording). `Document.Dir` is the absolute directory of the file, and
 `Document.Name` its base name. `Load` sets `Name` and passes the absolute directory to `Parse`,
 which stores it as `Document.Dir`. An error from `filepath.Abs` or `Parse` is returned as a plain
 error, and the CLI prints `md-viewer: ` + the error and exits 1. `now` is called exactly
@@ -522,8 +526,9 @@ order, after DOC-9's line and before the window opens:
 - `not a local file`, for a fragment (`#x`) or another Refused target;
 - `unsupported format`, for a file that is not a PNG or JPEG, including one the header sniff
   does not recognise;
-- `is a directory`, or `not a regular file`, for a path that is not a regular file (the file is
-  not opened);
+- `is a directory`, or `not a regular file`, for a path that is not a regular file (the file is not
+  read; it is opened only if it was replaced after its `Stat`, as CLI-8 says, at the probe and
+  again at the decode);
 - `image too large: WxH`, from the size rule of STYLE-IMG-1;
 - the text of the operating system's error after the path (`no such file or directory`,
   `permission denied`), or the decoder's error for a PNG or JPEG whose header is unreadable;

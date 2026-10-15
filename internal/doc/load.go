@@ -17,9 +17,6 @@ const MaxFileSize = 64 << 20
 // nulByte is the byte that makes a file binary rather than text (CLI-8).
 const nulByte = 0
 
-// errNotRegular is the reason for a path that is neither a regular file nor a directory (CLI-8).
-var errNotRegular = errors.New("not a regular file")
-
 // LoadStats are the two timings of Load, for --time (SPEED-2, DOC-13). Read covers the stat,
 // the read and the NUL check; Parse covers Parse.
 type LoadStats struct{ Read, Parse time.Duration }
@@ -56,35 +53,25 @@ type BinaryError struct{ Path string }
 
 func (e *BinaryError) Error() string { return e.Path + " contains a NUL byte" }
 
-// Load reads and parses the file at path (DOC-13). It applies CLI-8's checks in order: stat,
-// directory, regular file, size, read, NUL byte. The errors of those checks are the typed errors above, as
-// pointers. now is called three times on success: before the stat, after the NUL check, and
-// after Parse. Document.Name is the base name of path and Document.Dir the absolute directory.
+// Load reads and parses the file at path (DOC-13). It applies CLI-8's checks in the order DOC-13
+// gives: stat, directory, regular file, open, directory and regular file again on the open file,
+// size, read, NUL byte. The errors of those checks are the typed errors above, as pointers. now is
+// called three times on success: before the stat, after the NUL check, and after Parse.
+// Document.Name is the base name of path and Document.Dir the absolute directory.
 func Load(path string, now func() time.Time) (*Document, LoadStats, error) {
 	t0 := now()
-	info, err := os.Stat(path)
+	f, info, err := OpenRegular(path)
 	if err != nil {
+		if errors.Is(err, ErrDirectory) {
+			return nil, LoadStats{}, &DirectoryError{Path: path}
+		}
 		return nil, LoadStats{}, readError(path, err)
-	}
-	if info.IsDir() {
-		return nil, LoadStats{}, &DirectoryError{Path: path}
-	}
-	// A device, FIFO or socket is never opened: reading it could block or never end (CLI-8).
-	if !info.Mode().IsRegular() {
-		return nil, LoadStats{}, readError(path, errNotRegular)
 	}
 	if info.Size() > MaxFileSize {
-		return nil, LoadStats{}, &TooLargeError{Path: path, Size: info.Size()}
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, LoadStats{}, readError(path, err)
+		return nil, LoadStats{}, closeAfter(f, path, &TooLargeError{Path: path, Size: info.Size()})
 	}
 	src, err := readCapped(f, path)
-	if cerr := f.Close(); err == nil && cerr != nil {
-		err = readError(path, cerr)
-	}
-	if err != nil {
+	if err = closeAfter(f, path, err); err != nil {
 		return nil, LoadStats{}, err
 	}
 	if bytes.IndexByte(src, nulByte) >= 0 {
@@ -116,6 +103,15 @@ func readCapped(r io.Reader, path string) ([]byte, error) {
 		return nil, &TooLargeError{Path: path, Size: int64(len(src))}
 	}
 	return src, nil
+}
+
+// closeAfter closes f, which was opened for path, and returns err, or the close error when err is
+// nil.
+func closeAfter(f *os.File, path string, err error) error {
+	if cerr := f.Close(); err == nil && cerr != nil {
+		return readError(path, cerr)
+	}
+	return err
 }
 
 // readError wraps an error from the operating system about path as a ReadError. The error

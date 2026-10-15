@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -76,56 +80,57 @@ func labelScope(rel string) bool {
 }
 
 // plannerLabels lists "file:line" for each line under root that holds a planner label, in the
-// files labelScope accepts, test files included.
-func plannerLabels(root string) ([]string, error) {
+// tracked files labelScope accepts, test files included, in path order. Only tracked files are
+// read: an untracked file is scratch work, and a tracked one deleted from the work tree is absent.
+func plannerLabels(ctx context.Context, root string) ([]string, error) {
+	files, err := trackedFiles(ctx, root)
+	if err != nil {
+		return nil, fmt.Errorf("listing tracked files (run go test in a git checkout with git on PATH): %w", err)
+	}
 	var found []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if skipDir(root, path, d) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
+	for _, rel := range files {
 		if !labelScope(rel) {
-			return nil
+			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for n, line := range strings.Split(string(data), "\n") {
 			if plannerLabel.MatchString(line) {
 				found = append(found, fmt.Sprintf("%s:%d", rel, n+1))
 			}
 		}
-		return nil
-	})
-	return found, err
+	}
+	return found, nil
 }
 
-// TestNoPlannerLabels: no Go file, README or doc names a planner's label (the labels belong to a
-// planning tree, not to this repository). The fixture rows show the check finds a label and passes
-// an expectation number such as DOC-14. The fixture labels are split across two literals so that
-// this file holds none.
+// TestNoPlannerLabels: no tracked Go file, README or doc names a planner's label (the labels belong
+// to a planning tree, not to this repository). An untracked file is not read: it is scratch work,
+// and the gate is about what reaches history. The fixture rows show the check finds a label, skips
+// an untracked file and a deleted one, and passes an expectation number such as DOC-14. The fixture
+// labels are split across two literals so that this file holds none.
 func TestNoPlannerLabels(t *testing.T) {
+	ctx := t.Context()
 	t.Run("fixture", func(t *testing.T) {
 		dir := writeTree(t, map[string]string{
+			"go.mod":         "module x\n",
 			"x.go":           "package x\n\n// x (P" + "12)\n",
 			"docs/SPEC.md":   "A rule (DOC-14) and a note (SPEED-6).\n",
 			"docs/x.txt":     "not scanned: (F" + "3)\n",
 			"README.md":      "See (D" + "1).\n",
 			"nested/y.go":    "package y\n\n// the label is Q" + "9\n",
 			"nested/y_ok.go": "package y\n\n// no label here: DOC-5\n",
+			"gone.go":        "package g\n\n// deleted after the add: Q" + "3\n",
+			"docs/stray.md":  "untracked, not reported: (P" + "7)\n",
 		})
-		got, err := plannerLabels(dir)
+		gitRun(t, dir, "init", "-q")
+		gitRun(t, dir, "add", "go.mod", "x.go", "docs/SPEC.md", "docs/x.txt", "README.md",
+			"nested/y.go", "nested/y_ok.go", "gone.go")
+		if err := os.Remove(filepath.Join(dir, "gone.go")); err != nil {
+			t.Fatalf("remove gone.go: %v", err)
+		}
+		got, err := plannerLabels(ctx, dir)
 		if err != nil {
 			t.Fatalf("plannerLabels: %v", err)
 		}
@@ -136,12 +141,142 @@ func TestNoPlannerLabels(t *testing.T) {
 	})
 
 	t.Run("module", func(t *testing.T) {
-		got, err := plannerLabels(moduleRoot(t))
+		got, err := plannerLabels(ctx, moduleRoot(t))
 		if err != nil {
 			t.Fatalf("plannerLabels: %v", err)
 		}
 		if len(got) != 0 {
 			t.Errorf("planner labels at %q, want none", got)
+		}
+	})
+}
+
+// gitEnv is the environment of the git calls in this file: this process's, without any GIT_*
+// variable. Inside a git hook GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE are set. An inherited
+// GIT_INDEX_FILE would let the fixture's git add write into the real repository's index, and a
+// relative GIT_DIR would point the listing elsewhere.
+func gitEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// gitOutput runs git with args in dir and returns its standard output. A failure is an error that
+// names the arguments, the cause and git's stderr.
+func gitOutput(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git %s in %s: %w: %s", strings.Join(args, " "), dir, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return out, nil
+}
+
+// gitRun runs git with args in dir, failing the test on error.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if _, err := gitOutput(t.Context(), dir, args...); err != nil {
+		t.Fatalf("%v", err)
+	}
+}
+
+// trackedFiles lists the slash-separated paths, relative to root and sorted, of the files git
+// tracks under root: those of git ls-files, less the ones git ls-files --deleted names (a tracked
+// file removed from the work tree has no text to read). A staged new file is listed. root must be
+// the top of a checkout: a module that tracks no go.mod is an error, so the gate cannot pass
+// vacuously when the module sits untracked inside another repository.
+func trackedFiles(ctx context.Context, root string) ([]string, error) {
+	listed, err := gitOutput(ctx, root, "ls-files", "-z")
+	if err != nil {
+		return nil, err
+	}
+	deleted, err := gitOutput(ctx, root, "ls-files", "-z", "--deleted")
+	if err != nil {
+		return nil, err
+	}
+	gone := make(map[string]bool)
+	for _, p := range splitNUL(deleted) {
+		gone[p] = true
+	}
+	seen := make(map[string]bool)
+	var files []string
+	for _, p := range splitNUL(listed) {
+		if gone[p] || seen[p] {
+			continue
+		}
+		seen[p] = true
+		files = append(files, p)
+	}
+	slices.Sort(files)
+	if !slices.Contains(files, "go.mod") {
+		return nil, fmt.Errorf("git ls-files in %s lists no go.mod: the module root is not the top of a git checkout", root)
+	}
+	return files, nil
+}
+
+// splitNUL splits the NUL-terminated paths that git prints with -z.
+func splitNUL(out []byte) []string {
+	var paths []string
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// TestTrackedFiles: the label gate reads the files git tracks, not the files on disk (M12). The
+// rows show that an untracked file and a tracked file deleted from the work tree are left out, that
+// a directory which is not a checkout is an error naming git, and that a checkout which does not
+// track go.mod is an error, so the gate cannot pass vacuously.
+func TestTrackedFiles(t *testing.T) {
+	ctx := t.Context()
+	t.Run("tracked files, not deleted or untracked ones", func(t *testing.T) {
+		dir := writeTree(t, map[string]string{
+			"go.mod":        "module x\n",
+			"a.go":          "package x\n",
+			"docs/b.md":     "b\n",
+			"gone.go":       "package x\n",
+			"docs/stray.md": "not added\n",
+		})
+		gitRun(t, dir, "init", "-q")
+		gitRun(t, dir, "add", "go.mod", "a.go", "docs/b.md", "gone.go")
+		if err := os.Remove(filepath.Join(dir, "gone.go")); err != nil {
+			t.Fatalf("remove gone.go: %v", err)
+		}
+		got, err := trackedFiles(ctx, dir)
+		if err != nil {
+			t.Fatalf("trackedFiles: %v", err)
+		}
+		if want := []string{"a.go", "docs/b.md", "go.mod"}; !slices.Equal(got, want) {
+			t.Errorf("trackedFiles = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("not a git checkout", func(t *testing.T) {
+		dir := writeTree(t, map[string]string{"go.mod": "module x\n"})
+		_, err := trackedFiles(ctx, dir)
+		if err == nil || !strings.Contains(err.Error(), "not a git repository") {
+			t.Errorf("trackedFiles error = %v, want git's own \"not a git repository\"", err)
+		}
+	})
+
+	t.Run("checkout that tracks no go.mod", func(t *testing.T) {
+		dir := writeTree(t, map[string]string{"go.mod": "module x\n", "a.go": "package x\n"})
+		gitRun(t, dir, "init", "-q")
+		gitRun(t, dir, "add", "a.go")
+		_, err := trackedFiles(ctx, dir)
+		if err == nil || !strings.Contains(err.Error(), "lists no go.mod") {
+			t.Errorf("trackedFiles error = %v, want one saying it lists no go.mod", err)
 		}
 	})
 }
@@ -220,6 +355,95 @@ func windowCreations(root string) ([]string, error) {
 		return nil
 	})
 	return found, err
+}
+
+// pathOpeners maps an import path to the functions of that package that open a file by path. A
+// method on a value, such as (*os.Root).Open, has no package name to match and is not listed.
+var pathOpeners = map[string][]string{
+	"os":        {"Create", "Open", "OpenFile", "OpenInRoot", "OpenRoot", "ReadDir", "ReadFile"},
+	"syscall":   {"Open"},
+	"io/ioutil": {"ReadFile"},
+}
+
+// openCalls lists "file: pkg.Name" for each call in a non-test .go file under root to a function in
+// pathOpeners, once per call. pkg is the package's name (os, syscall or ioutil), and the file's
+// local name for the import may differ from it.
+func openCalls(root string) ([]string, error) {
+	var found []string
+	err := goFiles(root, func(rel string, f *ast.File) error {
+		pkgOf := make(map[string]string)
+		for _, imp := range f.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				return err
+			}
+			if _, ok := pathOpeners[path]; !ok {
+				continue
+			}
+			local := filepath.Base(path)
+			if imp.Name != nil {
+				local = imp.Name.Name
+			}
+			pkgOf[local] = path
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			x, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			path, ok := pkgOf[x.Name]
+			if !ok || !slices.Contains(pathOpeners[path], sel.Sel.Name) {
+				return true
+			}
+			found = append(found, rel+": "+filepath.Base(path)+"."+sel.Sel.Name)
+			return true
+		})
+		return nil
+	})
+	return found, err
+}
+
+// TestFileOpens (CLI-8, M12): the only call in non-test code that opens a file is the os.OpenFile in
+// internal/doc/open.go, which opens without blocking and judges the open file. Every other reader
+// goes through doc.OpenRegular, so no open can block on a FIFO that a path was swapped for. The
+// fixture row shows the check finds an open made through an import alias, and passes os.NewFile and
+// syscall.Close, which open no file by path.
+func TestFileOpens(t *testing.T) {
+	t.Run("fixture with two opens", func(t *testing.T) {
+		dir := writeTree(t, map[string]string{
+			"x.go": "package x\n\nimport (\n\to \"os\"\n\t\"io/ioutil\"\n\t\"syscall\"\n)\n\nfunc f() {\n" +
+				"\to.Open(\"a\")\n\to.ReadFile(\"b\")\n\to.OpenRoot(\"c\")\n\to.ReadDir(\"d\")\n" +
+				"\tioutil.ReadFile(\"e\")\n\tsyscall.Open(\"f\")\n\to.NewFile(3, \"g\")\n\tsyscall.Close(3)\n}\n",
+			"x_test.go": "package x\n\nimport \"os\"\n\nfunc g() { os.Open(\"c\") }\n",
+		})
+		got, err := openCalls(dir)
+		if err != nil {
+			t.Fatalf("openCalls: %v", err)
+		}
+		want := []string{"x.go: os.Open", "x.go: os.ReadFile", "x.go: os.OpenRoot", "x.go: os.ReadDir",
+			"x.go: ioutil.ReadFile", "x.go: syscall.Open"}
+		if !slices.Equal(got, want) {
+			t.Errorf("openCalls = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("module", func(t *testing.T) {
+		got, err := openCalls(moduleRoot(t))
+		if err != nil {
+			t.Fatalf("openCalls: %v", err)
+		}
+		if want := []string{"internal/doc/open.go: os.OpenFile"}; !slices.Equal(got, want) {
+			t.Errorf("openCalls = %q, want %q", got, want)
+		}
+	})
 }
 
 // writeTree writes files, a map of relative path to content, under a new temporary directory,
