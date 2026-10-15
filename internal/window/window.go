@@ -4,6 +4,8 @@
 package window
 
 import (
+	"errors"
+	"fmt"
 	"image/color"
 
 	"gioui.org/layout"
@@ -32,10 +34,10 @@ type Config struct {
 type FrameError struct{ Err error }
 
 // Error is the text of Err, without a prefix; main adds the prefix (CLI-6).
-func (e *FrameError) Error() string { return "" }
+func (e *FrameError) Error() string { return e.Err.Error() }
 
 // Unwrap returns Err.
-func (e *FrameError) Unwrap() error { return nil }
+func (e *FrameError) Unwrap() error { return e.Err }
 
 // Event is an event of the window, as Loop sees it. The set is closed: only this package
 // defines the kinds, so an unknown value is an error.
@@ -67,5 +69,54 @@ type Source interface {
 // filled with Config.Canvas (STYLE-PAL-3).
 func Loop(src Source, c Config) error { return loop(src, c, paint.Fill) }
 
-// loop is Loop with the canvas fill given, so a test can see each fill.
-func loop(src Source, c Config, fill func(*op.Ops, color.NRGBA)) error { return nil }
+// loop is Loop with the canvas fill given, so a test can see each fill. Once a frame has failed,
+// or quit was asked, or the window has closed for ExitAfterFirst, the window is closing: Close is
+// called once, and the viewer is not called again, but the frames still delivered are filled and
+// submitted (CLI-6, CLI-9).
+func loop(src Source, c Config, fill func(*op.Ops, color.NRGBA)) error {
+	if c.Frame == nil {
+		return errors.New("window: Config.Frame is nil")
+	}
+	if c.Bind != nil {
+		c.Bind(src.Invalidate)
+	}
+	var (
+		frameErr *FrameError // the first failure: a frame's, or OnFirst's
+		shown    bool        // the first frame has been submitted, and OnFirst has run
+		closing  bool        // Close has been called
+	)
+	for {
+		switch e := src.Next().(type) {
+		case FrameEvent:
+			fill(e.Gtx.Ops, c.Canvas)
+			var quit bool
+			if !closing {
+				var err error
+				quit, err = c.Frame(e.Gtx)
+				if err != nil {
+					frameErr = &FrameError{Err: err}
+				}
+			}
+			e.Submit(e.Gtx.Ops)
+			if frameErr == nil && !shown {
+				shown = true
+				if c.OnFirst != nil {
+					if err := c.OnFirst(); err != nil {
+						frameErr = &FrameError{Err: err}
+					}
+				}
+			}
+			if !closing && (quit || frameErr != nil || c.ExitAfterFirst) {
+				closing = true
+				src.Close()
+			}
+		case DestroyEvent:
+			if frameErr != nil {
+				return frameErr
+			}
+			return e.Err
+		default:
+			return fmt.Errorf("window: no handler for event %T", e)
+		}
+	}
+}
