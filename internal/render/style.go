@@ -258,13 +258,29 @@ const (
 // BulletShape is the shape of a marker at a nesting depth: the number of lists around the item's
 // list (STYLE-LIST-2). A depth below 1 is a disc, as OrderedMarker's default is decimal.
 func BulletShape(depth int) Bullet {
-	return BulletDisc
+	switch {
+	case depth == 1:
+		return BulletCircle
+	case depth >= 2:
+		return BulletSquare
+	default:
+		return BulletDisc
+	}
 }
 
 // String is the name of the shape, which is the text of its mark. A value with no name is written
 // with its number.
 func (b Bullet) String() string {
-	return ""
+	switch b {
+	case BulletDisc:
+		return "disc"
+	case BulletCircle:
+		return "circle"
+	case BulletSquare:
+		return "square"
+	default:
+		return fmt.Sprintf("Bullet(%d)", uint8(b))
+	}
 }
 
 // ColumnWidths gives each table column's width (STYLE-TABLE-5). When the natural widths sum to
