@@ -440,7 +440,16 @@ func TestTableRowHeight(t *testing.T) {
 		tr := traceOf(t, ctx, "| h | hhhhhhhhhh |\n| - | - |\n| bbbbbbbb bbbbbbbb | a |", 200)
 		hs := hlines(tr)
 		needCount(t, "horizontal lines", hs, 3)
-		bs := needText(t, tr, MarkGlyphs, "bbbbbbbb", 2)
+		// A wrapped line keeps the space it ends with, so a line's text may be "bbbbbbbb ".
+		var bs []Mark
+		for _, m := range marks(tr, MarkGlyphs) {
+			if strings.TrimSpace(m.Text) == "bbbbbbbb" {
+				bs = append(bs, m)
+			}
+		}
+		if len(bs) < 2 {
+			t.Fatalf("%d lines of bbbbbbbb, want at least 2", len(bs))
+		}
 		tops := map[int]bool{}
 		for _, b := range bs {
 			tops[b.Rect.Min.Y] = true
