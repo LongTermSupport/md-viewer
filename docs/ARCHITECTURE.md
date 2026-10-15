@@ -11,7 +11,7 @@ to that file. The order of work is in [MILESTONES.md](MILESTONES.md).
 | `gioui.org`                | v0.10.3                                           | window, input, layout, text shaping, painting                              |
 | `github.com/yuin/goldmark` | v1.8.6                                            | CommonMark parser with the GFM extensions                                  |
 | `golang.org/x/image`       | v0.26.0                                           | the Go font files (`font/gofont/...`); the version Gio v0.10.3 requires    |
-| go-qa-ci                   | commit `803b122ce5266d58c5fa296985a4e1fde206cd0f` | QA; no tag is published yet, so the pin is a commit (`qa/go-qa-ci.ref`)    |
+| go-qa-ci                   | commit `f125f711e6f6f59fbe5db1443bb4f41df22224d7` | QA; no tag is published yet, so the pin is a commit (`qa/go-qa-ci.ref`)    |
 
 No other direct dependency is added without the owner's agreement: no `gioui.org/x`, no test
 assertion library (tests use the standard library), no CLI flag library.
@@ -136,9 +136,9 @@ Conversion rules:
   `md.Parser().Parse(text.NewReader(src))`.
 - Text is taken with `(*ast.Text).Value(src)`, `(*ast.String).Value`, segment `Value(src)` and
   `Lines()`. The deprecated `Node.Text(src)` is never used (staticcheck SA1019 fails it).
-  Text runs outside code resolve backslash escapes and references one at a time with goldmark's
-  `util.UnescapePunctuations`, `ResolveNumericReferences` and `ResolveEntityNames` (DOC-3), so
-  `\&amp;` stays `&amp;`; `CodeSpan` text is raw.
+  Text runs outside code resolve backslash escapes and references in one pass, with goldmark's
+  `util.IsPunct`, `ResolveNumericReferences` and `ResolveEntityNames` (DOC-3), so `\&amp;`
+  stays `&amp;`; `CodeSpan` text is raw.
 - Node kinds handled: `ast.Document`, `Heading`, `Paragraph`, `TextBlock`, `CodeBlock`,
   `FencedCodeBlock`, `Blockquote`, `List`, `ListItem`, `ThematicBreak`, `HTMLBlock`, `Text`,
   `String`, `CodeSpan`, `Emphasis` (`Level` 1 is Emphasis, 2 is Strong), `Link`, `AutoLink`

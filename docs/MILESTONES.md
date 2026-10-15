@@ -77,7 +77,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 ## Status
 
 - [x] M0 Scaffolding, CI and the command line
-- [ ] M1 Document model: blocks and inline runs
+- [x] M1 Document model: blocks and inline runs
 - [ ] M2 Document model: links, tables, images, HTML, loading
 - [ ] M3 Render styles, palettes and fonts
 - [ ] M4 Inline text flow
@@ -105,8 +105,8 @@ is in `.claude/ccy/Dockerfile` and a rebuild by the owner, not an install by han
 - `go.mod`: `module github.com/LongTermSupport/md-viewer`, `go 1.26.9`. No requirements yet
   beyond what the code imports (`go mod tidy`).
 - `.gitignore`: `/dist/`, `*.test`, `*.out`, `/untracked/`.
-- `qa/go-qa-ci.ref`: the single line `803b122ce5266d58c5fa296985a4e1fde206cd0f`; it is bumped
-  to the commit where go-qa installs its own tools. No installer script and no tool
+- `qa/go-qa-ci.ref`: the single line `f125f711e6f6f59fbe5db1443bb4f41df22224d7`, the commit
+  where go-qa installs its own tools. No installer script and no tool
   directory live in this repository: the Go gate needs only the Go toolchain.
 - `qa/go-qa.toml`: only these comment lines (the defaults apply):
   `# go-qa configuration; see go-qa-ci's README, "Configuration".` and
