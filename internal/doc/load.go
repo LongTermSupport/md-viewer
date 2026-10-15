@@ -17,9 +17,6 @@ const MaxFileSize = 64 << 20
 // nulByte is the byte that makes a file binary rather than text (CLI-8).
 const nulByte = 0
 
-// errNotRegular is the reason for a path that is neither a regular file nor a directory (CLI-8).
-var errNotRegular = errors.New("not a regular file")
-
 // LoadStats are the two timings of Load, for --time (SPEED-2, DOC-13). Read covers the stat,
 // the read and the NUL check; Parse covers Parse.
 type LoadStats struct{ Read, Parse time.Duration }
@@ -71,7 +68,7 @@ func Load(path string, now func() time.Time) (*Document, LoadStats, error) {
 	}
 	// A device, FIFO or socket is never opened: reading it could block or never end (CLI-8).
 	if !info.Mode().IsRegular() {
-		return nil, LoadStats{}, readError(path, errNotRegular)
+		return nil, LoadStats{}, readError(path, ErrNotRegular)
 	}
 	if info.Size() > MaxFileSize {
 		return nil, LoadStats{}, &TooLargeError{Path: path, Size: info.Size()}
