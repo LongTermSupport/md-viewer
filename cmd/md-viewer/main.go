@@ -21,6 +21,9 @@ func main() {
 	os.Exit(int(app.ExitFailure))
 }
 
+// exitCode is the exit code of the window's result, and the stderr line for an error. Stub.
+func exitCode(err error, stderr io.Writer) app.ExitCode { return app.ExitOK }
+
 // write writes s to w and returns the write error, if any.
 func write(w io.Writer, s string) error {
 	_, err := io.WriteString(w, s)
