@@ -36,11 +36,13 @@ func TestMainUsageExit(t *testing.T) {
 		t.Fatalf("go build failed: %v\n%s", err, out)
 	}
 
+	// Exit codes are literals (CLI-6), so the test does not reuse the constants it checks.
 	t.Run("help", func(t *testing.T) {
 		stdout, stderr, code := runBinary(t, bin, "--help")
 		if code != 0 {
 			t.Errorf("exit code = %d, want 0", code)
 		}
+		// The prefix check stops an empty app.Usage from passing the equality check below.
 		if !strings.HasPrefix(stdout, "Usage: md-viewer [--dark] [--time] FILE\n") {
 			t.Errorf("stdout = %q, want the CLI-4 usage text", stdout)
 		}

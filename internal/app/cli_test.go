@@ -6,6 +6,9 @@ import (
 	"testing"
 )
 
+// CLI-11 (ParseArgs reads only its arguments, so main reads no environment or stdin) holds
+// by construction and has no test.
+
 func TestUsageText(t *testing.T) {
 	// CLI-4, copied literally: the constant must equal this text byte for byte.
 	const want = `Usage: md-viewer [--dark] [--time] FILE
