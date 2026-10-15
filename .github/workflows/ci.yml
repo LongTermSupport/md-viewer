@@ -1,0 +1,81 @@
+name: CI
+
+# build: vet, race tests and a release build on Ubuntu with Gio's build dependencies; the
+#   binary is uploaded as an artifact. From M10 it also runs the binary under Xvfb.
+# go-qa: go-qa-ci over the module, an add-on to the plain Go gate in `build`. go-qa installs
+#   its own pinned tools. go-qa-ci is private, so until it is public this job fails at its
+#   install step. It must not be skipped or made optional.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+  # Gio's Linux build dependencies (see .claude/ccy/Dockerfile for why each is needed), and
+  # Xvfb with Mesa's software renderer for the smoke run.
+  APT_PACKAGES: >-
+    gcc libc6-dev pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
+    libx11-dev libx11-xcb-dev libxcursor-dev libxfixes-dev libegl-dev libgles-dev
+    libvulkan-dev libffi-dev xvfb xauth libegl-mesa0 libgl1-mesa-dri
+
+jobs:
+  build:
+    name: Build, test, artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install Gio build dependencies
+        run: |
+          read -ra pkgs <<< "${APT_PACKAGES}"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+      - name: gofmt -l prints nothing
+        run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: go build -trimpath -o dist/md-viewer ./cmd/md-viewer
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: md-viewer-linux-amd64
+          path: dist/md-viewer
+          if-no-files-found: error
+
+  go-qa:
+    name: go-qa (go-qa-ci)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # go-qa's record ratchet compares against the merge base, which needs the history.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install Gio build dependencies
+        run: |
+          read -ra pkgs <<< "${APT_PACKAGES}"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+      - name: Install go-qa at the pinned go-qa-ci commit (fails while go-qa-ci is private)
+        env:
+          GOPRIVATE: github.com/LongTermSupport/go-qa-ci
+        run: go install "github.com/LongTermSupport/go-qa-ci/cmd/go-qa@$(tr -d '[:space:]' < qa/go-qa-ci.ref)"
+      - name: go-qa run --ci
+        run: go-qa run --ci

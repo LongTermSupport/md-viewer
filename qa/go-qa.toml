@@ -1,0 +1,2 @@
+# go-qa configuration; see go-qa-ci's README, "Configuration".
+# Empty on purpose: go-qa's defaults apply. A change to them is a reviewed diff here.

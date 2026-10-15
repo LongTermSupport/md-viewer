@@ -4,6 +4,9 @@
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 untracked/
+/dist/
+*.test
+*.out
 
 # Protected paths: contents must never be read or committed
 *.secret*
