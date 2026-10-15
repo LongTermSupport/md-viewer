@@ -34,7 +34,9 @@ abbreviations, no `=value` forms, and single-dash long forms (`-dark`) are unkno
 | `--version`    | print the version line (CLI-5) to stdout and exit 0; FILE is not needed      |
 
 If both `--help` and `--version` are given, `--help` wins. Repeating a flag is allowed and has
-the same effect as giving it once.
+the same effect as giving it once. With `--help` or `--version`, FILE is optional: one FILE
+operand is recorded and ignored, and other operands are not an error (CLI-7 still applies to
+unknown flags).
 
 **CLI-4.** The usage text is exactly:
 
@@ -78,7 +80,8 @@ version is `(devel)` and the build info carries a `vcs.revision` setting, VERSIO
 | unknown flag      | `md-viewer: unknown flag: ARG` (ARG as typed)     |
 
 When several usage errors apply, the first unknown flag (in argument order) is reported;
-otherwise the FILE count error.
+otherwise the FILE count error. An unknown flag is reported even with `--help` or `--version`;
+the FILE count is not checked with either of them (CLI-3).
 
 **CLI-8. File errors** print one line to stderr and exit 1. PATH is the FILE argument exactly
 as typed.

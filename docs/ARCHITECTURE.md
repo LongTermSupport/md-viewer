@@ -245,6 +245,7 @@ type Options struct{ Path string; Dark, Time, Help, Version bool }
 type UsageError struct{ Msg string } // the first line of CLI-7
 func ParseArgs(args []string) (Options, error)     // CLI-1..3, CLI-7
 const Usage = "..."                                // CLI-4, byte for byte
+const UsageHint = "Run 'md-viewer --help' for usage." // CLI-7, the second line of a usage error
 func VersionLine(info *debug.BuildInfo, ok bool) string // CLI-5
 
 type Clock interface{ Now() time.Time }
@@ -382,7 +383,7 @@ The gate is the plain Go toolchain: `gofmt -l .` printing nothing, `go vet ./...
 runs `go install` of go-qa at the commit in `qa/go-qa-ci.ref`, then `go-qa run --ci`; go-qa
 installs and runs its own checksum-verified tools, pinned in go-qa-ci's `tools.lock`, so
 neither this repository nor the image repeats those pins. `qa/go-qa.toml` holds only
-`modules = []` with a comment; go-qa's defaults (coverage 80%, mutants off) apply.
+the two comment lines of MILESTONES M0 and no setting; go-qa's defaults (coverage 80%, mutants off) apply.
 
 While go-qa-ci is private, the install step fails and the `go-qa` job is red on purpose.
 
