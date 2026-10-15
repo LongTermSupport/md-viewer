@@ -368,6 +368,28 @@ func TestViewClicked(t *testing.T) {
 	}
 }
 
+// TestViewClickedClipped: a link in a table column that the table clips is not clickable: a press
+// and release at the centre of its area report no click. Three columns of at least 64 dp each in a
+// 100 px window put the third column past the window's edge (STYLE-TABLE-6, LINK-1). This pins the
+// current behaviour, which the table's clip gives to a link's input as well as to its drawing.
+func TestViewClickedClipped(t *testing.T) {
+	e := newViewEnv(t, "| a | b | c |\n| - | - | - |\n| 1 | 2 | [l](https://e.org/) |", Light, metric1)
+	// Frame 1 lays out, which makes the link's gesture. Frame 2 polls before it lays out (TestViewClicked).
+	e.frame(0, 100)
+	if early, polled := e.poll(); polled {
+		t.Fatalf("a poll with no input reported %+v", early)
+	}
+	tr := e.frame(0, 100)
+	la := needMarks(t, tr, MarkLinkArea, "LinkArea")[0]
+	if la.Rect.Min.X < 100 {
+		t.Fatalf("link area starts at x=%d, want past the window's 100 px, so that its column is clipped", la.Rect.Min.X)
+	}
+	e.router.Queue(move(centre(la.Rect)), press(centre(la.Rect)), release(centre(la.Rect)))
+	if got, ok := e.poll(); ok {
+		t.Fatalf("a click on a link in a clipped column reported %+v", got)
+	}
+}
+
 // TestViewElements: every element of elements.md lays out 800 px wide with no error, and each
 // block kind that is drawn so far has its marks: text in headings, paragraphs and quotes, the
 // background of a code block and the bar of a rule.
