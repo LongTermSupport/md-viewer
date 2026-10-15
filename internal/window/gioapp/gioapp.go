@@ -14,14 +14,25 @@ import (
 // Run opens the window and runs its loop until the window is gone. It returns nil when the window
 // closed normally, a *window.FrameError when a frame failed, and otherwise the window's error
 // (CLI-6, CLI-9).
-func Run(c window.Config) error { return nil }
+func Run(c window.Config) error {
+	w := new(app.Window)
+	w.Option(options(c.Title)...)
+	return window.Loop(&source{w: w}, c)
+}
 
 // Main hands the main goroutine to gioui.org/app. It must run on the main goroutine and it never
 // returns.
 func Main() { app.Main() }
 
-// options are the window's options: its title, its size and its minimum size (WIN-1, WIN-2).
-func options(title string) []app.Option { return nil }
+// options are the window's options: its title, and its size and minimum size in dp from
+// internal/window (WIN-1, WIN-2).
+func options(title string) []app.Option {
+	return []app.Option{
+		app.Title(title),
+		app.Size(window.Width, window.Height),
+		app.MinSize(window.MinWidth, window.MinHeight),
+	}
+}
 
 // source is the window as window.Source.
 type source struct {
