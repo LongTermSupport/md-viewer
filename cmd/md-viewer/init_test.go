@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -356,23 +357,34 @@ func windowCreations(root string) ([]string, error) {
 	return found, err
 }
 
-// openCalls lists "file: os.Name" for each call in a non-test .go file under root to os.Open,
-// os.OpenFile, os.ReadFile or os.Create, once per call. os is the local name of "os" in that file.
+// pathOpeners maps an import path to the functions of that package that open a file by path. A
+// method on a value, such as (*os.Root).Open, has no package name to match and is not listed.
+var pathOpeners = map[string][]string{
+	"os":        {"Create", "Open", "OpenFile", "OpenInRoot", "OpenRoot", "ReadDir", "ReadFile"},
+	"syscall":   {"Open"},
+	"io/ioutil": {"ReadFile"},
+}
+
+// openCalls lists "file: pkg.Name" for each call in a non-test .go file under root to a function in
+// pathOpeners, once per call. pkg is the package's name (os, syscall or ioutil), and the file's
+// local name for the import may differ from it.
 func openCalls(root string) ([]string, error) {
 	var found []string
 	err := goFiles(root, func(rel string, f *ast.File) error {
-		local := ""
+		pkgOf := make(map[string]string)
 		for _, imp := range f.Imports {
-			if imp.Path.Value != `"os"` {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				return err
+			}
+			if _, ok := pathOpeners[path]; !ok {
 				continue
 			}
-			local = "os"
+			local := filepath.Base(path)
 			if imp.Name != nil {
 				local = imp.Name.Name
 			}
-		}
-		if local == "" {
-			return nil
+			pkgOf[local] = path
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
@@ -384,13 +396,14 @@ func openCalls(root string) ([]string, error) {
 				return true
 			}
 			x, ok := sel.X.(*ast.Ident)
-			if !ok || x.Name != local {
+			if !ok {
 				return true
 			}
-			switch sel.Sel.Name {
-			case "Open", "OpenFile", "ReadFile", "Create":
-				found = append(found, rel+": os."+sel.Sel.Name)
+			path, ok := pkgOf[x.Name]
+			if !ok || !slices.Contains(pathOpeners[path], sel.Sel.Name) {
+				return true
 			}
+			found = append(found, rel+": "+filepath.Base(path)+"."+sel.Sel.Name)
 			return true
 		})
 		return nil
@@ -401,18 +414,23 @@ func openCalls(root string) ([]string, error) {
 // TestFileOpens (CLI-8, M12): the only call in non-test code that opens a file is the os.OpenFile in
 // internal/doc/open.go, which opens without blocking and judges the open file. Every other reader
 // goes through doc.OpenRegular, so no open can block on a FIFO that a path was swapped for. The
-// fixture row shows the check finds an open made through an import alias.
+// fixture row shows the check finds an open made through an import alias, and passes os.NewFile and
+// syscall.Close, which open no file by path.
 func TestFileOpens(t *testing.T) {
 	t.Run("fixture with two opens", func(t *testing.T) {
 		dir := writeTree(t, map[string]string{
-			"x.go":      "package x\n\nimport o \"os\"\n\nfunc f() {\n\to.Open(\"a\")\n\to.ReadFile(\"b\")\n}\n",
+			"x.go": "package x\n\nimport (\n\to \"os\"\n\t\"io/ioutil\"\n\t\"syscall\"\n)\n\nfunc f() {\n" +
+				"\to.Open(\"a\")\n\to.ReadFile(\"b\")\n\to.OpenRoot(\"c\")\n\to.ReadDir(\"d\")\n" +
+				"\tioutil.ReadFile(\"e\")\n\tsyscall.Open(\"f\")\n\to.NewFile(3, \"g\")\n\tsyscall.Close(3)\n}\n",
 			"x_test.go": "package x\n\nimport \"os\"\n\nfunc g() { os.Open(\"c\") }\n",
 		})
 		got, err := openCalls(dir)
 		if err != nil {
 			t.Fatalf("openCalls: %v", err)
 		}
-		if want := []string{"x.go: os.Open", "x.go: os.ReadFile"}; !slices.Equal(got, want) {
+		want := []string{"x.go: os.Open", "x.go: os.ReadFile", "x.go: os.OpenRoot", "x.go: os.ReadDir",
+			"x.go: ioutil.ReadFile", "x.go: syscall.Open"}
+		if !slices.Equal(got, want) {
 			t.Errorf("openCalls = %q, want %q", got, want)
 		}
 	})
