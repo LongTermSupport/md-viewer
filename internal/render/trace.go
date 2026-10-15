@@ -37,7 +37,7 @@ const (
 type Trace struct{ Marks []Mark }
 
 // Mark is one thing layout drew. Rect is in pixels relative to the flow's top-left corner
-// (ARCHITECTURE "internal/render", I7).
+// (ARCHITECTURE "internal/render", mark rectangles).
 type Mark struct {
 	Kind   MarkKind
 	Rect   image.Rectangle

@@ -179,13 +179,14 @@ func newFlow(gtx layout.Context, fp flowParams, tr *Trace) (*flow, error) {
 	}, nil
 }
 
-// pxOf is a size in px before any rounding (ARCHITECTURE, I3).
+// pxOf is a size in px before any rounding; a length is rounded once, where it is used
+// (ARCHITECTURE "internal/render", text flow rules).
 func pxOf(gtx layout.Context, s unit.Sp) float64 {
 	return float64(s) * float64(gtx.Metric.PxPerSp)
 }
 
 // pxPerEm is the size the shaper draws a style at: the size in px, rounded up to a whole pixel
-// (ARCHITECTURE, I4).
+// (ARCHITECTURE "internal/render", text flow rules).
 func pxPerEm(gtx layout.Context, s unit.Sp) fixed.Int26_6 {
 	return fixed.I(int(math.Ceil(pxOf(gtx, s))))
 }
@@ -300,7 +301,7 @@ func (f *flow) shape(ts TextStyle, s string, policy text.WrapPolicy, maxWidth in
 }
 
 // byteLen is the number of bytes that the first runes runes of s take. An invalid byte is one
-// rune (DOC-15, P7).
+// rune (DOC-15).
 func byteLen(s string, runes int) int {
 	n := 0
 	for i := 0; i < runes && n < len(s); i++ {

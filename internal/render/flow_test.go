@@ -73,7 +73,7 @@ func (e *flowEnv) trace(runs []doc.Run) *Trace {
 	return tr
 }
 
-// frame is one router frame: reset the ops, lay out runs, then r.Frame (P9, P10).
+// frame is one router frame: reset the ops, lay out runs, then r.Frame.
 func (e *flowEnv) frame(runs []doc.Run) *Trace {
 	e.t.Helper()
 	e.ops.Reset()
@@ -83,7 +83,7 @@ func (e *flowEnv) frame(runs []doc.Run) *Trace {
 }
 
 // poll is one frame's click poll, made before that frame is laid out, as View.Clicked is each
-// frame (M5). A gesture takes its pointer events from the polls before them (P9).
+// frame (M5). A gesture takes its pointer events from the polls before them.
 func (e *flowEnv) poll() (doc.Target, bool) {
 	e.ops.Reset()
 	return e.fp.links.clicked(e.context())
@@ -490,7 +490,7 @@ func TestFlowLinkClick(t *testing.T) {
 	runs := []doc.Run{plain("go to "), linkRun("the docs", tg)}
 	e := newFlowEnv(t, 800)
 	// Frame 1 lays out, which makes the link's gesture. Frame 2 polls before it lays out, as
-	// every frame does, so the gesture takes the events queued after it (P9).
+	// every frame does, so the gesture takes the events queued after it.
 	tr := e.frame(runs)
 	if early, polled := e.poll(); polled {
 		t.Fatalf("a poll with no input reported %+v", early)
@@ -523,7 +523,7 @@ func TestFlowLinkClick(t *testing.T) {
 }
 
 // TestFlowLinkCursor: over a link the pointer is the hand, and over plain text it is the
-// default (STYLE-TEXT-3). The cursor changes at the frame after the move (P10).
+// default (STYLE-TEXT-3). The cursor changes at the frame that takes the move.
 func TestFlowLinkCursor(t *testing.T) {
 	tg := &doc.Target{Kind: doc.External, Value: "https://e.org/"}
 	runs := []doc.Run{plain("go to "), linkRun("the docs", tg)}
