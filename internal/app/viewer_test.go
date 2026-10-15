@@ -251,6 +251,16 @@ func (e *viewerEnv) absY() int {
 // viewer lays block 0 at the top-left of the list, so this is where a click must go.
 func linkCentre(t *testing.T, d *doc.Document, images *render.Images, width int) f32.Point {
 	t.Helper()
+	centres := linkAreas(t, d, images, width)
+	if len(centres) == 0 {
+		t.Fatal("block 0 has no link area")
+	}
+	return centres[0]
+}
+
+// linkAreas is the centre of every link area of block 0 of d, in order, laid out at width px.
+func linkAreas(t *testing.T, d *doc.Document, images *render.Images, width int) []f32.Point {
+	t.Helper()
 	v := render.NewView(d, shaper(t), render.Light, images)
 	var ops op.Ops
 	gtx := layout.Context{
@@ -260,16 +270,16 @@ func linkCentre(t *testing.T, d *doc.Document, images *render.Images, width int)
 	}
 	var tr render.Trace
 	v.Layout(gtx, 0, &tr)
+	var centres []f32.Point
 	for _, m := range tr.Marks {
 		if m.Kind == render.MarkLinkArea {
-			return f32.Pt(
+			centres = append(centres, f32.Pt(
 				float32(m.Rect.Min.X+m.Rect.Dx()/2),
 				float32(m.Rect.Min.Y+m.Rect.Dy()/2),
-			)
+			))
 		}
 	}
-	t.Fatal("block 0 has no link area")
-	return f32.Point{}
+	return centres
 }
 
 // linkDoc is one paragraph holding the link src, first in the document.
@@ -989,6 +999,77 @@ func TestOpenerFailureReported(t *testing.T) {
 			t.Errorf("stderr is %q, want nothing", stderr.String())
 		}
 	})
+}
+
+// TestOpenerFailureNextFrame checks LINK-2's rule for a line that cannot be written: the failed
+// write is returned by the next frame, which fails, and the frame after that does not.
+func TestOpenerFailureNextFrame(t *testing.T) {
+	d := linkDoc(t, "[e](https://e.org/x)")
+	e := newEnv(t, d, defaultSize, failWriter{})
+	e.opener.err = errors.New("exit status 3")
+	e.frame()
+	e.click(linkCentre(t, d, e.images, defaultSize.X-10))
+	e.frame()
+	e.runSpawned()
+	quit, err := e.step()
+	if err == nil || !strings.Contains(err.Error(), "write failed") {
+		t.Errorf("frame after the failed write returned quit %v, err %v; want the write error", quit, err)
+	}
+	quit, err = e.step()
+	if quit || err != nil {
+		t.Errorf("second frame after the failed write returned quit %v, err %v; want false, nil", quit, err)
+	}
+}
+
+// signalBuffer is a writer that is not safe for concurrent use. It tells the test each write
+// has ended, on wrote, so the test can read it after the writes without a sleep.
+type signalBuffer struct {
+	buf   bytes.Buffer
+	wrote chan struct{}
+}
+
+// Write appends p, then signals.
+func (s *signalBuffer) Write(p []byte) (int, error) {
+	n, err := s.buf.Write(p)
+	s.wrote <- struct{}{}
+	return n, err
+}
+
+// TestViewerGoSpawnWrites runs the real goroutine path (goSpawn) with a writer that is not safe
+// for concurrent use. The opener's line is written from the goroutine, and a missing-file line
+// from the frame, at the same time. The viewer serialises its writes, so both lines arrive whole
+// and the race detector sees no conflict.
+func TestViewerGoSpawnWrites(t *testing.T) {
+	dir := t.TempDir()
+	d := parse(t, "[e](https://e.org/x) [n](nope.md)\n", dir)
+	w := &signalBuffer{wrote: make(chan struct{}, 2)}
+	e := newEnv(t, d, defaultSize, w)
+	e.vw = newViewer(e.view, render.Light, e.opener, w, goSpawn)
+	e.opener.err = errors.New("exit status 3")
+	centres := linkAreas(t, d, e.images, defaultSize.X-10)
+	if len(centres) != 2 {
+		t.Fatalf("block 0 has %d link areas, want 2", len(centres))
+	}
+	e.frame()
+	e.click(centres[0])
+	e.frame() // the click starts the opener's function in its goroutine
+	e.click(centres[1])
+	e.frame() // the missing-file line is written from this frame
+	<-w.wrote
+	<-w.wrote
+	got := strings.Split(strings.TrimSuffix(w.buf.String(), "\n"), "\n")
+	want := []string{
+		"md-viewer: cannot open link: https://e.org/x: exit status 3",
+		"md-viewer: link target not found: " + filepath.Join(dir, "nope.md"),
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("stderr lines are %q, want %q", got, want)
+	}
+	if !slices.Equal(e.opener.calls, []string{"https://e.org/x"}) {
+		t.Errorf("opener was called with %q, want the external link", e.opener.calls)
+	}
 }
 
 // TestViewerQuit checks WIN-4: q and Esc quit, with the modifiers the spec allows, and nothing

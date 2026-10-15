@@ -59,6 +59,10 @@ type Viewer struct {
 	stderr   io.Writer
 	spawn    func(func())
 
+	// stderrMu serialises the viewer's writes to stderr: the frame and the opener's goroutine both
+	// write there.
+	stderrMu sync.Mutex
+
 	// asyncMu guards asyncErr, the error of a write made by a spawned function, which the next
 	// frame returns.
 	asyncMu  sync.Mutex
@@ -66,7 +70,9 @@ type Viewer struct {
 }
 
 // NewViewer makes the viewer of v, painted in p, whose links open with o and whose diagnostics go
-// to stderr.
+// to stderr. The viewer serialises its own writes to stderr, from the frame and from the opener's
+// goroutine, so stderr need not be safe for concurrent use; nothing else may write to it while
+// the viewer runs.
 func NewViewer(v *render.View, p render.Palette, o Opener, stderr io.Writer) *Viewer {
 	return newViewer(v, p, o, stderr, goSpawn)
 }
@@ -128,6 +134,8 @@ func (vw *Viewer) followLink(t doc.Target) error {
 		vw.open(t)
 		return nil
 	case doc.LocalFile:
+		// Stat runs in the frame: LINK-1 needs the target to exist before the opener starts. A slow
+		// file system (a hung network mount, say) delays the frame by as long.
 		_, err := os.Stat(t.Value)
 		switch {
 		case err == nil:
@@ -163,7 +171,9 @@ func (vw *Viewer) open(t doc.Target) {
 	})
 }
 
-// takeAsyncErr returns the error kept from a spawned function, and clears it.
+// takeAsyncErr returns the error kept from a spawned function, and clears it. The spawned function
+// does not invalidate the window, so the error is seen at the next frame (LINK-2); a window that
+// closes first never sees it.
 func (vw *Viewer) takeAsyncErr() error {
 	vw.asyncMu.Lock()
 	defer vw.asyncMu.Unlock()
@@ -174,6 +184,8 @@ func (vw *Viewer) takeAsyncErr() error {
 
 // printf writes a diagnostic to stderr and returns the write's error.
 func (vw *Viewer) printf(format string, args ...any) error {
+	vw.stderrMu.Lock()
+	defer vw.stderrMu.Unlock()
 	_, err := fmt.Fprintf(vw.stderr, format, args...)
 	return err
 }
