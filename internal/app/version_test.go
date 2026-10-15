@@ -56,6 +56,23 @@ func TestVersionLine(t *testing.T) {
 			want: "md-viewer unknown",
 		},
 		{
+			name: "devel with empty revision has no trailing space",
+			info: &debug.BuildInfo{
+				Main: debug.Module{Version: "(devel)"},
+				Settings: []debug.BuildSetting{
+					{Key: "vcs.revision", Value: ""},
+				},
+			},
+			ok:   true,
+			want: "md-viewer (devel)",
+		},
+		{
+			name: "empty module version is unknown",
+			info: &debug.BuildInfo{Main: debug.Module{Version: ""}},
+			ok:   true,
+			want: "md-viewer unknown",
+		},
+		{
 			name: "pseudo-version printed unchanged",
 			info: &debug.BuildInfo{
 				Main: debug.Module{Version: "v0.0.0-20261015093457-bc31de7ac1ad+dirty"},

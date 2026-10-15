@@ -22,12 +22,15 @@ func VersionLine(info *debug.BuildInfo, ok bool) string {
 		return progName + " " + unknownVersion
 	}
 	v := info.Main.Version
+	if v == "" {
+		v = unknownVersion
+	}
 	if v == develVersion {
 		settings := make(map[string]string, len(info.Settings))
 		for _, s := range info.Settings {
 			settings[s.Key] = s.Value
 		}
-		if rev, found := settings[revisionKey]; found {
+		if rev := settings[revisionKey]; rev != "" {
 			v += " " + rev[:min(revisionChars, len(rev))]
 			if settings[modifiedKey] == modifiedValue {
 				v += dirtySuffix
