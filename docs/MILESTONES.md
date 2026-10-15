@@ -383,11 +383,13 @@ trace. Use the headless test pattern of ARCHITECTURE.md with `Metric{PxPerDp: 1,
 
 **Tests first:**
 
-The tests are in `trace_test.go` and `flow_test.go`, 16 in all: `TestTraceAdd`, then
+The tests are in `trace_test.go` and `flow_test.go`, 23 in all: `TestTraceAdd`, then
 `TestFlowLineHeight`, `TestFlowWrapsToWidth`, `TestFlowLongWord`, `TestFlowBreakRun`,
 `TestFlowCodeBackground`, `TestFlowCodeInHeading`, `TestFlowStrike`, `TestFlowLinkArea`,
 `TestFlowLinkClick`, `TestFlowLinkCursor`, `TestFlowInvalidUTF8`, `TestFlowUnknownRunKind`,
-`TestFlowNilTrace`, `TestFlowEmptyRuns` and `TestFlowLeadingSpace`.
+`TestFlowNilTrace`, `TestFlowEmptyRuns`, `TestFlowLeadingSpace`, `TestFlowTinyWidth`,
+`TestFlowRunBoundary`, `TestFlowTrailingSpace`, `TestFlowStrikeCode`, `TestFlowLinkWrap`,
+`TestFlowBidi` and `TestFlowZeroGlyphs`.
 
 - `TestFlowWrapsToWidth`: a 60-word paragraph at 800 px and at 200 px: the second is taller,
   and at each width every `Glyphs` mark's `Rect.Max.X` is ≤ the width.
@@ -415,6 +417,16 @@ The tests are in `trace_test.go` and `flow_test.go`, 16 in all: `TestTraceAdd`, 
 - `TestFlowEmptyRuns`: no runs give one empty line of 24 px and no `Glyphs` marks.
 - `TestFlowLeadingSpace`: a non-code run that starts a line drops its leading space; a code
   run keeps it.
+- `TestFlowTinyWidth`: at width 0 and 1, `ab` lays out as `a` then `b` on separate lines, with
+  no error and the text `ab`.
+- `TestFlowRunBoundary`: `ab` then a 30-character run at 100 px gives `ab`, a space, then 12, 12
+  and 6 characters; `ab` and `cd` in separate runs at 20 px break between them.
+- `TestFlowTrailingSpace`: `ab cd` at 30 px gives `ab ` then `cd`, with the text whole.
+- `TestFlowStrikeCode`: a struck code run's `Strike` spans its `CodeBg`, padding included.
+- `TestFlowLinkWrap`: a click on the second fragment of a wrapped link reports the link.
+- `TestFlowBidi`: a Hebrew word and an Arabic word each span from x 0 to their width, and the
+  text after them starts at that width.
+- `TestFlowZeroGlyphs`: a fragment with no glyphs is an error.
 
 **Verification:** the standard checks.
 
