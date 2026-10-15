@@ -319,8 +319,9 @@ Flow rules:
   that link, in a fixed order. `clicked(gtx)` drains them once per frame and returns the first
   `KindClick`. M5's `View` owns the `links` and `View.Clicked` delegates to it.
 - **Dimensions.** `Size.X` is the widest line, at least `Constraints.Min.X`; `Baseline` is
-  `Size.Y` minus the first baseline. Every block layout sets `Baseline` the same way, to its first
-  text line; a block with none uses the rule of STYLE-LIST-2.
+  `Size.Y` minus the first baseline. Every block with a text line sets `Baseline` the same way, to
+  that line. A block with none has no first baseline; a list marker then takes its position from
+  the rule of STYLE-LIST-2.
 - **Known limitation.** A run boundary can break a word (as in styledtext).
 
 **Lists** are laid out by `list.go` from the same primitives. Each item's content is laid out with
