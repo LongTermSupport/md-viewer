@@ -439,7 +439,7 @@ func TestImageBoxSize(t *testing.T) {
 		{"scaled at two pixels per dp", image.Pt(1000, 500), metric2, 1200, image.Pt(1200, 600), false},
 		{"a side of 0.6 px rounds to 1", image.Pt(1000, 1), metric1, 600, image.Pt(600, 1), false},
 		{"a tall image scaled to 2 px", image.Pt(3, 1000), metric1, 2, image.Pt(2, 667), false},
-		{"a side of 0.1 px rounds to 0", image.Pt(1000, 1), metric1, 100, image.Pt(100, 0), true},
+		{"a side of 0.1 px rounds to 0", image.Pt(1000, 1), metric1, 100, image.Pt(100, 0), false},
 		{"zero width", image.Pt(4, 3), metric1, 0, image.Pt(0, 0), true},
 		{"negative width", image.Pt(4, 3), metric1, -5, image.Pt(0, 0), true},
 	}

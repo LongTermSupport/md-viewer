@@ -345,7 +345,8 @@ not used: it imports `golang.org/x/exp`, which the module does not name. `golang
 not used either: STYLE-IMG-1 names PNG and JPEG only. The decode worker is one
 goroutine over a FIFO queue of images, started when the queue gets its first request and exiting
 when it is empty (SPEED-5, SPEED-6). It calls the window's invalidate, bound by `Images.Bind`,
-which is safe to call from any goroutine. Layout never waits for it.
+which is safe to call from any goroutine. An image decoded before `Bind` is drawn on the next frame
+only, so `Bind` precedes the first layout. Layout never waits for it.
 
 **Tables** (`table.go`). `checkTable` first: no columns, a count of alignments other than the
 header's, a body row whose length is not the header's, or an alignment that is not one of the four

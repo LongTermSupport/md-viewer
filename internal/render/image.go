@@ -202,7 +202,8 @@ func refusedReason(dest string) string {
 }
 
 // Bind sets the function that the worker calls when an image's pixels are ready: the window's
-// invalidate. Until it is bound, the calls do nothing, so layout without a window is valid.
+// invalidate. Until it is bound, the calls do nothing, so layout without a window is valid. An image
+// decoded before Bind is drawn on the next frame only, so Bind must precede the first layout.
 func (im *Images) Bind(invalidate func()) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
