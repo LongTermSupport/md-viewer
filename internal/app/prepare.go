@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/LongTermSupport/md-viewer/internal/doc"
+	"github.com/LongTermSupport/md-viewer/internal/render"
 )
 
 // Clock gives the current time. Load takes its readings from it, so tests use a fake clock.
@@ -36,6 +37,7 @@ type Prepared struct {
 	opts       Options
 	document   *doc.Document
 	stats      doc.LoadStats
+	images     *render.Images
 }
 
 // Prepare handles the command line and the file before any window opens (SPEED-1). A usage
@@ -85,7 +87,13 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCo
 			return Prepared{}, ExitFailure, werr
 		}
 	}
-	return Prepared{OpenWindow: true, opts: opts, document: d, stats: stats}, ExitOK, nil
+	// The image lines follow DOC-9's line, in document order (STYLE-IMG-3). Their write error is a
+	// failed write like any other (P12).
+	images, err := render.NewImages(d, stderr)
+	if err != nil {
+		return Prepared{}, ExitFailure, err
+	}
+	return Prepared{OpenWindow: true, opts: opts, document: d, stats: stats, images: images}, ExitOK, nil
 }
 
 // loadMessage is the stderr line for a file that cannot be loaded: CLI-8's wording for each typed

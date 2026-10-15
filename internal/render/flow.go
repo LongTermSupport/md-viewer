@@ -454,11 +454,18 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 // release in it is the link's click (LINK-1, STYLE-TEXT-3). The area is the link fragment's
 // width and the whole line box.
 func (f *flow) linkArea(t *doc.Target, rect image.Rectangle) {
-	stack := clip.Rect(rect).Push(f.gtx.Ops)
-	pointer.CursorPointer.Add(f.gtx.Ops)
-	f.fp.links.click(t).Add(f.gtx.Ops)
+	linkArea(f.gtx, f.fp.links, t, rect, f.tr)
+}
+
+// linkArea makes rect the clickable area of link t, in a flow or around an image (LINK-1,
+// STYLE-TEXT-3, STYLE-IMG-4): the hand cursor shows over it, a press and release in it is the
+// link's click, and the area is recorded as a mark. tr may be nil.
+func linkArea(gtx layout.Context, links *links, t *doc.Target, rect image.Rectangle, tr *Trace) {
+	stack := clip.Rect(rect).Push(gtx.Ops)
+	pointer.CursorPointer.Add(gtx.Ops)
+	links.click(t).Add(gtx.Ops)
 	stack.Pop()
-	f.tr.add(Mark{Kind: MarkLinkArea, Rect: rect, Link: t})
+	tr.add(Mark{Kind: MarkLinkArea, Rect: rect, Link: t})
 }
 
 // strike draws the line through a struck fragment that spans x from start to end (STYLE-TEXT-4):

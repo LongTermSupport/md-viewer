@@ -2,6 +2,9 @@ package app
 
 import (
 	"bytes"
+	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,4 +167,46 @@ func TestPrepareHTMLLine(t *testing.T) {
 	plain := filepath.Join(tmp, "plain.md")
 	writeFile(t, plain, "# a\n")
 	checkRun(t, runPrepare(t, plain), "", "", 0, true)
+}
+
+// failWriter is a writer whose every write fails.
+type failWriter struct{}
+
+// Write fails.
+func (failWriter) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("write failed")
+}
+
+// TestPrepareImages: after DOC-9's line, one stderr line for each image that is not drawn, in
+// document order (STYLE-IMG-3, SPEED-1). The file loads with its images probed. A failed write to
+// stderr is ExitFailure and opens no window (P12).
+func TestPrepareImages(t *testing.T) {
+	tmp := t.TempDir()
+	var ok bytes.Buffer
+	if err := png.Encode(&ok, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatalf("encode ok.png: %v", err)
+	}
+	writeFile(t, filepath.Join(tmp, "ok.png"), ok.String())
+	doc := filepath.Join(tmp, "doc.md")
+	writeFile(t, doc, "<b>x</b>\n\n![A missing image](missing.png)\n\n![r](https://e.org/r.png)\n\n![ok](ok.png)\n")
+
+	r := runPrepare(t, doc)
+	const stderr = "md-viewer: 2 HTML fragment(s) not shown: HTML is not rendered\n" +
+		"md-viewer: image not shown: missing.png: no such file or directory\n" +
+		"md-viewer: image not shown: https://e.org/r.png: remote images are not loaded\n"
+	checkRun(t, r, "", stderr, 0, true)
+	if r.prep.images == nil {
+		t.Errorf("Prepared.images is nil, want the document's images")
+	}
+
+	t.Run("a failed write to stderr", func(t *testing.T) {
+		missing := filepath.Join(tmp, "missing.md")
+		writeFile(t, missing, "![m](missing.png)\n")
+		clock := &stepClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+		var stdout bytes.Buffer
+		prep, code := Prepare([]string{missing}, &stdout, failWriter{}, clock)
+		if code != ExitFailure || prep.OpenWindow {
+			t.Fatalf("exit code %d, OpenWindow %t; want %d and false", code, prep.OpenWindow, ExitFailure)
+		}
+	})
 }

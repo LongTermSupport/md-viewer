@@ -23,6 +23,7 @@ type blockCtx struct {
 	root   Palette
 	shaper *text.Shaper
 	links  *links
+	images *Images
 	depth  int  // the number of lists around this block (STYLE-LIST-2, STYLE-LIST-3)
 	tight  bool // this block is a direct child of a tight list's item (STYLE-LIST-4)
 }
@@ -97,7 +98,6 @@ func blockGap(prev, next doc.Block) (unit.Dp, error) {
 // layoutBlock lays out one block at the width of gtx, and records its marks in tr. A block with
 // no layout is an error, and so is a Heading level that HeadingStyle rejects.
 func layoutBlock(gtx layout.Context, ctx blockCtx, b doc.Block, tr *Trace) (layout.Dimensions, error) {
-	width := gtx.Constraints.Max.X
 	switch b := b.(type) {
 	case doc.Paragraph:
 		return layoutFlow(gtx, ctx.flow(BodyStyle(ctx.text), false, wrapProse), b.Runs, tr)
@@ -114,8 +114,7 @@ func layoutBlock(gtx layout.Context, ctx blockCtx, b doc.Block, tr *Trace) (layo
 	case doc.Table:
 		return layoutTable(gtx, ctx, b, tr)
 	case doc.Image:
-		// A placeholder until M8: height 0, with the margins the caller gives.
-		return layout.Dimensions{Size: image.Pt(width, 0)}, nil
+		return layoutImage(gtx, ctx, b, tr)
 	default:
 		return layout.Dimensions{}, fmt.Errorf("render: no layout for block %T", b)
 	}

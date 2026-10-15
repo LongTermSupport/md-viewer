@@ -98,7 +98,8 @@ func TestMainUsageExit(t *testing.T) {
 	})
 
 	// A file that loads still ends with the M2 line and exit 1; M10 removes it (P13).
-	// elements.md has four HTML fragments, so DOC-9's line comes first.
+	// elements.md has four HTML fragments, so DOC-9's line comes first, then one line for each image
+	// that is not drawn (STYLE-IMG-3): the missing one and the remote one.
 	t.Run("loaded FILE is not implemented yet", func(t *testing.T) {
 		stdout, stderr, code := runBinary(t, bin, "../../testdata/elements.md")
 		if code != 1 {
@@ -108,6 +109,8 @@ func TestMainUsageExit(t *testing.T) {
 			t.Errorf("stdout = %q, want empty", stdout)
 		}
 		const want = "md-viewer: 4 HTML fragment(s) not shown: HTML is not rendered\n" +
+			"md-viewer: image not shown: img/missing.png: no such file or directory\n" +
+			"md-viewer: image not shown: https://example.com/remote.png: remote images are not loaded\n" +
 			"md-viewer: not implemented yet\n"
 		if stderr != want {
 			t.Errorf("stderr = %q, want %q", stderr, want)

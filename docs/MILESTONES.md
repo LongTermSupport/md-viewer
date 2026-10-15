@@ -574,9 +574,13 @@ gains its `img *Images` parameter (M5 built `NewView(d, sh, p)`).
   `Metric{PxPerDp: 2}` 8 × 6.
 - `TestImageScaledDown`: a 1000 × 500 image (generated in the test into `t.TempDir()`) at
   600 px content width is 600 × 300.
-- `TestImagePlaceholders`: missing file, GIF, broken PNG and a remote URL each give a
-  `Placeholder` mark with the alt text (or the destination when alt is empty) and one stderr
-  line of STYLE-IMG-3's form each.
+- `TestImagePlaceholders`: missing file, GIF, a file that is not an image (`broken.png`), a
+  remote URL, a fragment, a directory, a truncated header and a too-large header each give a
+  `Placeholder` mark with the alt text (or the destination when alt is empty), hugging its text
+  (STYLE-IMG-3), and one stderr line of STYLE-IMG-3's form each.
+- `TestImageSizeCap`: generated PNG headers (no pixel data) at the STYLE-IMG-1 limits: 8192 × 1
+  and 1 × 8192 and 8000 × 5000 (40 million pixels) are drawn; 8193 × 1, 1 × 8193, 8000 × 5001 and
+  8192 × 8192 are placeholders with `image too large: WxH`.
 - `TestImageLazyDecode`: before the block is laid out, no pixels are decoded; after
   `Layout` the decode starts, the bound invalidate function is called once when it is done,
   and the next layout has an `ImagePixels` mark. Before that, the box is `BgMuted` at its
