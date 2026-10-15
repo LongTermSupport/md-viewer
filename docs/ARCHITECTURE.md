@@ -126,12 +126,12 @@ type Target struct {
 	Dest  string // the destination as written, for messages
 }
 
-func Parse(src []byte, dir string) (*Document, error) // DOC-1..12, DOC-14
-func ResolveLink(dir, dest string) Target            // DOC-5; dest as written: escapes and references are resolved first
-func Load(path string, now func() time.Time) (*Document, LoadStats, error) // DOC-13; sets Name and Dir
-func OpenRegular(path string) (*os.File, fs.FileInfo, error) // CLI-8: Stat, then a non-blocking open checked again; used by Load and render's images
-var ErrDirectory, ErrNotRegular error                       // the Err of the *fs.PathError that OpenRegular wraps
-type LoadStats struct{ Read, Parse time.Duration }   // for --time (SPEED-2)
+func Parse(src []byte, dir string) (*Document, error)                       // DOC-1..12, DOC-14
+func ResolveLink(dir, dest string) Target                                   // DOC-5; dest as written: escapes and references are resolved first
+func Load(path string, now func() time.Time) (*Document, LoadStats, error)  // DOC-13; sets Name and Dir
+func OpenRegular(path string) (*os.File, fs.FileInfo, error)                // CLI-8: Stat, then a non-blocking open judged again; used by Load and images
+var ErrDirectory, ErrNotRegular error                                       // the Err of the *fs.PathError that OpenRegular wraps
+type LoadStats struct{ Read, Parse time.Duration }                          // for --time (SPEED-2)
 
 // Load errors, each a distinct type so the CLI chooses the message (CLI-8)
 // without matching strings:
@@ -355,11 +355,12 @@ Flow rules:
 a `blockCtx` whose `depth` counts the lists around the block and whose `tight` is set for a direct
 child of a tight list's item; `quoteCtx` clears `tight` and keeps `depth`. **Tables** are laid
 out by `table.go` (below). **Images** are laid out by `image.go`: a box at the probed size (scaled
-down to the available width, STYLE-IMG-2), then the pixels or a placeholder (STYLE-IMG-3). The file is opened through `doc.OpenRegular` (CLI-8). Pixels
-are drawn with `paint.NewImageOp` and `op.Affine`, scaled into the probed box, so a decoded size
-that differs from the probed one (the file changed) does not move the layout. `widget.Image` is
-not used: `image.go` lays out the probed box itself (STYLE-IMG-2) and draws into it. `golang.org/x/image/webp` is
-not used either: STYLE-IMG-1 names PNG and JPEG only. The decode worker is one
+down to the available width, STYLE-IMG-2), then the pixels or a placeholder (STYLE-IMG-3).
+The file is opened through `doc.OpenRegular` (CLI-8). Pixels are drawn with `paint.NewImageOp`
+and `op.Affine`, scaled into the probed box, so a decoded size that differs from the probed one
+(the file changed) does not move the layout. `widget.Image` is not used: `image.go` lays out the
+probed box itself (STYLE-IMG-2) and draws into it. `golang.org/x/image/webp` is not used either:
+STYLE-IMG-1 names PNG and JPEG only. The decode worker is one
 goroutine over a FIFO queue of images, started when the queue gets its first request and exiting
 when it is empty (SPEED-5, SPEED-6). It calls the window's invalidate, bound by `Images.Bind`,
 which is safe to call from any goroutine. An image decoded before `Bind` is drawn on the next frame
@@ -617,11 +618,11 @@ While go-qa-ci is private, the install step fails and the `go-qa` job is red on 
 
 md-viewer is Linux first. These are the places another platform plugs in:
 
-| Seam               | Where                                   | Linux now                         | Elsewhere                                                        |
-| ------------------ | --------------------------------------- | --------------------------------- | ---------------------------------------------------------------- |
-| window and input   | `internal/window`                       | Gio, Wayland or X11               | Gio supports macOS and Windows unchanged                         |
-| link opener        | `internal/app/opener_*.go` (build tags) | `xdg-open`                        | `open` (macOS), `rundll32 url.dll,FileProtocolHandler` (Windows) |
-| colour scheme      | `--dark` only                           | flag                              | a platform query could set the default                           |
-| fonts              | `render.LoadFaces`                      | embedded Go fonts                 | the same; nothing platform-specific                              |
-| paths              | `doc.ResolveLink`, `doc.Load`, `doc.OpenRegular` | `path/filepath`          | the same; `doc.OpenRegular`'s O_NONBLOCK and O_NOCTTY are ignored on Windows, which has no FIFOs |
-| build dependencies | README, CI, `.claude/ccy/Dockerfile`    | Wayland, X11, EGL, Vulkan headers | none on macOS and Windows (Gio uses system frameworks)           |
+| Seam               | Where                                            | Linux now                         | Elsewhere                                                                                  |
+| ------------------ | ------------------------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------ |
+| window and input   | `internal/window`                                | Gio, Wayland or X11               | Gio supports macOS and Windows unchanged                                                   |
+| link opener        | `internal/app/opener_*.go` (build tags)          | `xdg-open`                        | `open` (macOS), `rundll32 url.dll,FileProtocolHandler` (Windows)                           |
+| colour scheme      | `--dark` only                                    | flag                              | a platform query could set the default                                                     |
+| fonts              | `render.LoadFaces`                               | embedded Go fonts                 | the same; nothing platform-specific                                                        |
+| paths              | `doc.ResolveLink`, `doc.Load`, `doc.OpenRegular` | `path/filepath`                   | the same; the flags O_NONBLOCK and O_NOCTTY are ignored on Windows (no FIFOs)              |
+| build dependencies | README, CI, `.claude/ccy/Dockerfile`             | Wayland, X11, EGL, Vulkan headers | none on macOS and Windows (Gio uses system frameworks)                                     |

@@ -230,8 +230,9 @@ neighbours.
 thematic break maps to `Rule`.
 
 **DOC-13. Loading.** `doc.Load(path, now)` applies CLI-8's checks in that order (stat, directory,
-regular file, open, directory and regular file again on the open file, size, read, NUL) and returns typed errors, as pointers, that the CLI turns into the messages of
-CLI-8 (the CLI owns the wording). `Document.Dir` is the absolute directory of the file, and
+regular file, open, directory and regular file again on the open file, size, read, NUL) and
+returns typed errors, as pointers, that the CLI turns into the messages of CLI-8 (the CLI owns the
+wording). `Document.Dir` is the absolute directory of the file, and
 `Document.Name` its base name. `Load` sets `Name` and passes the absolute directory to `Parse`,
 which stores it as `Document.Dir`. An error from `filepath.Abs` or `Parse` is returned as a plain
 error, and the CLI prints `md-viewer: ` + the error and exits 1. `now` is called exactly

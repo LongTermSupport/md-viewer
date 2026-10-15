@@ -827,6 +827,8 @@ M11.
 - `TestOpenRegular`, `TestOpenFlags`: a regular file opens with its size; a missing file gives the
   operating system's error; a directory gives `ErrDirectory`; the flags hold `O_NONBLOCK` and
   `O_NOCTTY`.
+- `TestOpenRegularNonRegular` (Linux): `OpenRegular` refuses a FIFO with no writer, `/dev/zero` and a
+  socket with `not a regular file` before any open, and a symbolic link to a regular file opens.
 - `TestOpenStatNonRegular`, `TestOpenStatRegular` (Linux): the open-and-check step, given a path
   that is not a regular file when it is opened (a FIFO with and without a writer, a symlink to a
   FIFO, `/dev/null`, `/dev/zero`, a socket, a directory), returns no file without blocking, and a
