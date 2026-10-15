@@ -371,10 +371,10 @@ spans the full content width, with 16 dp padding on all sides (`pre { padding: 1
 highlighting is done; `Lang` is ignored.
 
 **STYLE-CODE-2. Code lines wrap.** A code line longer than the box's inner width wraps at the
-character that would overflow (`text.WrapGraphemes`). The text of a block with n newlines
-shows n + 1 lines, so the empty text shows one empty line; the leading spaces of a line are kept. GitHub instead scrolls a code block
-sideways (`pre { overflow: auto; word-wrap: normal }`); md-viewer has no horizontal scrolling,
-so it wraps.
+character that would overflow (`text.WrapGraphemes`). The text of a block with n newlines shows
+n + 1 lines, so the empty text shows one empty line; the leading spaces of a line are kept. GitHub
+instead scrolls a code block sideways (`pre { overflow: auto; word-wrap: normal }`); md-viewer has
+no horizontal scrolling, so it wraps.
 
 **STYLE-QUOTE-1. Quotes** draw a 4 dp wide bar (`.25em` of 16) in `Border` down their full
 height at the left edge, and lay out their child blocks with 20 dp of left inset (the bar plus
