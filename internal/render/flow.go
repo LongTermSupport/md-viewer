@@ -91,20 +91,22 @@ const codeRadius unit.Dp = 6 // STYLE-TEXT-5: 6 dp
 // Strikethrough (STYLE-TEXT-4): the top edge's height above the baseline in em, and the
 // thickness's divisor of the size in px, with its minimum in dp.
 const (
-	strikeRiseEm  = 0.3 // STYLE-TEXT-4: 0.3 em above the baseline
-	strikeDivisor = 16  // STYLE-TEXT-4: size ÷ 16
-	strikeMin     = 1   // STYLE-TEXT-4: at least 1 dp
+	strikeRiseEm          = 0.3 // STYLE-TEXT-4: 0.3 em above the baseline
+	strikeDivisor         = 16  // STYLE-TEXT-4: size ÷ 16
+	strikeMin     unit.Dp = 1   // STYLE-TEXT-4: at least 1 dp
 )
 
-// truncator is the text shaping puts where a line was cut. It is a zero-width space, so it takes
-// no room (a shaper with the default truncator reserves room for it, and the glyph of the
-// truncator is skipped).
+// truncator is the text shaping puts where a line was cut. It is U+200B, a zero-width space, so
+// it takes no room (a shaper with the default truncator reserves room for it, and the glyph of
+// the truncator is skipped). It is written as an escape so that it is visible in the source.
 const truncator = "​"
 
-// unboundedWidth is a line width no text reaches. It stands for "no limit" in a shaping call.
+// unboundedWidth is a shaping width that no line reaches, so that a call with no limit can
+// measure a single rune. It is internal: no spec value depends on it.
 const unboundedWidth = 1 << 20
 
-// probeText is shaped once per call to find the base face's ascent and descent.
+// probeText is the text shaped once per layout to find the base face's ascent and descent. It
+// is internal: its glyph is measured, not drawn.
 const probeText = "x"
 
 // flow is the state of one layoutFlow call: the current line, and what has been drawn.
@@ -131,12 +133,18 @@ type flow struct {
 // The algorithm follows gioui.org/x/styledtext v0.10.3 (styledtext.go and iterator.go; the
 // module is Unlicense OR MIT, see its LICENSE). Each run is shaped alone with MaxLines 1 and a
 // truncator, and the runes it shows fill the line; what does not fit moves to the next line.
-// It differs in three ways. First, a word wider than a whole line breaks by grapheme
-// (WrapHeuristically), where styledtext's WrapWords leaves the word whole and overflows the line
-// (styledtext.go, layoutSpan). Second, the baseline comes from the base face, shared by every
-// run in a line, and the line height is fixed, so styledtext's per-line ascent does not apply.
-// Third, the flow paints code backgrounds, strike lines and link areas, and records each as a
-// mark (ARCHITECTURE "internal/render").
+// It differs from styledtext in these ways:
+//
+//   - A word wider than a whole line breaks by grapheme (WrapHeuristically), at a line start
+//     only. styledtext's WrapWords leaves the word whole and overflows the line
+//     (styledtext.go, layoutSpan).
+//   - The baseline comes from the base face, shared by every run in a line, and the line height
+//     is fixed, so styledtext's per-line ascent does not apply.
+//   - The flow paints code backgrounds, strike lines and link areas, and records each as a mark
+//     (ARCHITECTURE "internal/render").
+//   - A non-code run drops its leading spaces where it starts a line (WRAP-1).
+//   - If not even one grapheme fits, the first rune is placed alone past the line's end, so the
+//     loop always advances (WRAP-1).
 func layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace) (layout.Dimensions, error) {
 	f, err := newFlow(gtx, fp, tr)
 	if err != nil {
@@ -240,31 +248,27 @@ func (f *flow) textRun(r doc.Run) error {
 			}
 		}
 		width := f.width - f.cursor - 2*padX
-		glyphs, n, err := f.shape(ts, rest, text.WrapWords, width)
-		if err != nil {
-			return err
-		}
+		glyphs, n := f.shape(ts, rest, text.WrapWords, width)
 		if n == 0 {
 			if f.hasContent {
 				f.closeLine()
 				continue
 			}
 			// The first word is wider than a whole line: break it at a character.
-			glyphs, n, err = f.shape(ts, rest, text.WrapHeuristically, width)
-			if err != nil {
-				return err
-			}
+			glyphs, n = f.shape(ts, rest, text.WrapHeuristically, width)
 		}
 		if n == 0 {
 			// Not even one grapheme fits the line: place the first rune alone, past the
 			// line's end, so that the loop always advances.
 			_, size := utf8.DecodeRuneInString(rest)
-			glyphs, n, err = f.shape(ts, rest[:size], text.WrapWords, unboundedWidth)
-			if err != nil {
-				return err
+			glyphs, n = f.shape(ts, rest[:size], text.WrapWords, unboundedWidth)
+			if n == 0 {
+				return fmt.Errorf("render: no glyphs for %q", rest[:size])
 			}
 		}
-		f.place(r, ts, rest[:n], glyphs, padX, padY)
+		if err := f.place(r, ts, rest[:n], glyphs, padX, padY); err != nil {
+			return err
+		}
 		rest = rest[n:]
 		if rest != "" {
 			f.closeLine()
@@ -274,10 +278,11 @@ func (f *flow) textRun(r doc.Run) error {
 }
 
 // shape lays out s as one line at most maxWidth px wide. It returns the glyphs without the
-// truncator, and the number of bytes of s that the glyphs show.
-func (f *flow) shape(ts TextStyle, s string, policy text.WrapPolicy, maxWidth int) ([]text.Glyph, int, error) {
+// truncator, and the number of bytes of s that the glyphs show. A width of zero or less shows
+// nothing.
+func (f *flow) shape(ts TextStyle, s string, policy text.WrapPolicy, maxWidth int) ([]text.Glyph, int) {
 	if maxWidth <= 0 {
-		return nil, 0, nil // no room at all: nothing is shown
+		return nil, 0 // no room at all: nothing is shown
 	}
 	f.fp.shaper.LayoutString(text.Parameters{
 		Font:       ts.Font,
@@ -297,7 +302,7 @@ func (f *flow) shape(ts TextStyle, s string, policy text.WrapPolicy, maxWidth in
 		glyphs = append(glyphs, g)
 		runes += int(g.Runes)
 	}
-	return glyphs, byteLen(s, runes), nil
+	return glyphs, byteLen(s, runes)
 }
 
 // byteLen is the number of bytes that the first runes runes of s take. An invalid byte is one
@@ -328,10 +333,11 @@ func (f *flow) codePads(ts TextStyle, code bool) (padX, padY int) {
 // place draws the glyphs of s, a fragment of run r, at the cursor on the current line, and records
 // their marks. A code run's fragment is padded on both sides, and its background is painted
 // before its glyphs (STYLE-TEXT-5). A struck fragment gets its line across its whole advance,
-// padding included (STYLE-TEXT-4). The fragment's advance includes the padding.
-func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, padX, padY int) {
+// padding included (STYLE-TEXT-4). The fragment's advance includes the padding. A fragment with
+// no glyphs is an error: it would place nothing and not advance the text.
+func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, padX, padY int) error {
 	if len(glyphs) == 0 {
-		return
+		return fmt.Errorf("render: fragment %q has no glyphs", s)
 	}
 	code := r.Style&doc.Code != 0
 	lo, hi := math.MaxInt, math.MinInt
@@ -370,6 +376,7 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 		f.linkArea(r.Link, image.Rect(boxStart, f.top, f.cursor, f.top+f.lineH))
 	}
 	f.hasContent = true
+	return nil
 }
 
 // linkArea makes rect a link's clickable area: the hand cursor shows over it, and a press and

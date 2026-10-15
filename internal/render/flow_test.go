@@ -251,16 +251,22 @@ func TestFlowWrapsToWidth(t *testing.T) {
 	}
 }
 
-// TestFlowLongWord: a word wider than the line breaks at a character (WRAP-1). After a word
-// boundary, the word boundary breaks first (WRAP-1, text.WrapHeuristically).
+// TestFlowLongWord: a word wider than the line breaks at a character, 25 per 200 px line, so
+// 300 characters are 12 lines (WRAP-1). After a word that fits, the first line keeps that word
+// and the long word starts a line of its own (WrapWords first, WrapHeuristically only at a line
+// start).
 func TestFlowLongWord(t *testing.T) {
 	word := strings.Repeat("x", 300)
+	const perLine = 25
 
 	e := newFlowEnv(t, 200)
 	tr := e.trace([]doc.Run{plain(word)})
 	gs := needMarks(t, tr, MarkGlyphs, "Glyphs")
-	if len(gs) < 2 {
-		t.Fatalf("300 x at 200 px: %d Glyphs marks, want at least 2", len(gs))
+	if len(gs) != 12 {
+		t.Fatalf("300 x at 200 px: %d Glyphs marks, want 12", len(gs))
+	}
+	if gs[0].Text != strings.Repeat("x", perLine) {
+		t.Fatalf("first line is %q, want %d x", gs[0].Text, perLine)
 	}
 	for _, m := range gs {
 		if m.Rect.Max.X > 200 {
@@ -274,8 +280,14 @@ func TestFlowLongWord(t *testing.T) {
 	e = newFlowEnv(t, 200)
 	tr = e.trace([]doc.Run{plain("ab " + word)})
 	gs = needMarks(t, tr, MarkGlyphs, "Glyphs")
+	if len(gs) != 13 {
+		t.Fatalf("after a word: %d Glyphs marks, want 13 (ab and 12 lines)", len(gs))
+	}
 	if gs[0].Text != "ab " {
 		t.Fatalf("first line is %q, want %q", gs[0].Text, "ab ")
+	}
+	if gs[1].Text != strings.Repeat("x", perLine) {
+		t.Fatalf("second line is %q, want %d x", gs[1].Text, perLine)
 	}
 	for _, m := range gs {
 		if m.Rect.Max.X > 200 {
@@ -491,11 +503,11 @@ func TestFlowLinkClick(t *testing.T) {
 	e := newFlowEnv(t, 800)
 	// Frame 1 lays out, which makes the link's gesture. Frame 2 polls before it lays out, as
 	// every frame does, so the gesture takes the events queued after it.
-	tr := e.frame(runs)
+	e.frame(runs)
 	if early, polled := e.poll(); polled {
 		t.Fatalf("a poll with no input reported %+v", early)
 	}
-	tr = e.frame(runs)
+	tr := e.frame(runs)
 	la := needMarks(t, tr, MarkLinkArea, "LinkArea")[0]
 	e.router.Queue(move(centre(la.Rect)), press(centre(la.Rect)), release(centre(la.Rect)))
 
@@ -639,5 +651,146 @@ func TestFlowLeadingSpace(t *testing.T) {
 	gs = needMarks(t, tr, MarkGlyphs, "Glyphs")
 	if len(gs) != 2 || gs[1].Text != " c" {
 		t.Fatalf("code run after a break: marks %v, want the second text %q", gs, " c")
+	}
+}
+
+// TestFlowTinyWidth: a line narrower than one character still lays out, with no error. Each
+// character takes a line of its own, and the text is kept whole. A regression that loops fails
+// by the test timeout.
+func TestFlowTinyWidth(t *testing.T) {
+	for _, width := range []int{0, 1} {
+		e := newFlowEnv(t, width)
+		tr := e.trace([]doc.Run{plain("ab")})
+		gs := needMarks(t, tr, MarkGlyphs, "Glyphs")
+		if len(gs) != 2 || gs[0].Text != "a" || gs[1].Text != "b" {
+			t.Fatalf("width %d: marks %v, want a then b", width, gs)
+		}
+		if got := joinGlyphText(tr); got != "ab" {
+			t.Fatalf("width %d: text = %q, want %q", width, got, "ab")
+		}
+	}
+}
+
+// TestFlowRunBoundary: runs shape alone, so a space that ends a line stays on it and the long
+// run wraps on its own (WRAP-1). A word split between two runs breaks at the boundary, the
+// known limitation in ARCHITECTURE "internal/render".
+func TestFlowRunBoundary(t *testing.T) {
+	x := strings.Repeat("x", 30)
+	e := newFlowEnv(t, 100)
+	tr := e.trace([]doc.Run{plain("ab"), plain(" " + x)})
+	gs := needMarks(t, tr, MarkGlyphs, "Glyphs")
+	wantText := []string{"ab", " ", x[:12], x[:12], x[:6]}
+	wantTop := []int{2, 2, 26, 50, 74}
+	if len(gs) != len(wantText) {
+		t.Fatalf("ab, then a 30 x run at 100 px: %d Glyphs marks, want %d", len(gs), len(wantText))
+	}
+	for i, m := range gs {
+		if m.Text != wantText[i] || m.Rect.Min.Y != wantTop[i] {
+			t.Fatalf("mark %d is %q at y=%d, want %q at y=%d", i, m.Text, m.Rect.Min.Y, wantText[i], wantTop[i])
+		}
+	}
+	if got := joinGlyphText(tr); got != "ab "+x {
+		t.Fatalf("text is not conserved: %q", got)
+	}
+
+	e = newFlowEnv(t, 20)
+	tr = e.trace([]doc.Run{plain("ab"), plain("cd")})
+	gs = needMarks(t, tr, MarkGlyphs, "Glyphs")
+	if len(gs) != 2 || gs[0].Text != "ab" || gs[1].Text != "cd" {
+		t.Fatalf("ab, cd at 20 px: marks %v, want ab then cd on the next line", gs)
+	}
+	if d := gs[1].Rect.Min.Y - gs[0].Rect.Min.Y; d != 24 {
+		t.Fatalf("cd is %d px below ab, want 24", d)
+	}
+}
+
+// TestFlowTrailingSpace: a space at a wrap stays on the line before it, so no text is lost
+// (WRAP-1).
+func TestFlowTrailingSpace(t *testing.T) {
+	e := newFlowEnv(t, 30)
+	tr := e.trace([]doc.Run{plain("ab cd")})
+	gs := needMarks(t, tr, MarkGlyphs, "Glyphs")
+	if len(gs) != 2 || gs[0].Text != "ab " || gs[1].Text != "cd" {
+		t.Fatalf("ab cd at 30 px: marks %v, want %q then %q", gs, "ab ", "cd")
+	}
+	if got := joinGlyphText(tr); got != "ab cd" {
+		t.Fatalf("text = %q, want %q", got, "ab cd")
+	}
+}
+
+// TestFlowStrikeCode: a struck code run's line spans its padding too, so it is as wide as the
+// code background (STYLE-TEXT-4, STYLE-TEXT-5).
+func TestFlowStrikeCode(t *testing.T) {
+	struck := doc.Run{Kind: doc.TextRun, Text: "x := 1", Style: doc.Code | doc.Strike}
+	e := newFlowEnv(t, 800)
+	tr := e.trace([]doc.Run{struck})
+	bg := needMarks(t, tr, MarkCodeBg, "CodeBg")[0]
+	ss := needMarks(t, tr, MarkStrike, "Strike")
+	if len(ss) != 1 {
+		t.Fatalf("one struck code run: %d Strike marks, want 1", len(ss))
+	}
+	s := ss[0]
+	if s.Rect.Min.X != bg.Rect.Min.X || s.Rect.Max.X != bg.Rect.Max.X {
+		t.Fatalf("Strike spans x %d to %d, the code background spans %d to %d", s.Rect.Min.X, s.Rect.Max.X, bg.Rect.Min.X, bg.Rect.Max.X)
+	}
+	g := glyphMark(t, tr, "x := 1")
+	if d := g.Rect.Min.X - s.Rect.Min.X; d != 5 {
+		t.Fatalf("Strike starts %d px left of the glyphs, want 5 (the code padding)", d)
+	}
+}
+
+// TestFlowLinkWrap: every fragment of a wrapped link is clickable, and a click on its second
+// fragment reports the link (LINK-1).
+func TestFlowLinkWrap(t *testing.T) {
+	tg := &doc.Target{Kind: doc.External, Value: "https://e.org/"}
+	runs := []doc.Run{plain("go to "), linkRun("the docs of the project", tg)}
+	e := newFlowEnv(t, 60)
+	e.frame(runs)
+	e.poll()
+	tr := e.frame(runs)
+	las := needMarks(t, tr, MarkLinkArea, "LinkArea")
+	if len(las) < 2 {
+		t.Fatalf("wrapped link: %d LinkArea marks, want at least 2", len(las))
+	}
+	second := las[1].Rect
+	e.router.Queue(move(centre(second)), press(centre(second)), release(centre(second)))
+	got, ok := e.poll()
+	if !ok || got != *tg {
+		t.Fatalf("click on the second fragment = %+v, %t; want the link's target and true", got, ok)
+	}
+}
+
+// TestFlowBidi: a right-to-left run's marks span its glyphs from the left edge to the right
+// edge, whatever order the glyphs are in, and the text after it starts where it ends.
+func TestFlowBidi(t *testing.T) {
+	cases := []struct {
+		text  string
+		width int
+	}{{"שלום", 48}, {"مرحبا", 60}}
+	for _, c := range cases {
+		e := newFlowEnv(t, 800)
+		tr := e.trace([]doc.Run{plain(c.text), plain(" x")})
+		g := glyphMark(t, tr, c.text)
+		if g.Rect.Min.X != 0 || g.Rect.Max.X != c.width {
+			t.Fatalf("%q spans x %d to %d, want 0 to %d", c.text, g.Rect.Min.X, g.Rect.Max.X, c.width)
+		}
+		after := glyphMark(t, tr, " x")
+		if after.Rect.Min.X != c.width {
+			t.Fatalf("text after %q starts at x=%d, want %d", c.text, after.Rect.Min.X, c.width)
+		}
+	}
+}
+
+// TestFlowZeroGlyphs: a fragment with no glyphs is an error, not a silent skip, so a rune that
+// shapes to nothing cannot stall textRun's loop. No input shapes to nothing in this font, so
+// the check is called directly.
+func TestFlowZeroGlyphs(t *testing.T) {
+	e := newFlowEnv(t, 800)
+	f, err := newFlow(e.context(), e.fp, &Trace{})
+	if err != nil {
+		t.Fatalf("newFlow: %v", err)
+	}
+	if perr := f.place(plain("x"), e.fp.base, "x", nil, 0, 0); perr == nil {
+		t.Fatal("a fragment with no glyphs: no error")
 	}
 }
