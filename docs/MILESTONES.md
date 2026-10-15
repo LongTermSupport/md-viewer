@@ -383,21 +383,50 @@ trace. Use the headless test pattern of ARCHITECTURE.md with `Metric{PxPerDp: 1,
 
 **Tests first:**
 
+The tests are in `trace_test.go` and `flow_test.go`, 23 in all: `TestTraceAdd`, then
+`TestFlowLineHeight`, `TestFlowWrapsToWidth`, `TestFlowLongWord`, `TestFlowBreakRun`,
+`TestFlowCodeBackground`, `TestFlowCodeInHeading`, `TestFlowStrike`, `TestFlowLinkArea`,
+`TestFlowLinkClick`, `TestFlowLinkCursor`, `TestFlowInvalidUTF8`, `TestFlowUnknownRunKind`,
+`TestFlowNilTrace`, `TestFlowEmptyRuns`, `TestFlowLeadingSpace`, `TestFlowTinyWidth`,
+`TestFlowRunBoundary`, `TestFlowTrailingSpace`, `TestFlowStrikeCode`, `TestFlowLinkWrap`,
+`TestFlowBidi` and `TestFlowZeroGlyphs`.
+
 - `TestFlowWrapsToWidth`: a 60-word paragraph at 800 px and at 200 px: the second is taller,
   and at each width every `Glyphs` mark's `Rect.Max.X` is ≤ the width.
 - `TestFlowLongWord`: a 300-character word at 200 px breaks across lines, none wider than 200.
+  After `ab ` and the same word, the first line is exactly `ab ` (a word boundary breaks first,
+  and the long word breaks only on a line of its own).
 - `TestFlowLineHeight`: one line of body text is 24 px tall (16 × 1.5); two lines are 48.
 - `TestFlowBreakRun`: `a`, `BreakRun`, `b` gives two lines even at 800 px.
 - `TestFlowCodeBackground`: a code run gives one `CodeBg` mark in `CodeBg` colour whose
   rectangle contains the run's `Glyphs` mark, wider than it by 0.4 em each side; when the run
   wraps, one `CodeBg` mark per line.
+- `TestFlowCodeInHeading`: code in a heading has 0.2 em horizontal padding and none vertical.
 - `TestFlowStrike`: a struck run gives a `Strike` mark across its width, 1 px tall at 16 sp.
 - `TestFlowLinkArea`: a link run gives a `LinkArea` mark with the run's target, and its
   `Glyphs` mark has colour `Accent`.
 - `TestFlowLinkClick`: lay out a link, `r.Frame(&ops)`, queue a primary press and release
   inside its `LinkArea` with `r.Queue(pointer.Event{…})`, lay out again: the flow reports the
   link clicked once.
-- `TestFlowInvalidUTF8`: `"a\xffb"` lays out with three glyph clusters and no error.
+- `TestFlowLinkCursor`: over a link the pointer cursor is the hand (`CursorPointer`), over
+  plain text it is `CursorDefault`.
+- `TestFlowInvalidUTF8`: `"a\xffb"` lays out with three glyph clusters and no error; each
+  invalid byte is one U+FFFD.
+- `TestFlowUnknownRunKind`: a run kind the flow does not know is an error that names it.
+- `TestFlowNilTrace`: a nil `Trace` gives the same dimensions as a recording one.
+- `TestFlowEmptyRuns`: no runs give one empty line of 24 px and no `Glyphs` marks.
+- `TestFlowLeadingSpace`: a non-code run that starts a line drops its leading space; a code
+  run keeps it.
+- `TestFlowTinyWidth`: at width 0 and 1, `ab` lays out as `a` then `b` on separate lines, with
+  no error and the text `ab`.
+- `TestFlowRunBoundary`: `ab` then a 30-character run at 100 px gives `ab`, a space, then 12, 12
+  and 6 characters; `ab` and `cd` in separate runs at 20 px break between them.
+- `TestFlowTrailingSpace`: `ab cd` at 30 px gives `ab ` then `cd`, with the text whole.
+- `TestFlowStrikeCode`: a struck code run's `Strike` spans its `CodeBg`, padding included.
+- `TestFlowLinkWrap`: a click on the second fragment of a wrapped link reports the link.
+- `TestFlowBidi`: a Hebrew word and an Arabic word each span from x 0 to their width, and the
+  text after them starts at that width.
+- `TestFlowZeroGlyphs`: a fragment with no glyphs is an error.
 
 **Verification:** the standard checks.
 

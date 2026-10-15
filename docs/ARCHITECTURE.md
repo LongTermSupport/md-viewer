@@ -254,13 +254,59 @@ func (im *Images) Bind(invalidate func())               // the window's Invalida
 inline flow, modelled on the algorithm of `gioui.org/x/styledtext` (Unlicense OR MIT; cite it
 in the file's doc comment) but written here because md-viewer must also paint code
 backgrounds, strike lines and link areas, and record them. For each run it calls
-`(*text.Shaper).LayoutString` with `text.Parameters{Font, PxPerEm, MaxWidth, WrapPolicy, LineHeightScale, MaxLines: 1 per line attempt}`, iterates glyphs with `NextGlyph`, and paints
-each line's glyph outlines with `Shaper.Shape(glyphs)` → `clip.Outline{Path: …}.Op()` and
-`paint.FillShape`. Line breaking: fill the line run by run; a run that does not fit is split at
-the last word break that fits (`text.WrapWords`); a word wider than a whole line breaks by
-grapheme. `BreakRun` ends the line. Each placed fragment records a `Glyphs` mark, and
-`CodeBg`, `Strike` and `LinkArea` marks as its style asks. Link fragments also push a
-`clip.Rect`, add `pointer.CursorPointer` and the link's `gesture.Click`.
+`(*text.Shaper).LayoutString` with `text.Parameters{Font, PxPerEm, MaxWidth, MaxLines: 1,
+Truncator, WrapPolicy, Locale}`, iterates glyphs with `NextGlyph`, and paints each fragment's
+glyph outlines with `Shaper.Shape(glyphs)` → `clip.Outline{Path: …}.Op()` under
+`paint.ColorOp` and `paint.PaintOp`. Each run is shaped alone, so the flow places baselines
+itself.
+
+Line breaking rules:
+
+- A run fills the current line. A run that does not fit is split at the last word break that
+  fits (`text.WrapWords`, WRAP-1), and the rest goes to the next line.
+- A word wider than a whole line breaks by grapheme (`text.WrapHeuristically`). That retry is
+  made only at a line start. `WrapHeuristically` is not tried first, because on a line that
+  already holds `ab` it would fill the line with graphemes of the long word; WRAP-1 keeps
+  `ab ` on the first line.
+- A zero-rune result on a non-empty line means "next line", and the run is tried again there.
+- If not even one grapheme fits a line, the first rune is placed alone past the line's end, so
+  that the loop always advances.
+- `BreakRun` ends the line; two in a row give an empty line. No runs give one empty line of
+  height L.
+- A non-code run that starts a line drops its leading spaces.
+- Each placed fragment records a `Glyphs` mark, and `CodeBg`, `Strike` and `LinkArea` marks as
+  its style asks. Link fragments also push a `clip.Rect`, add `pointer.CursorPointer` and the
+  link's `gesture.Click`.
+
+Flow rules:
+
+- **Line box.** Line height is L = round(base.Size px × base.LineHeight). The first baseline is
+  line top + round((L − (A + D)) ÷ 2 + A), with A and D the base style's face ascent and
+  descent; every run in the line shares that baseline. A block of n lines is n × L tall.
+- **Rounding.** Each length is computed in float px and rounded to the nearest whole px once.
+- **Fractional sizes.** PxPerEm rounds up to whole px, so 13.6 sp code is drawn with 14 px
+  glyphs. The em products (padding, strike) use the style's size, 13.6.
+- **Code padding.** Every fragment of a wrapped code run gets its own padding on both edges.
+- **Strike.** Top edge at baseline − round(0.3 em), spanning the whole fragment including code
+  padding.
+- **Mark rectangles** (relative to the flow's top-left). `Glyphs`: from the fragment's text
+  start to its end; y from baseline − ceil(ascent) to baseline + ceil(descent) of the
+  fragment's glyphs; `Text` is the fragment's bytes with each invalid byte as U+FFFD (DOC-15).
+  `CodeBg`: the `Glyphs` rectangle grown by the horizontal pad on each side and, outside a
+  heading, the vertical pad above and below. It is painted directly, before the glyphs, with
+  `paint.ColorOp` and `paint.PaintOp` under a rounded clip; no recorded macro is used.
+  `Strike`: as above, height max(1 dp, round(size px ÷ 16)). `LinkArea`: the fragment's X span
+  × the full line box; `Link` is the run's target.
+- **Signature.** `layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace)
+  (layout.Dimensions, error)`, with `flowParams{shaper *text.Shaper; base TextStyle; palette
+  Palette; inHeading bool; links *links}`. `inHeading` is needed because `RunStyle` takes it.
+  `tr` may be nil. An unknown `RunKind` is an error naming the kind.
+- **Links.** `links` holds one `*gesture.Click` per `*doc.Target`, shared by every fragment of
+  that link, in a fixed order. `clicked(gtx)` drains them once per frame and returns the first
+  `KindClick`. M5's `View` owns the `links` and `View.Clicked` delegates to it.
+- **Dimensions.** `Size.X` is the widest line, at least `Constraints.Min.X`; `Baseline` is
+  `Size.Y` minus the first baseline.
+- **Known limitation.** A run boundary can break a word (as in styledtext).
 
 **Lists, tables, images** are laid out by `list.go`, `table.go` and `image.go` from the same
 primitives. Images use `paint.NewImageOp` with `op.Affine` scaling, or `widget.Image`
