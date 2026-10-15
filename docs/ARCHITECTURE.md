@@ -402,7 +402,7 @@ type SystemClock struct{}                          // the only reader of time.No
 // Prepared is everything the window needs; Prepare does SPEED-1's work and nothing else.
 type Prepared struct {
 	OpenWindow bool
-	// unexported: opts, document, stats, images, palette, view, viewer, clock, stdout, stderr
+	// unexported: opts, document, images, palette, viewer, timings, clock, stdout
 }
 func Prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode)
 // Window is the window's Config (WIN-1, STYLE-PAL-3, SPEED-2). start is the first statement of main.
@@ -438,7 +438,7 @@ func (t Timings) Line() string // SPEED-2, byte for byte
 `OpenWindow` true and `ExitOK` (P14). A file error prints its CLI-8 line and gives `ExitFailure`;
 any other load error prints `md-viewer: ` + the error (P10, P11). If a write to stdout or stderr
 fails, `Prepare` returns `ExitFailure`, and when stdout failed it also writes `md-viewer: ` + the
-error to stderr, best effort (P12).
+error to stderr, best effort.
 
 `Prepare` picks the palette in one place: `render.Light`, or `render.Dark` with `--dark`
 (STYLE-PAL-2). The clock is read three times by the load (`read_ms` and `parse_ms`, SPEED-2) and

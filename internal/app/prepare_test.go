@@ -443,7 +443,7 @@ func TestPrepareBindsInvalidate(t *testing.T) {
 }
 
 // TestPrepareFontError: a font error is a preparation error: its line is printed to stderr with
-// the program's prefix, the exit code is 1, and no window opens (P10).
+// the program's prefix, the exit code is 1, and no window opens.
 func TestPrepareFontError(t *testing.T) {
 	plain := filepath.Join(t.TempDir(), "plain.md")
 	writeFile(t, plain, "# a\n")
