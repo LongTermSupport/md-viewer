@@ -170,7 +170,10 @@ func drawNumber(gtx layout.Context, ctx blockCtx, edge, base int, s string, tr *
 	stack := op.Offset(off).Push(gtx.Ops)
 	call.Add(gtx.Ops)
 	stack.Pop()
-	for _, m := range marks(scratch, MarkGlyphs) {
+	for _, m := range scratch.Marks {
+		if m.Kind != MarkGlyphs {
+			continue
+		}
 		tr.add(Mark{Kind: MarkNumber, Rect: m.Rect.Add(off), Colour: m.Colour, Text: m.Text})
 	}
 	return nil

@@ -488,8 +488,8 @@ loop). In `internal/render`: `BenchmarkLoadFonts` (`LoadFaces` plus `NewShaper`)
 
 ## QA
 
-The gate is the plain Go toolchain: `gofmt -l .` printing nothing, `go vet ./...` and
-`go test -race -count=1 ./...`. go-qa-ci is an add-on, never a requirement. CI's `go-qa` job
+The gate is the plain Go toolchain: `gofmt -l .` printing nothing, `go build ./...`,
+`go vet ./...` and `go test -race -count=1 ./...`. go-qa-ci is an add-on, never a requirement. CI's `go-qa` job
 runs `go install` of go-qa at the commit in `qa/go-qa-ci.ref`, then `go-qa run --ci`; go-qa
 installs and runs its own checksum-verified tools, pinned in go-qa-ci's `tools.lock`, so
 neither this repository nor the image repeats those pins. `qa/go-qa.toml` holds only
