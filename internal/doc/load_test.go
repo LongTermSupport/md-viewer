@@ -2,6 +2,7 @@ package doc
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -115,6 +116,45 @@ func TestLoadErrors(t *testing.T) {
 		}
 		if be.Path != p {
 			t.Errorf("BinaryError.Path = %q, want %q", be.Path, p)
+		}
+	})
+}
+
+// zeroReader is an endless stream of NUL bytes, so a test can read past the limit with no file.
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+// TestReadCapped checks the read cap (CLI-8): exactly MaxFileSize bytes are read in full, and a
+// source with one byte more is a TooLargeError whose Size is the bytes read.
+func TestReadCapped(t *testing.T) {
+	t.Run("at the limit", func(t *testing.T) {
+		src, err := readCapped(io.LimitReader(zeroReader{}, MaxFileSize), "x.md")
+		if err != nil {
+			t.Fatalf("readCapped error = %v, want nil", err)
+		}
+		if len(src) != 67108864 {
+			t.Errorf("len(src) = %d, want 67108864", len(src))
+		}
+	})
+
+	t.Run("past the limit", func(t *testing.T) {
+		src, err := readCapped(zeroReader{}, "x.md")
+		var te *TooLargeError
+		if !errors.As(err, &te) {
+			t.Fatalf("readCapped error = %v, want a *TooLargeError", err)
+		}
+		if src != nil {
+			t.Fatalf("readCapped bytes = %d, want nil", len(src))
+		}
+		if te.Path != "x.md" {
+			t.Errorf("TooLargeError.Path = %q, want %q", te.Path, "x.md")
+		}
+		if te.Size != 67108865 {
+			t.Errorf("TooLargeError.Size = %d, want 67108865", te.Size)
 		}
 	})
 }

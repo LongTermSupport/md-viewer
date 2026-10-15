@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -87,6 +88,16 @@ func Load(path string, now func() time.Time) (*Document, LoadStats, error) {
 	t2 := now()
 	d.Name = filepath.Base(path)
 	return d, LoadStats{Read: t1.Sub(t0), Parse: t2.Sub(t1)}, nil
+}
+
+// readCapped is a stub for the red run: it reads at most MaxFileSize bytes and does not detect
+// the overflow.
+func readCapped(r io.Reader, path string) ([]byte, error) {
+	src, err := io.ReadAll(io.LimitReader(r, MaxFileSize))
+	if err != nil {
+		return nil, readError(path, err)
+	}
+	return src, nil
 }
 
 // readError wraps an error from the operating system about path as a ReadError. The error
