@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"image"
+	"image/color"
 
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -36,8 +37,9 @@ func cellFlow(ctx blockCtx, header bool) flowParams {
 }
 
 // checkTable is an error naming a malformed table: no columns, a count of alignments other than the
-// header's, or a body row whose length is not the header's. GFM cannot give any of these (DOC-10
-// pads a short row), so they come from a model built by hand.
+// header's, a body row whose length is not the header's, or an alignment that is not one of the
+// four. GFM cannot give any of these (DOC-10 pads a short row), so they come from a model built by
+// hand.
 func checkTable(t doc.Table) error {
 	if len(t.Align) == 0 {
 		return fmt.Errorf("render: table with no columns")
@@ -96,17 +98,55 @@ func columnWidths(gtx layout.Context, ctx blockCtx, t doc.Table) ([]int, error) 
 	return ColumnWidths(natural, gtx.Constraints.Max.X-line, gtx.Dp(minColumn)), nil
 }
 
+// rowColour is the fill of row r (STYLE-TABLE-2, STYLE-TABLE-3): the header is Canvas, and body row
+// k (counting from 1) is BgMuted when k is even, otherwise Canvas.
+func rowColour(ctx blockCtx, r int) color.NRGBA {
+	if r > 0 && r%2 == 0 {
+		return ctx.root.BgMuted
+	}
+	return ctx.root.Canvas
+}
+
+// layoutRow lays out the cells of a row whose top line is at top, each in its column's text box
+// with its column's alignment (STYLE-TABLE-1, STYLE-TABLE-4). It returns the height of the tallest
+// cell's text.
+func layoutRow(gtx layout.Context, ctx blockCtx, aligns []doc.Align, row []doc.Cell, header bool, xs, cols []int, top int, tr *Trace) (int, error) {
+	line := gtx.Dp(tableLine)
+	padX := gtx.Dp(cellPadX)
+	padY := gtx.Dp(cellPadY)
+	fp := cellFlow(ctx, header)
+	h := 0
+	for i, c := range row {
+		al, err := cellAlign(aligns[i], header)
+		if err != nil {
+			return 0, err
+		}
+		cfp := fp
+		cfp.align = al
+		pt := image.Pt(xs[i]+line+padX, top+line+padY)
+		cgtx := gtx
+		cgtx.Constraints = layout.Constraints{Max: image.Pt(max(cols[i]-line-2*padX, 0), gtx.Constraints.Max.Y)}
+		dims, err := at(cgtx, tr, pt, func() (layout.Dimensions, error) {
+			return layoutFlow(cgtx, cfp, c.Runs, tr)
+		})
+		if err != nil {
+			return 0, err
+		}
+		h = max(h, dims.Size.Y)
+	}
+	return h, nil
+}
+
 // layoutTable lays out a table as a grid (STYLE-TABLE-1, STYLE-TABLE-5, STYLE-TABLE-6). Line i of
 // the columns is at the sum of the widths before it, and row r's top line is the sum of the rows
-// before it, each a border, 6 dp, its tallest cell and 6 dp. Each cell's text is placed 1 dp and
-// 6 dp (or 13 dp across) inside its top-left corner. The lines are painted after the cells.
+// before it, each a border, 6 dp, its tallest cell and 6 dp. Each row's cells are recorded, its
+// fill is painted, and then the cells are replayed on it. The lines are painted last.
 func layoutTable(gtx layout.Context, ctx blockCtx, t doc.Table, tr *Trace) (layout.Dimensions, error) {
 	if err := checkTable(t); err != nil {
 		return layout.Dimensions{}, err
 	}
 	width := gtx.Constraints.Max.X
 	line := gtx.Dp(tableLine)
-	padX := gtx.Dp(cellPadX)
 	padY := gtx.Dp(cellPadY)
 	cols, err := columnWidths(gtx, ctx, t)
 	if err != nil {
@@ -121,26 +161,24 @@ func layoutTable(gtx layout.Context, ctx blockCtx, t doc.Table, tr *Trace) (layo
 	tops := []int{0} // tops[r] is the top line of row r; the last is the bottom line
 	y := 0
 	for r := 0; r <= len(t.Rows); r++ {
-		row := t.Header
-		if r > 0 {
+		row, header := t.Header, r == 0
+		if !header {
 			row = t.Rows[r-1]
 		}
-		fp := cellFlow(ctx, r == 0)
-		h := 0
-		for i, c := range row {
-			pt := image.Pt(xs[i]+line+padX, y+line+padY)
-			cgtx := gtx
-			cgtx.Constraints = layout.Constraints{Max: image.Pt(max(cols[i]-line-2*padX, 0), gtx.Constraints.Max.Y)}
-			dims, err := at(cgtx, tr, pt, func() (layout.Dimensions, error) {
-				return layoutFlow(cgtx, fp, c.Runs, tr)
-			})
-			if err != nil {
-				return layout.Dimensions{}, err
-			}
-			h = max(h, dims.Size.Y)
+		top := y
+		rec := op.Record(gtx.Ops)
+		h, err := layoutRow(gtx, ctx, t.Align, row, header, xs, cols, top, tr)
+		call := rec.Stop()
+		if err != nil {
+			return layout.Dimensions{}, err
 		}
-		y += line + 2*padY + h
+		y = top + line + 2*padY + h
 		tops = append(tops, y)
+		fill := image.Rect(0, top+line, tw, y)
+		colour := rowColour(ctx, r)
+		fillRect(gtx, fill, colour)
+		tr.add(Mark{Kind: MarkRowFill, Rect: fill, Colour: colour})
+		call.Add(gtx.Ops)
 	}
 
 	bottom := y + line // the table's height, with its closing border
