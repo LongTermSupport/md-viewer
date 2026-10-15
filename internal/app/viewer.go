@@ -113,7 +113,21 @@ func (vw *Viewer) Frame(gtx layout.Context) (bool, error) {
 	linkErr := vw.linkInput(gtx)
 	material.List(vw.theme, &vw.list).Layout(gtx, vw.view.Len(), vw.element)
 	vw.wheelArea(gtx)
-	return quit, errors.Join(linkErr, vw.view.Err())
+	return quit, frameErrors(linkErr, vw.view.Err())
+}
+
+// frameErrors is the error of a frame, from a link write error and a layout error. Both can
+// happen in one frame. It is one line, joined by "; ", so main's "md-viewer: " prefix (CLI-6)
+// covers both; errors.Join would put the second error on a line of its own.
+func frameErrors(linkErr, layoutErr error) error {
+	switch {
+	case linkErr == nil:
+		return layoutErr
+	case layoutErr == nil:
+		return linkErr
+	default:
+		return fmt.Errorf("%w; %w", linkErr, layoutErr)
+	}
 }
 
 // linkInput acts on the link clicked since the last frame, if any (LINK-1). The opener itself

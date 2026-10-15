@@ -1183,6 +1183,30 @@ func failingLayoutDoc() *doc.Document {
 	return &doc.Document{Blocks: []doc.Block{doc.Heading{Level: 9}}}
 }
 
+// TestFrameErrors checks the error of a frame that has both a link write error and a layout
+// error: one line, the link error first, and each error still matches with errors.Is. With one
+// error, that error is returned as it is; with none, nil.
+func TestFrameErrors(t *testing.T) {
+	linkErr := errors.New("link write failed")
+	layoutErr := errors.New("layout failed")
+	both := frameErrors(linkErr, layoutErr)
+	if got, want := both.Error(), "link write failed; layout failed"; got != want {
+		t.Errorf("both errors are %q, want %q", got, want)
+	}
+	if !errors.Is(both, linkErr) || !errors.Is(both, layoutErr) {
+		t.Errorf("combined error %v does not match both errors", both)
+	}
+	if got := frameErrors(nil, layoutErr); got != layoutErr {
+		t.Errorf("layout error alone is %v, want it returned as it is", got)
+	}
+	if got := frameErrors(linkErr, nil); got != linkErr {
+		t.Errorf("link error alone is %v, want it returned as it is", got)
+	}
+	if got := frameErrors(nil, nil); got != nil {
+		t.Errorf("no error is %v, want nil", got)
+	}
+}
+
 // TestViewerLayoutError checks that a frame fails with the layout error, and with a failed write
 // to stderr, and that a document that lays out gives no error.
 func TestViewerLayoutError(t *testing.T) {
