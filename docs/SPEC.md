@@ -345,17 +345,18 @@ flags. The pointer turns into the hand cursor (`pointer.CursorPointer`) over a l
 hover.
 
 **STYLE-TEXT-4. Strikethrough** draws a line through the run, in the run's colour, at
-0.3 em above the baseline, max(1 dp, size ÷ 16) thick, across the run's width.
+0.3 em above the baseline, max(1 dp, size ÷ 16) thick, across the run's width. The line's top
+edge is at baseline − 0.3 em, rounded to whole pixels; a code run's line spans its padding too.
 
 **STYLE-TEXT-5. Inline code** is Go Mono at 85% of the surrounding font size (13.6 sp in body
 text), colour unchanged, on a `CodeBg` rounded rectangle with a 6 dp corner radius. A code run
 keeps the line height of its block (the run does not change it). The rectangle extends 0.2 em
 above and below the glyph line box without changing the line height, and 0.4 em to the left and
-right, and this horizontal padding is part of the run's width
+right, and this horizontal padding is part of the run's width; each length is rounded to whole pixels once
 (`code, tt { padding: .2em .4em; font-size: 85%; background-color; border-radius: 6px }`).
 Inside a heading the code is 100% of the heading size with 0.2 em horizontal padding and none
 vertical (`h1 code, … { padding: 0 .2em; font-size: inherit }`). When a code run wraps across
-lines, each line's fragment gets its own rectangle.
+lines, each line's fragment gets its own rectangle, with the horizontal padding on both edges.
 
 **STYLE-TEXT-6.** Text is aligned to the start (left). Paragraph text does not hyphenate.
 
@@ -547,9 +548,12 @@ and scales its offset into that block by the ratio of the new zoom to the old.
 
 ## 7. Word wrap
 
-**WRAP-1.** Text wraps at word boundaries to the content width (`text.WrapWords`). A word
-longer than the line breaks at a character instead. No text is clipped or scrolled sideways,
-except a too-wide table (STYLE-TABLE-5).
+**WRAP-1.** Text wraps at word boundaries to the content width. Mid-line, a word that does not
+fit moves to the next line (`text.WrapWords`). At a line start, a word wider than the line
+breaks at a character (`text.WrapHeuristically`). A run that starts a line drops its leading
+spaces, unless it is code. A break may fall between two runs of one word, as in
+`gioui.org/x/styledtext` (`foo**bar**` may break between `foo` and `bar`). No text is clipped
+or scrolled sideways, except a too-wide table (STYLE-TABLE-5).
 
 **WRAP-2.** Resizing the window re-wraps all text in the next frame.
 

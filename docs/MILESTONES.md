@@ -383,6 +383,12 @@ trace. Use the headless test pattern of ARCHITECTURE.md with `Metric{PxPerDp: 1,
 
 **Tests first:**
 
+The tests are in `trace_test.go` and `flow_test.go`, 16 in all: `TestTraceAdd`, then
+`TestFlowLineHeight`, `TestFlowWrapsToWidth`, `TestFlowLongWord`, `TestFlowBreakRun`,
+`TestFlowCodeBackground`, `TestFlowCodeInHeading`, `TestFlowStrike`, `TestFlowLinkArea`,
+`TestFlowLinkClick`, `TestFlowLinkCursor`, `TestFlowInvalidUTF8`, `TestFlowUnknownRunKind`,
+`TestFlowNilTrace`, `TestFlowEmptyRuns` and `TestFlowLeadingSpace`.
+
 - `TestFlowWrapsToWidth`: a 60-word paragraph at 800 px and at 200 px: the second is taller,
   and at each width every `Glyphs` mark's `Rect.Max.X` is ≤ the width.
 - `TestFlowLongWord`: a 300-character word at 200 px breaks across lines, none wider than 200.
@@ -391,13 +397,22 @@ trace. Use the headless test pattern of ARCHITECTURE.md with `Metric{PxPerDp: 1,
 - `TestFlowCodeBackground`: a code run gives one `CodeBg` mark in `CodeBg` colour whose
   rectangle contains the run's `Glyphs` mark, wider than it by 0.4 em each side; when the run
   wraps, one `CodeBg` mark per line.
+- `TestFlowCodeInHeading`: code in a heading has 0.2 em horizontal padding and none vertical.
 - `TestFlowStrike`: a struck run gives a `Strike` mark across its width, 1 px tall at 16 sp.
 - `TestFlowLinkArea`: a link run gives a `LinkArea` mark with the run's target, and its
   `Glyphs` mark has colour `Accent`.
 - `TestFlowLinkClick`: lay out a link, `r.Frame(&ops)`, queue a primary press and release
   inside its `LinkArea` with `r.Queue(pointer.Event{…})`, lay out again: the flow reports the
   link clicked once.
-- `TestFlowInvalidUTF8`: `"a\xffb"` lays out with three glyph clusters and no error.
+- `TestFlowLinkCursor`: over a link the pointer cursor is the hand (`CursorPointer`), over
+  plain text it is `CursorDefault`.
+- `TestFlowInvalidUTF8`: `"a\xffb"` lays out with three glyph clusters and no error; each
+  invalid byte is one U+FFFD.
+- `TestFlowUnknownRunKind`: a run kind the flow does not know is an error that names it.
+- `TestFlowNilTrace`: a nil `Trace` gives the same dimensions as a recording one.
+- `TestFlowEmptyRuns`: no runs give one empty line of 24 px and no `Glyphs` marks.
+- `TestFlowLeadingSpace`: a non-code run that starts a line drops its leading space; a code
+  run keeps it.
 
 **Verification:** the standard checks.
 
