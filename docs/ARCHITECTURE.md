@@ -17,6 +17,11 @@ to that file. The order of work is in [MILESTONES.md](MILESTONES.md).
 `go.mod` pins at `v0.0.0-20250408133849-7e4ce0ab07d0`. `go.mod` therefore names that module as an
 indirect requirement. It is not a direct dependency, and nothing in md-viewer imports it.
 
+Importing `gioui.org/app` (in `internal/window/gioapp`) adds four more indirect requirements, at the
+versions `go mod tidy` chooses with Gio v0.10.3: `gioui.org/shader v1.0.9`,
+`github.com/godbus/dbus/v5 v5.2.2`, `golang.org/x/net v0.48.0` and `golang.org/x/sys v0.39.0`.
+Nothing in md-viewer imports them directly.
+
 No other direct dependency is added without the owner's agreement: no `gioui.org/x`, no test
 assertion library (tests use the standard library), no CLI flag library.
 
@@ -26,21 +31,26 @@ versions.
 ## Packages
 
 ```text
-cmd/md-viewer/      thin main: start the clock, call app.Prepare, start the window, exit
-internal/doc/       file loading, goldmark AST -> typed model, link resolution
-internal/render/    model -> Gio layout: palettes, styles, fonts, text flow, blocks, images
-internal/app/       arguments, version, timing, the viewer (input, scroll, zoom, links)
-internal/window/    the one package that imports gioui.org/app: the native window loop
-testdata/           fixtures shared by the packages' tests and benchmarks
+cmd/md-viewer/          thin main: start the clock, call app.Prepare, run the window, exit
+internal/doc/           file loading, goldmark AST -> typed model, link resolution
+internal/render/        model -> Gio layout: palettes, styles, fonts, text flow, blocks, images
+internal/app/           arguments, version, timing, the viewer (input, scroll, zoom, links)
+internal/window/        the window loop, cgo-free: Config, FrameError, Source, Loop
+internal/window/gioapp/ the only importer of gioui.org/app: Run (the Source of a window) and Main
+testdata/               fixtures shared by the packages' tests and benchmarks
 ```
 
-Dependencies point one way: `cmd -> app, window`; `app -> window, render, doc`;
-`render -> doc`; `window` imports only Gio; `doc` imports neither. Nothing below `cmd` calls
+Dependencies point one way: `cmd -> app, window, window/gioapp`; `gioapp -> window`;
+`app -> window, render, doc`; `render -> doc`; `window` imports only Gio's `layout`, `op`, `unit`
+and `image/color` packages, not `gioui.org/app`; `doc` imports neither. Nothing below `cmd` calls
 `os.Exit` (go-qa's `gqaci_exit_outside_main` enforces it).
 
-Only `internal/window` and `cmd/md-viewer` need a display at run time. Everything else is
+Only `internal/window/gioapp` and `cmd/md-viewer` need a display at run time. Everything else is
 tested headless: Gio's `layout`, `op`, `text`, `widget` and `io/input` packages run without a
-window or GPU (checked: they build and run with no display).
+window or GPU (checked: they build and run with no display). `internal/window` is tested through
+a fake `Source`, so its loop has unit tests; `gioapp` is proven by the binary tests and the smoke
+run. Only `gioapp` and `cmd` import `gioui.org/app`, which fails `GOOS=darwin CGO_ENABLED=0 go vet`
+in Gio's own `internal/gl`; so that vet covers `app`, `window`, `render` and `doc`.
 
 ### cmd/md-viewer
 
@@ -54,22 +64,18 @@ func main() {
 		os.Exit(int(code))
 	}
 	go func() {
-		if err := window.Run(prep.Window(start)); err != nil {
-			var fe *window.FrameError
-			if errors.As(err, &fe) {
-				fmt.Fprintf(os.Stderr, "md-viewer: %v\n", fe.Err) // CLI-6
-			} else {
-				fmt.Fprintf(os.Stderr, "md-viewer: cannot open a window: %v\n", err) // CLI-9
-			}
-			os.Exit(int(app.ExitFailure))
-		}
-		os.Exit(int(app.ExitOK))
+		os.Exit(int(exitCode(gioapp.Run(prep.Window(start)), os.Stderr)))
 	}()
-	window.Main()
+	gioapp.Main()
 }
+
+// exitCode is the exit code of the window's result, and the stderr line for an error: a
+// *window.FrameError prints its error (CLI-6), any other prints CLI-9's line. A failed write
+// to stderr still gives app.ExitFailure.
+func exitCode(err error, stderr io.Writer) app.ExitCode
 ```
 
-`window.Main` calls `gioui.org/app.Main`, which must run on the main goroutine and never
+`gioapp.Main` calls `gioui.org/app.Main`, which must run on the main goroutine and never
 returns; the goroutine ends the process. The function literal is inside `main`, which
 `gqaci_exit_outside_main` allows.
 
@@ -396,14 +402,18 @@ type SystemClock struct{}                          // the only reader of time.No
 // Prepared is everything the window needs; Prepare does SPEED-1's work and nothing else.
 type Prepared struct {
 	OpenWindow bool
-	// unexported: options, document, view, palette, timings, stdout, stderr
+	// unexported: opts, document, stats, images, palette, view, viewer, clock, stdout, stderr
 }
 func Prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode)
+// Window is the window's Config (WIN-1, STYLE-PAL-3, SPEED-2). start is the first statement of main.
+// Bind passes the window's Invalidate to the images and to the viewer; OnFirst is set only with
+// --time, and then writes the timings line to stdout (its write error is a frame failure, CLI-6).
 func (p Prepared) Window(start time.Time) window.Config
 
 // Viewer is the per-window state: list position, zoom, accumulators, opener.
 type Viewer struct{ /* unexported */ }
 func NewViewer(v *render.View, p render.Palette, o Opener, stderr io.Writer) *Viewer
+func (vw *Viewer) Bind(invalidate func()) // the window's Invalidate; called after a failed async write (LINK-2)
 func (vw *Viewer) Frame(gtx layout.Context) (quit bool, err error) // handle input, lay out; err is View.Err or a failed stderr write (CLI-6)
 
 type Action uint8 // None, LineDown, LineUp, PageDown, PageUp, Top, Bottom,
@@ -422,15 +432,20 @@ type Timings struct{ Read, Parse, Fonts, FirstFrame time.Duration }
 func (t Timings) Line() string // SPEED-2, byte for byte
 ```
 
-**M2 notes on `Prepare`.** `Clock` and `SystemClock` live in `prepare.go`; `timing.go` holds
-`Timings` from M10. `Prepare` handles the usage errors (stderr, `ExitUsage`) and `--help` and
+**Notes on `Prepare`.** `Clock` and `SystemClock` live in `prepare.go`; `timing.go` holds
+`Timings`. `Prepare` handles the usage errors (stderr, `ExitUsage`) and `--help` and
 `--version` (stdout, `ExitOK`), so `main` only calls it (P16). A file that loads gives
 `OpenWindow` true and `ExitOK` (P14). A file error prints its CLI-8 line and gives `ExitFailure`;
 any other load error prints `md-viewer: ` + the error (P10, P11). If a write to stdout or stderr
 fails, `Prepare` returns `ExitFailure`, and when stdout failed it also writes `md-viewer: ` + the
-error to stderr, best effort (P12). Until M10, a file that loads makes `main` print
-`md-viewer: not implemented yet` to stderr and exit 1, after any DOC-9 line; M10 removes that
-line (P13).
+error to stderr, best effort (P12).
+
+`Prepare` picks the palette in one place: `render.Light`, or `render.Dark` with `--dark`
+(STYLE-PAL-2). The clock is read three times by the load (`read_ms` and `parse_ms`, SPEED-2) and
+twice around the faces and the shaper (`fonts_ms`). The view, the viewer and their theme are built
+in memory after that. `Window` takes one more reading, in its `OnFirst`, from the same clock, and
+measures `first_frame_ms` from `start`. A font error is returned like any other preparation
+error, so it prints `md-viewer: ` + the error and gives `ExitFailure`.
 
 **Input routing in `Viewer.Frame`.** Key events are read with `gtx.Event(key.Filter{Name: …, Required: …, Optional: …})` for each key in the action table (a filter with a nil `Focus`
 matches whatever has focus). Wheel events are taken by a full-window input area added *after*
@@ -450,39 +465,77 @@ less the gutter, and the gutter is not zoomed. `elem` sets `gtx.Metric` to `zoom
 read at the same zoomed metric. `th` is `material.NewTheme()` with `Palette.Fg` set to the palette's
 `Fg` (the scrollbar indicator colour), built once in `NewViewer`.
 
-### internal/window
+### internal/window and internal/window/gioapp
 
-The only importer of `gioui.org/app`. It has no logic worth a unit test; it is proven by the
-smoke run (CI and the container, under Xvfb) and by the owner on the desktop.
+`internal/window` is the window loop without Gio's window package, so it builds without cgo on
+every platform. Its `Loop` is unit-tested through a fake `Source` that replays scripted events
+(`window_test.go`). `internal/window/gioapp` is the only importer of `gioui.org/app`. It
+adapts `app.Window` to `Source` and has no logic of its own worth a test; the binary tests and the
+smoke run prove it.
 
 ```go
 type Config struct {
-	Title    string                         // WIN-1
-	Canvas   color.NRGBA                    // painted under every frame
-	Frame    func(gtx layout.Context) (quit bool, err error) // the viewer; true means quit; an error closes the window
-	Bind     func(invalidate func())        // called once with the window's Invalidate
-	OnFirst  func()                         // called once, after the first Frame call returns
-	ExitAfterFirst bool                     // --time
+	Title          string                                          // WIN-1
+	Canvas         color.NRGBA                                     // painted under every frame (STYLE-PAL-3)
+	Frame          func(gtx layout.Context) (quit bool, err error) // the viewer; quit closes the window; an error fails the frame
+	Bind           func(invalidate func())                         // called once, before the first event, with the window's Invalidate
+	OnFirst        func() error                                    // called once, after the first frame is submitted; an error fails the frame (CLI-6)
+	ExitAfterFirst bool                                            // --time: close after the first frame
 }
 
-// FrameError is the error of a failed frame (CLI-6). Err is the error Config.Frame returned.
+// FrameError is the error of a failed frame (CLI-6). Err is the error that failed it, unprefixed.
 type FrameError struct{ Err error }
-func (e *FrameError) Error() string
-func (e *FrameError) Unwrap() error
+func (e *FrameError) Error() string // Err.Error()
+func (e *FrameError) Unwrap() error // Err
 
-func Run(c Config) error // nil when closed; a *FrameError when Frame failed; else Gio's error
-func Main()              // gioui.org/app.Main
+// Event is an event of the window, as Loop sees it. The set is closed: only this package makes one.
+type Event interface{ windowEvent() }
+type FrameEvent struct {
+	Gtx    layout.Context  // Ops reset, Metric and Constraints of the window
+	Submit func(*op.Ops)   // completes the frame: gioui.org/app's FrameEvent.Frame
+}
+type DestroyEvent struct{ Err error } // the window is gone; Err is Gio's error, nil when closed normally
+
+// Source is the window: its next event, its Invalidate, and its Close (ask it to close).
+type Source interface {
+	Next() Event
+	Invalidate()
+	Close()
+}
+
+// The window's size, as dp (WIN-2).
+const (
+	Width, Height       unit.Dp = 980, 900
+	MinWidth, MinHeight unit.Dp = 320, 240
+)
+
+// Loop runs the window until it is destroyed and returns nil when it closed normally, a
+// *FrameError when a frame failed, or else the error of the destroyed window.
+func Loop(src Source, c Config) error // paint.Fill is the canvas fill
 ```
 
-`Run` creates `new(app.Window)`, sets `app.Title`, `app.Size(980, 900)`,
-`app.MinSize(320, 240)`, calls `Bind(w.Invalidate)`, and loops on `w.Event()`:
+`Loop` checks that `Frame` is not nil (an error, before any event), calls `Bind(src.Invalidate)` if
+`Bind` is set, then takes events from `Next` until a `DestroyEvent`. For each `FrameEvent`:
 
-- `app.FrameEvent`: `gtx := app.NewContext(&ops, e)`, `paint.Fill(gtx.Ops, Canvas)`,
-  `quit, err := c.Frame(gtx)`, `e.Frame(gtx.Ops)`; after the first frame call `OnFirst`; if `err`
-  is not nil, keep it as a `*FrameError`; if `err` is not nil, `quit` or `ExitAfterFirst`, call
-  `w.Perform(system.ActionClose)`;
-- `app.DestroyEvent`: return the kept `*FrameError` if there is one, else `e.Err` (nil when the
-  window was closed normally).
+1. Fill the frame with `Canvas` (`paint.Fill` on `Gtx.Ops`), whether or not it is closing.
+2. If the window is not closing, call `Frame`. An error is kept as a `*FrameError`.
+3. Submit the frame with `Submit`.
+4. If no frame has failed, and this is the first frame that succeeded, call `OnFirst`. Its error
+   is kept as a `*FrameError`.
+5. If the window is not closing and a frame failed, or `quit` was returned, or `ExitAfterFirst`
+   holds and `OnFirst` has just run, close it through `src.Close`. Close is called at most once.
+
+Once the window is closing, `Frame` and `OnFirst` are not called again (SPEC CLI-6), so a second error
+or link action cannot happen. On `DestroyEvent`, `Loop` returns the kept `*FrameError` if there
+is one, else `e.Err`. The set of events is closed, so any other value reaching `Loop` is an error
+naming its type.
+
+`gioapp.Run(c)` creates `new(app.Window)`, applies `app.Title(c.Title)`, `app.Size(window.Width,
+window.Height)` and `app.MinSize(window.MinWidth, window.MinHeight)`, and calls `window.Loop` with
+a `Source` over the window. Its `Next` skips every Gio event except `app.FrameEvent` (converted to
+`FrameEvent`, with `app.NewContext` and `e.Frame` as `Submit`) and `app.DestroyEvent`. Its `Close`
+is `w.Perform(system.ActionClose)`, and its `Invalidate` is `w.Invalidate`. `gioapp.Main` is
+`gioui.org/app.Main`.
 
 `internal/window` cannot import `internal/app` (that would be a cycle), so it reports with an
 error. `main` turns a `*FrameError` into `md-viewer: ` and its error, exit 1 (CLI-6), and any other
