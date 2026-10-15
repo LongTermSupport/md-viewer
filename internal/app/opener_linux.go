@@ -2,7 +2,10 @@
 
 package app
 
-// SystemOpener is the platform's link opener. Stub: an opener with no program.
+// openerName is the program that opens a link on Linux (LINK-1).
+const openerName = "xdg-open"
+
+// SystemOpener is the platform's link opener.
 func SystemOpener() Opener {
-	return execOpener{}
+	return execOpener{name: openerName}
 }
