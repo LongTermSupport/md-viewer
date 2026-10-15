@@ -293,12 +293,12 @@ func drawCheck(gtx layout.Context, ctx blockCtx, box image.Rectangle, tr *Trace)
 }
 
 // leadsWithText reports whether a block's first line is text, found through quotes and nested
-// lists (STYLE-LIST-2). An empty item is an empty line of text. A rule, a table or an image has
-// no text line, and an empty quote or list has none either. A block with no layout is an error
+// lists (STYLE-LIST-2). An empty item is an empty line of text, and a table leads with its header
+// row's text. A rule or an image has no text line, and an empty quote or list has none either. A block with no layout is an error
 // naming its type.
 func leadsWithText(b doc.Block) (bool, error) {
 	switch b := b.(type) {
-	case doc.Paragraph, doc.Heading, doc.CodeBlock:
+	case doc.Paragraph, doc.Heading, doc.CodeBlock, doc.Table:
 		return true, nil
 	case doc.Quote:
 		if len(b.Blocks) == 0 {
@@ -314,7 +314,7 @@ func leadsWithText(b doc.Block) (bool, error) {
 			return true, nil
 		}
 		return leadsWithText(first.Blocks[0])
-	case doc.Rule, doc.Table, doc.Image:
+	case doc.Rule, doc.Image:
 		return false, nil
 	default:
 		return false, fmt.Errorf("render: no first line for block %T", b)
