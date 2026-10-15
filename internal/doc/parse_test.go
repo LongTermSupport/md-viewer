@@ -743,9 +743,61 @@ func checkDeterministic(t *testing.T, src string) {
 	if len(first.Blocks) == 0 {
 		t.Errorf("Parse(src).Blocks is empty, want blocks")
 	}
-	if !reflect.DeepEqual(first, second) {
-		t.Errorf("two parses differ:\n%#v\nand\n%#v", first, second)
+	if msg := divergence(first, second); msg != "" {
+		t.Errorf("two parses differ: %s", msg)
 	}
+}
+
+// TestDivergenceReportIsShort: a determinism failure reports the lengths and the first differing
+// block index, never the models, so a large document cannot flood the log.
+func TestDivergenceReportIsShort(t *testing.T) {
+	long := strings.Repeat("x", 1000)
+	blocks := make([]Block, 1000)
+	for i := range blocks {
+		blocks[i] = CodeBlock{Text: long}
+	}
+	a := &Document{Blocks: blocks}
+	changed := make([]Block, len(blocks))
+	copy(changed, blocks)
+	changed[700] = CodeBlock{Text: "changed"}
+	b := &Document{Blocks: changed}
+
+	if got := divergence(a, a); got != "" {
+		t.Errorf("divergence of equal documents = %q, want empty", got)
+	}
+	msg := divergence(a, b)
+	if !strings.Contains(msg, "700") || !strings.Contains(msg, "1000") {
+		t.Errorf("divergence = %q, want the index 700 and the length 1000", msg)
+	}
+	if len(msg) > 300 {
+		t.Errorf("divergence is %d bytes, want a short report of lengths and an index", len(msg))
+	}
+	msg = divergence(a, &Document{Blocks: blocks[:999]})
+	if !strings.Contains(msg, "999") || !strings.Contains(msg, "1000") {
+		t.Errorf("divergence of 1000 and 999 blocks = %q, want both lengths", msg)
+	}
+}
+
+// divergence describes how two parses of one source differ, in a few hundred bytes at most: the
+// document fields, or the block counts and the first differing block index. It returns "" when
+// the documents are equal.
+func divergence(a, b *Document) string {
+	if reflect.DeepEqual(a, b) {
+		return ""
+	}
+	if a.Name != b.Name || a.Dir != b.Dir || a.DroppedHTML != b.DroppedHTML {
+		return "documents differ in Name, Dir or DroppedHTML"
+	}
+	for i := range min(len(a.Blocks), len(b.Blocks)) {
+		if !reflect.DeepEqual(a.Blocks[i], b.Blocks[i]) {
+			return fmt.Sprintf("%d and %d blocks, first differing block at index %d (%T and %T)",
+				len(a.Blocks), len(b.Blocks), i, a.Blocks[i], b.Blocks[i])
+		}
+	}
+	if len(a.Blocks) != len(b.Blocks) {
+		return fmt.Sprintf("%d and %d blocks, the common blocks are equal", len(a.Blocks), len(b.Blocks))
+	}
+	return "documents differ, and no block does"
 }
 
 // TestInvalidUTF8: invalid bytes are not an error and pass through unchanged (DOC-15).
