@@ -16,10 +16,8 @@ func main() {
 	if !prep.OpenWindow {
 		os.Exit(int(code))
 	}
-	// A failed write changes nothing: the exit code is ExitFailure either way.
-	if werr := write(os.Stderr, notImplemented); werr != nil {
-		os.Exit(int(app.ExitFailure))
-	}
+	// A write error cannot be reported on stderr, and the exit code is ExitFailure either way.
+	write(os.Stderr, notImplemented)
 	os.Exit(int(app.ExitFailure))
 }
 

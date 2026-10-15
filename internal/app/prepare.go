@@ -46,17 +46,17 @@ type Prepared struct {
 func Prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode) {
 	p, code, err := prepare(args, stdout, stderr, c)
 	if err != nil {
-		// P12: best effort. The exit code is ExitFailure whether or not this line lands.
-		if werr := write(stderr, progName+": "+err.Error()+"\n"); werr != nil {
-			return Prepared{}, ExitFailure
-		}
+		// P12: best effort. A write error cannot be reported on the stream that failed, and the
+		// exit code is ExitFailure whether or not this line lands.
+		write(stderr, progName+": "+err.Error()+"\n")
 		return Prepared{}, ExitFailure
 	}
 	return p, code
 }
 
 // prepare does the work of Prepare. Its error is a failed write, or an argument error that is not
-// a usage error; the code is ignored when the error is not nil.
+// a usage error; the code is ignored when the error is not nil. ParseArgs returns only a
+// *UsageError, so the other case is a fallback for a later change to ParseArgs.
 func prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode, error) {
 	opts, err := ParseArgs(args)
 	if err != nil {
