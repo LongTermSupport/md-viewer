@@ -82,7 +82,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M3 Render styles, palettes and fonts
 - [x] M4 Inline text flow
 - [x] M5 The view and simple blocks
-- [ ] M6 Lists
+- [x] M6 Lists
 - [ ] M7 Tables
 - [ ] M8 Images
 - [ ] M9 The viewer: scroll, zoom, links, quit
