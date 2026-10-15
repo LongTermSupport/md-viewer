@@ -47,6 +47,7 @@ func (c blockCtx) flow(base TextStyle, inHeading bool, wrap wrapMode) flowParams
 const (
 	codeBlockPadding unit.Dp = 16 // STYLE-CODE-1: 16 dp on all sides of the text
 	codeBlockRadius  unit.Dp = 6  // STYLE-CODE-1: 6 dp corner radius
+	ruleHeight       unit.Dp = 4  // STYLE-RULE-1: .25em of 16, the bar's height
 	quoteBarWidth    unit.Dp = 4  // STYLE-QUOTE-1: .25em of 16, the bar's width
 	quotePadding     unit.Dp = 16 // STYLE-QUOTE-1: the padding after the bar, and on the right
 )
@@ -89,7 +90,9 @@ func layoutBlock(gtx layout.Context, ctx blockCtx, b doc.Block, tr *Trace) (layo
 		return layoutQuote(gtx, ctx, b, tr)
 	case doc.CodeBlock:
 		return layoutCodeBlock(gtx, ctx, b, tr)
-	case doc.Rule, doc.List, doc.Table, doc.Image:
+	case doc.Rule:
+		return layoutRule(gtx, ctx, tr)
+	case doc.List, doc.Table, doc.Image:
 		// Placeholders until their milestones: height 0, with the margins the caller gives.
 		return layout.Dimensions{Size: image.Pt(width, 0)}, nil
 	default:
@@ -168,6 +171,15 @@ func fillRoundRect(gtx layout.Context, r image.Rectangle, rad unit.Dp, c color.N
 	paint.ColorOp{Color: c}.Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
 	stack.Pop()
+}
+
+// layoutRule draws a thematic break as a bar across the content width, in Border (STYLE-RULE-1).
+func layoutRule(gtx layout.Context, ctx blockCtx, tr *Trace) (layout.Dimensions, error) {
+	width := gtx.Constraints.Max.X
+	r := image.Rect(0, 0, width, gtx.Dp(ruleHeight))
+	fillRect(gtx, r, ctx.root.Border)
+	tr.add(Mark{Kind: MarkRuleBar, Rect: r, Colour: ctx.root.Border})
+	return layout.Dimensions{Size: r.Size()}, nil
 }
 
 // layoutQuote lays out a quote's children, indented past the bar and its padding, in muted text
