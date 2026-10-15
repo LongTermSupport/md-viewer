@@ -151,7 +151,8 @@ type flow struct {
 //     is fixed, so styledtext's per-line ascent does not apply.
 //   - The flow paints code backgrounds, strike lines and link areas, and records each as a mark
 //     (ARCHITECTURE "internal/render").
-//   - A non-code run drops its leading spaces where it starts a line (WRAP-1).
+//   - A non-code run drops its leading spaces where it starts a line (WRAP-1). A code block keeps
+//     them, and wraps by grapheme at the character that overflows (STYLE-CODE-2).
 //   - If not even one grapheme fits, the first rune is placed alone past the line's end, so the
 //     loop always advances (WRAP-1).
 func layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace) (layout.Dimensions, error) {
@@ -239,10 +240,12 @@ func fixedPx(v fixed.Int26_6) float64 {
 	return float64(v) / 64
 }
 
-// textRun places the text of one run, breaking it across lines as needed (WRAP-1). A word that
-// does not fit the rest of its line moves to the next line (WrapWords, words first). A word
-// wider than a whole line breaks at a character (WrapHeuristically), and only then. A non-code
-// run drops its leading spaces where it starts a line.
+// textRun places the text of one run, breaking it across lines as needed (WRAP-1). In prose, a
+// word that does not fit the rest of its line moves to the next line (WrapWords, words first),
+// and a word wider than a whole line breaks at a character (WrapHeuristically), and only then.
+// A code block wraps by grapheme at the character that overflows (STYLE-CODE-2, WrapGraphemes).
+// A non-code run drops its leading spaces where it starts a line; a code run and a code block
+// keep them.
 func (f *flow) textRun(r doc.Run) error {
 	if r.Link != nil && f.fp.links == nil {
 		return fmt.Errorf("render: link run %q with no link state", r.Text)
