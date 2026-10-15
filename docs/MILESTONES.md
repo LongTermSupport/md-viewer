@@ -651,6 +651,21 @@ started with `Start`; the wait runs in a goroutine.
 - `TestViewerRewraps`: the same frame at 800 then 300 px gives a taller first block (WRAP-2).
 - `TestViewerLayoutError`: a layout error ends a frame with that error (the window closes); a
   failed stderr write in a frame does too; an ordinary document gives no error.
+- `TestViewerHomeEnd`: End puts the last block at the bottom, Down there does not move, and
+  Home is the top.
+- `TestViewerCtrlWheelKeepsFirst`: a Ctrl+wheel zoom keeps `First` and scales the offset.
+- `TestViewerLinkControls`: a press on the link released away, a hover and no input open nothing.
+- `TestZoomMetric`: `Metric` multiplies both scales, at 100, 200, 125 and 67%.
+- `TestOpenerFailureNextFrame`: a failed stderr write from the opener's function fails the next
+  frame, and the frame after it does not.
+- `TestViewerGoSpawnWrites`: the real `goSpawn`, with a writer that is not safe for concurrent
+  use, writes the opener's line and a frame's line; `-race` finds no conflict.
+- `TestViewerLinkStatErrors` (Linux): a path under a regular file gives "cannot open link", and a
+  broken symbolic link is not found.
+- `TestExecOpenerWait`, with its helper `TestOpenerHelperProcess`: exit 3 is an error, exit 0 is
+  nil.
+- `TestFrameErrors`: a link write error and a layout error in one frame give one line.
+- `TestViewerLocalLinksAbsolute`: every local link reaches the opener as an absolute path.
 
 **Verification:** the standard checks.
 
@@ -663,7 +678,8 @@ started with `Start`; the wait runs in a goroutine.
 **Covers:** WIN-1, WIN-2, WIN-3, WIN-6, CLI-6, CLI-9, STYLE-PAL-2, STYLE-PAL-3 (the window
 fills `Canvas`; the view paints none), SPEED-1, SPEED-2, SPEED-6.
 
-**Files:** `internal/window/window.go`; `internal/app/prepare.go` completed (fonts, images,
+**Files:** `internal/window/window.go` (with `FrameError` and `Run`'s error, ARCHITECTURE
+"internal/window"); `internal/app/prepare.go` completed (fonts, images,
 view, viewer, timings, `Prepared.Window`); `internal/app/timing.go`; `cmd/md-viewer/main.go`
 in the shape of ARCHITECTURE.md (the `not implemented yet` line is removed); in
 `.github/workflows/ci.yml`, after the `go build` step of the `build` job, add:
@@ -691,6 +707,9 @@ in the shape of ARCHITECTURE.md (the `not implemented yet` line is removed); in
   `xvfb-run -a <binary> --time testdata/elements.md`: exit 0 and stdout matching the smoke
   regular expression. When `xvfb-run` is not on `PATH` the test fails with a message saying
   the image lacks it (the container and CI both have it, so it must never skip).
+- `TestFrameErrorMapping` (`internal/window`, `cmd/md-viewer`): a `Config.Frame` error comes out
+  of `Run` as a `*FrameError` that unwraps to it, and `main` prints `md-viewer: ` and that
+  error's text and exits 1 (CLI-6). Without a failed frame, `Run` returns nil on close.
 
 **Verification:** the standard checks and the smoke run. Push and check that CI's `build` job
 runs the smoke step green and uploads the artifact; download it with
