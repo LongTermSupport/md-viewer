@@ -26,17 +26,27 @@ const (
 // with its '&' and ';' is 34 bytes. This is a parser bound, not a SPEC value.
 const maxReferenceBytes = 34
 
+// converter holds what the conversion of one source needs: the source bytes, the document
+// directory that link targets are resolved against (DOC-5), and the count of dropped HTML
+// fragments (DOC-9).
+type converter struct {
+	src         []byte
+	dir         string
+	droppedHTML int
+}
+
 // Parse converts Markdown source into the document model (DOC-1 to DOC-3, DOC-6 to DOC-8,
 // DOC-12, DOC-14, DOC-15). dir is stored as Document.Dir.
 func Parse(src []byte, dir string) (*Document, error) {
 	src = normaliseLineEndings(src)
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	root := md.Parser().Parse(text.NewReader(src))
-	blocks, err := convertBlocks(root, src)
+	c := &converter{src: src, dir: dir}
+	blocks, err := c.convertBlocks(root)
 	if err != nil {
 		return nil, err
 	}
-	return &Document{Dir: dir, Blocks: blocks}, nil
+	return &Document{Dir: dir, Blocks: blocks, DroppedHTML: c.droppedHTML}, nil
 }
 
 // normaliseLineEndings turns each CRLF and each lone CR into LF (DOC-7). It returns a new slice.
@@ -61,10 +71,10 @@ func unmappedKind(n ast.Node) error {
 }
 
 // convertBlocks converts the block children of parent, in order.
-func convertBlocks(parent ast.Node, src []byte) ([]Block, error) {
+func (c *converter) convertBlocks(parent ast.Node) ([]Block, error) {
 	var out []Block
 	for n := parent.FirstChild(); n != nil; n = n.NextSibling() {
-		bs, err := convertBlock(n, src)
+		bs, err := c.convertBlock(n)
 		if err != nil {
 			return nil, err
 		}
@@ -75,26 +85,22 @@ func convertBlocks(parent ast.Node, src []byte) ([]Block, error) {
 
 // convertBlock converts one goldmark block node (DOC-2). A link reference definition gives no
 // block.
-func convertBlock(n ast.Node, src []byte) ([]Block, error) {
+func (c *converter) convertBlock(n ast.Node) ([]Block, error) {
 	switch n := n.(type) {
 	case *ast.Heading:
-		runs, err := inlineRuns(n, src)
+		runs, err := c.inlineRuns(n)
 		if err != nil {
 			return nil, err
 		}
 		return []Block{Heading{Level: n.Level, Runs: runs}}, nil
 	case *ast.Paragraph, *ast.TextBlock:
-		runs, err := inlineRuns(n, src)
-		if err != nil {
-			return nil, err
-		}
-		return []Block{Paragraph{Runs: runs}}, nil
+		return c.paragraphBlocks(n)
 	case *ast.FencedCodeBlock:
-		return []Block{CodeBlock{Lang: string(n.Language(src)), Text: codeText(n, src)}}, nil
+		return []Block{CodeBlock{Lang: string(n.Language(c.src)), Text: codeText(n, c.src)}}, nil
 	case *ast.CodeBlock:
-		return []Block{CodeBlock{Text: codeText(n, src)}}, nil
+		return []Block{CodeBlock{Text: codeText(n, c.src)}}, nil
 	case *ast.Blockquote:
-		blocks, err := convertBlocks(n, src)
+		blocks, err := c.convertBlocks(n)
 		if err != nil {
 			return nil, err
 		}
@@ -102,11 +108,17 @@ func convertBlock(n ast.Node, src []byte) ([]Block, error) {
 	case *ast.ThematicBreak:
 		return []Block{Rule{}}, nil
 	case *ast.List:
-		list, err := convertList(n, src)
+		list, err := c.convertList(n)
 		if err != nil {
 			return nil, err
 		}
 		return []Block{list}, nil
+	case *ast.HTMLBlock:
+		// DOC-9: an HTML block is dropped and counted.
+		c.droppedHTML++
+		return nil, nil
+	case *extast.Table:
+		return c.convertTable(n)
 	case *ast.LinkReferenceDefinition:
 		return nil, nil
 	default:
@@ -115,17 +127,17 @@ func convertBlock(n ast.Node, src []byte) ([]Block, error) {
 }
 
 // convertList converts a list and its items (DOC-8).
-func convertList(n *ast.List, src []byte) (List, error) {
+func (c *converter) convertList(n *ast.List) (List, error) {
 	list := List{Ordered: n.IsOrdered(), Tight: n.IsTight, Start: n.Start}
 	if !list.Ordered {
 		list.Start = unorderedStart
 	}
-	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
-		item, ok := c.(*ast.ListItem)
+	for ch := n.FirstChild(); ch != nil; ch = ch.NextSibling() {
+		item, ok := ch.(*ast.ListItem)
 		if !ok {
-			return List{}, unmappedKind(c)
+			return List{}, unmappedKind(ch)
 		}
-		converted, err := convertItem(item, src)
+		converted, err := c.convertItem(item)
 		if err != nil {
 			return List{}, err
 		}
@@ -135,8 +147,8 @@ func convertList(n *ast.List, src []byte) (List, error) {
 }
 
 // convertItem converts a list item: its task state and its child blocks (DOC-8).
-func convertItem(n *ast.ListItem, src []byte) (Item, error) {
-	blocks, err := convertBlocks(n, src)
+func (c *converter) convertItem(n *ast.ListItem) (Item, error) {
+	blocks, err := c.convertBlocks(n)
 	if err != nil {
 		return Item{}, err
 	}
@@ -158,6 +170,72 @@ func taskState(item ast.Node) Task {
 		return Done
 	}
 	return Open
+}
+
+// convertTable converts a GFM table: its column alignments, its header and its body rows (DOC-10).
+// goldmark pads short rows and drops extra cells.
+func (c *converter) convertTable(n *extast.Table) ([]Block, error) {
+	var t Table
+	for _, a := range n.Alignments {
+		align, err := alignOf(a)
+		if err != nil {
+			return nil, err
+		}
+		t.Align = append(t.Align, align)
+	}
+	for ch := n.FirstChild(); ch != nil; ch = ch.NextSibling() {
+		switch ch := ch.(type) {
+		case *extast.TableHeader:
+			cells, err := c.convertCells(ch)
+			if err != nil {
+				return nil, err
+			}
+			t.Header = cells
+		case *extast.TableRow:
+			cells, err := c.convertCells(ch)
+			if err != nil {
+				return nil, err
+			}
+			t.Rows = append(t.Rows, cells)
+		default:
+			return nil, unmappedKind(ch)
+		}
+	}
+	return []Block{t}, nil
+}
+
+// convertCells converts the cells of a table header or row (DOC-10).
+func (c *converter) convertCells(row ast.Node) ([]Cell, error) {
+	var cells []Cell
+	for ch := row.FirstChild(); ch != nil; ch = ch.NextSibling() {
+		tc, ok := ch.(*extast.TableCell)
+		if !ok {
+			return nil, unmappedKind(ch)
+		}
+		runs, err := c.inlineRuns(tc)
+		if err != nil {
+			return nil, err
+		}
+		cells = append(cells, Cell{Runs: runs})
+	}
+	return cells, nil
+}
+
+// alignOf maps a goldmark column alignment to the model's (DOC-10). The switch lists every
+// value; an unknown value is an error.
+func alignOf(a extast.Alignment) (Align, error) {
+	switch a {
+	case extast.AlignNone:
+		return AlignNone, nil
+	case extast.AlignLeft:
+		return AlignLeft, nil
+	case extast.AlignCenter:
+		return AlignCentre, nil
+	case extast.AlignRight:
+		return AlignRight, nil
+	default:
+		return 0, fmt.Errorf("doc: table alignment %d has no model value", a)
+	}
 }
 
 // codeText returns the lines of a code block with tabs expanded and the final newline removed
@@ -197,55 +275,154 @@ func expandTabs(s string) string {
 	return b.String()
 }
 
-// inlineRuns flattens the inline children of a block into normalised runs (DOC-3).
-func inlineRuns(n ast.Node, src []byte) ([]Run, error) {
-	var runs []Run
-	if err := collectRuns(n, src, 0, &runs); err != nil {
-		return nil, err
-	}
-	return normaliseRuns(runs), nil
+// inlineFlow collects the inline content of one block. In split mode (a paragraph or a text
+// block) an image ends the paragraph so far and becomes a block of its own (DOC-11); otherwise
+// an image's alt text is a text run in its place (P3).
+type inlineFlow struct {
+	split    bool
+	runs     []Run   // the runs since the last split
+	blocks   []Block // split mode: the finished paragraphs and images
+	hasImage bool
 }
 
-// collectRuns appends the runs of parent's inline children to out, with the style inherited
-// from its markup. The text is not yet normalised.
-func collectRuns(parent ast.Node, src []byte, st Style, out *[]Run) error {
-	for c := parent.FirstChild(); c != nil; c = c.NextSibling() {
-		switch c := c.(type) {
+// add appends a run to the runs since the last split.
+func (f *inlineFlow) add(r Run) {
+	f.runs = append(f.runs, r)
+}
+
+// cut ends the paragraph so far. Its runs, normalised, form a Paragraph unless none are left
+// (DOC-11).
+func (f *inlineFlow) cut() {
+	if runs := normaliseRuns(f.runs); len(runs) > 0 {
+		f.blocks = append(f.blocks, Paragraph{Runs: runs})
+	}
+	f.runs = nil
+}
+
+// inlineRuns flattens the inline children of a heading or a cell into normalised runs (DOC-3).
+func (c *converter) inlineRuns(n ast.Node) ([]Run, error) {
+	f := &inlineFlow{}
+	if err := c.collectRuns(n, 0, nil, f); err != nil {
+		return nil, err
+	}
+	return normaliseRuns(f.runs), nil
+}
+
+// paragraphBlocks converts a paragraph or a text block (DOC-3, DOC-11). Without images it is one
+// Paragraph, even when empty; with images it is split around them.
+func (c *converter) paragraphBlocks(n ast.Node) ([]Block, error) {
+	f := &inlineFlow{split: true}
+	if err := c.collectRuns(n, 0, nil, f); err != nil {
+		return nil, err
+	}
+	if !f.hasImage {
+		return []Block{Paragraph{Runs: normaliseRuns(f.runs)}}, nil
+	}
+	f.cut()
+	return f.blocks, nil
+}
+
+// collectRuns adds the runs of parent's inline children to f, with the style inherited from its
+// markup and the link inherited from the enclosing link, if any. The text is not yet normalised.
+func (c *converter) collectRuns(parent ast.Node, st Style, link *Target, f *inlineFlow) error {
+	for ch := parent.FirstChild(); ch != nil; ch = ch.NextSibling() {
+		switch ch := ch.(type) {
 		case *ast.Text:
-			*out = append(*out, Run{Kind: TextRun, Text: resolveText(c.Value(src)), Style: st})
-			if c.SoftLineBreak() {
-				*out = append(*out, Run{Kind: TextRun, Text: " ", Style: st})
+			f.add(Run{Kind: TextRun, Text: resolveText(ch.Value(c.src)), Style: st, Link: link})
+			if ch.SoftLineBreak() {
+				f.add(Run{Kind: TextRun, Text: " ", Style: st, Link: link})
 			}
-			if c.HardLineBreak() {
-				*out = append(*out, Run{Kind: BreakRun})
+			if ch.HardLineBreak() {
+				f.add(Run{Kind: BreakRun})
 			}
 		case *ast.String:
-			*out = append(*out, Run{Kind: TextRun, Text: string(c.Value), Style: st})
+			f.add(Run{Kind: TextRun, Text: string(ch.Value), Style: st, Link: link})
 		case *ast.CodeSpan:
-			text, err := codeSpanText(c, src)
+			text, err := c.codeSpanText(ch)
 			if err != nil {
 				return err
 			}
-			*out = append(*out, Run{Kind: TextRun, Text: text, Style: st | Code})
+			f.add(Run{Kind: TextRun, Text: text, Style: st | Code, Link: link})
 		case *ast.Emphasis:
-			flag, err := emphasisFlag(c.Level)
+			flag, err := emphasisFlag(ch.Level)
 			if err != nil {
 				return err
 			}
-			if err := collectRuns(c, src, st|flag, out); err != nil {
+			if err := c.collectRuns(ch, st|flag, link, f); err != nil {
 				return err
 			}
 		case *extast.Strikethrough:
-			if err := collectRuns(c, src, st|Strike, out); err != nil {
+			if err := c.collectRuns(ch, st|Strike, link, f); err != nil {
 				return err
 			}
+		case *ast.Link:
+			// DOC-4: the link's runs share one resolved target (DOC-5).
+			tg := ResolveLink(c.dir, string(ch.Destination))
+			if err := c.collectRuns(ch, st, &tg, f); err != nil {
+				return err
+			}
+		case *ast.AutoLink:
+			tg := classify(c.dir, autoLinkDest(ch, c.src))
+			f.add(Run{Kind: TextRun, Text: string(ch.Label(c.src)), Style: st, Link: &tg})
+		case *ast.Image:
+			if err := c.addImage(ch, st, link, f); err != nil {
+				return err
+			}
+		case *ast.RawHTML:
+			// DOC-9: inline raw HTML is dropped and counted; its text neighbours are kept.
+			c.droppedHTML++
 		case *extast.TaskCheckBox:
 			// DOC-8: the checkbox sets the item's task state and produces no run.
 		default:
-			return unmappedKind(c)
+			return unmappedKind(ch)
 		}
 	}
 	return nil
+}
+
+// addImage handles an image in running text (DOC-11). In split mode the paragraph so far ends
+// and the image becomes a block of its own, linked when it is a link's content. Otherwise its
+// alt text is a text run with the surrounding style and link (P3).
+func (c *converter) addImage(n *ast.Image, st Style, link *Target, f *inlineFlow) error {
+	alt, err := c.altText(n)
+	if err != nil {
+		return err
+	}
+	if !f.split {
+		f.add(Run{Kind: TextRun, Text: alt, Style: st, Link: link})
+		return nil
+	}
+	tg := ResolveLink(c.dir, string(n.Destination))
+	f.cut()
+	f.hasImage = true
+	f.blocks = append(f.blocks, Image{Alt: alt, Dest: tg.Dest, Target: tg, Link: link})
+	return nil
+}
+
+// altText returns the plain text of an image's content (DOC-11, P4): its runs with escapes and
+// references resolved, code raw, spaces collapsed and trimmed, and each break as one space.
+func (c *converter) altText(n *ast.Image) (string, error) {
+	f := &inlineFlow{}
+	if err := c.collectRuns(n, 0, nil, f); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, r := range normaliseRuns(breaksAsSpaces(f.runs)) {
+		b.WriteString(r.Text)
+	}
+	return b.String(), nil
+}
+
+// breaksAsSpaces turns each break into a space run, so that the spacing rules apply to it.
+func breaksAsSpaces(rs []Run) []Run {
+	out := make([]Run, 0, len(rs))
+	for _, r := range rs {
+		if r.Kind == BreakRun {
+			r = Run{Kind: TextRun, Text: " "}
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // emphasisFlag maps a goldmark emphasis level to its style flag (DOC-3).
@@ -261,16 +438,26 @@ func emphasisFlag(level int) (Style, error) {
 }
 
 // codeSpanText returns the raw text of a code span. A newline inside it becomes a space (DOC-3).
-func codeSpanText(n *ast.CodeSpan, src []byte) (string, error) {
+func (c *converter) codeSpanText(n *ast.CodeSpan) (string, error) {
 	var b strings.Builder
-	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
-		t, ok := c.(*ast.Text)
+	for ch := n.FirstChild(); ch != nil; ch = ch.NextSibling() {
+		t, ok := ch.(*ast.Text)
 		if !ok {
-			return "", unmappedKind(c)
+			return "", unmappedKind(ch)
 		}
-		b.Write(t.Value(src))
+		b.Write(t.Value(c.src))
 	}
 	return strings.ReplaceAll(b.String(), "\n", " "), nil
+}
+
+// autoLinkDest returns the destination of an autolink: its URL, with mailto: in front of an
+// email address (DOC-4, P2).
+func autoLinkDest(n *ast.AutoLink, src []byte) string {
+	dest := string(n.URL(src))
+	if n.AutoLinkType == ast.AutoLinkEmail && !strings.HasPrefix(dest, mailtoPrefix) {
+		return mailtoPrefix + dest
+	}
+	return dest
 }
 
 // resolveText resolves backslash escapes and entity and numeric references in text outside

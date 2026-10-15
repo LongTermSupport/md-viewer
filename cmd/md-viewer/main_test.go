@@ -82,15 +82,33 @@ func TestMainUsageExit(t *testing.T) {
 		}
 	})
 
-	t.Run("valid FILE is not implemented yet", func(t *testing.T) {
-		stdout, stderr, code := runBinary(t, bin, "a.md")
+	// CLI-8: a FILE that cannot be read is reported with its path as typed.
+	t.Run("missing FILE", func(t *testing.T) {
+		stdout, stderr, code := runBinary(t, bin, "nosuchfile.md")
 		if code != 1 {
 			t.Errorf("exit code = %d, want 1", code)
 		}
 		if stdout != "" {
 			t.Errorf("stdout = %q, want empty", stdout)
 		}
-		const want = "md-viewer: not implemented yet\n"
+		const want = "md-viewer: cannot read nosuchfile.md: no such file or directory\n"
+		if stderr != want {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+	})
+
+	// A file that loads still ends with the M2 line and exit 1; M10 removes it (P13).
+	// elements.md has four HTML fragments, so DOC-9's line comes first.
+	t.Run("loaded FILE is not implemented yet", func(t *testing.T) {
+		stdout, stderr, code := runBinary(t, bin, "../../testdata/elements.md")
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty", stdout)
+		}
+		const want = "md-viewer: 4 HTML fragment(s) not shown: HTML is not rendered\n" +
+			"md-viewer: not implemented yet\n"
 		if stderr != want {
 			t.Errorf("stderr = %q, want %q", stderr, want)
 		}
