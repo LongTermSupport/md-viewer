@@ -58,13 +58,33 @@ func goFiles(root string, visit func(rel string, f *ast.File) error) error {
 
 // initFuncs lists "file: func init" for each func init declared in a non-test .go file under root.
 func initFuncs(root string) ([]string, error) {
-	return nil, nil
+	var found []string
+	err := goFiles(root, func(rel string, f *ast.File) error {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if ok && fn.Recv == nil && fn.Name.Name == "init" {
+				found = append(found, rel+": func init")
+			}
+		}
+		return nil
+	})
+	return found, err
 }
 
 // goStatements lists the file of each go statement in a non-test .go file under root, once per
 // statement.
 func goStatements(root string) ([]string, error) {
-	return nil, nil
+	var found []string
+	err := goFiles(root, func(rel string, f *ast.File) error {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if _, ok := n.(*ast.GoStmt); ok {
+				found = append(found, rel)
+			}
+			return true
+		})
+		return nil
+	})
+	return found, err
 }
 
 // writeTree writes files, a map of relative path to content, under a new temporary directory,

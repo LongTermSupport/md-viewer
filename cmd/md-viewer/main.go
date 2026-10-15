@@ -2,27 +2,56 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/LongTermSupport/md-viewer/internal/app"
+	"github.com/LongTermSupport/md-viewer/internal/window"
+	"github.com/LongTermSupport/md-viewer/internal/window/gioapp"
 )
 
-// notImplemented is printed for a file that loads, until M10 opens the window (MILESTONES M0, P13).
-const notImplemented = "md-viewer: not implemented yet\n"
+// The stderr lines of a window that fails: a frame failure prints its own error (CLI-6), and a
+// window that cannot be opened prints CLI-9's line. Each ends with a newline.
+const (
+	msgFrameFailed = "md-viewer: %v\n"                       // CLI-6
+	msgCannotOpen  = "md-viewer: cannot open a window: %v\n" // CLI-9
+)
 
 func main() {
+	start := time.Now()
 	prep, code := app.Prepare(os.Args[1:], os.Stdout, os.Stderr, app.SystemClock{})
 	if !prep.OpenWindow {
 		os.Exit(int(code))
 	}
-	// A write error cannot be reported on stderr, and the exit code is ExitFailure either way.
-	write(os.Stderr, notImplemented)
-	os.Exit(int(app.ExitFailure))
+	// The window runs on its own goroutine, because gioapp.Main must hold the main goroutine.
+	go func() {
+		os.Exit(int(exitCode(gioapp.Run(prep.Window(start)), os.Stderr)))
+	}()
+	gioapp.Main()
 }
 
-// exitCode is the exit code of the window's result, and the stderr line for an error. Stub.
-func exitCode(err error, stderr io.Writer) app.ExitCode { return app.ExitOK }
+// exitCode is the exit code of the window's result, and writes the stderr line for an error: a
+// *window.FrameError prints its error (CLI-6), any other error prints CLI-9's line. A failed
+// write to stderr still gives app.ExitFailure.
+func exitCode(err error, stderr io.Writer) app.ExitCode {
+	if err == nil {
+		return app.ExitOK
+	}
+	line := fmt.Sprintf(msgCannotOpen, err)
+	var fe *window.FrameError
+	if errors.As(err, &fe) {
+		line = fmt.Sprintf(msgFrameFailed, fe.Err)
+	}
+	if werr := write(stderr, line); werr != nil {
+		// P12: a failed write has no stream left to report on, and the exit code is ExitFailure
+		// either way.
+		return app.ExitFailure
+	}
+	return app.ExitFailure
+}
 
 // write writes s to w and returns the write error, if any.
 func write(w io.Writer, s string) error {
