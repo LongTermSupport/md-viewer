@@ -37,6 +37,15 @@ const (
 // heading. In a heading the code is 100% of the heading size.
 const codeScale = 0.85 // STYLE-TEXT-5
 
+// Font weight and heading constants. Go Bold declares weight 600, which Gio names font.SemiBold
+// (STYLE-FONT-3), and GitHub asks for 600 too.
+const boldWeight font.Weight = font.SemiBold // STYLE-FONT-3
+
+const (
+	lineHeightHeading float32 = 1.25 // STYLE-TEXT-2: line height of every level
+	headingRuleWidth  unit.Dp = 1    // STYLE-TEXT-2: rule thickness, 1 dp
+)
+
 // RunStyle is the style of a run inside base. Flags add to the base: Strong sets the bold
 // weight, Emphasis the italic style, Code the Go Mono family (STYLE-FONT-3, STYLE-FONT-4). A
 // link takes the palette's Accent colour (STYLE-TEXT-3). The line height is always the base's
@@ -73,18 +82,9 @@ func BodyStyle(p Palette) TextStyle {
 	}
 }
 
-// Bold weight. Go Bold declares weight 600, which Gio names font.SemiBold (STYLE-FONT-3), and
-// GitHub asks for 600 too.
-const boldWeight font.Weight = font.SemiBold // STYLE-FONT-3
-
-// Headings (STYLE-TEXT-2). The numbers are written out, not computed from em: float32 cannot
-// give .3em of 24 exactly, so the table is the spec's literal values (F4).
-const (
-	lineHeightHeading float32 = 1.25 // STYLE-TEXT-2: line height of every level
-	headingRuleWidth  unit.Dp = 1    // STYLE-TEXT-2: rule thickness, 1 dp
-)
-
 // headingSpec is one row of STYLE-TEXT-2's table. A level with no rule has no padding either.
+// The numbers are written out, not computed from em: float32 cannot give .3em of 24 exactly,
+// so the table is the spec's literal values (F4).
 type headingSpec struct {
 	size    unit.Sp
 	padding unit.Dp // padding below the text, before the rule
@@ -134,7 +134,8 @@ const (
 
 // Margins gives a block's top and bottom margins (DOC-LAYOUT-4). nested is true for a list
 // inside a list item, the only block whose margins depend on nesting (F7). A block with no row
-// is an error (F3).
+// is an error (F3). Margins does not check Heading.Level: HeadingStyle rejects levels outside
+// 1 to 6.
 func Margins(b doc.Block, nested bool) (top, bottom unit.Dp, err error) {
 	switch b := b.(type) {
 	case doc.Heading:
