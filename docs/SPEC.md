@@ -145,7 +145,8 @@ of runs. A run is a string with a style set and an optional link:
   happens within a run after adjacent runs of equal style and link are merged, not across runs;
 - leading and trailing spaces of a paragraph, heading or cell are removed: the spaces at the
   start of the first run and at the end of the last run, when that run is not `Code`. A run
-  emptied by the removal is dropped.
+  emptied by the removal is dropped, and the removal continues into the next run while that run
+  is not `Code`.
 
 **DOC-4. Links.** A link run's link holds the destination as written. `[text](dest)` gives the
 runs of `text` with the link `dest`; an autolink `<https://…>` and a bare URL found by linkify
@@ -167,13 +168,15 @@ give one run whose text is the URL and whose link is the URL; an email autolink 
 **DOC-7. Code blocks.** Fenced and indented code blocks both map to `CodeBlock`. Its text is
 the lines exactly as goldmark gives them, with tabs expanded to the next multiple of 8 columns
 (a column is one rune; an invalid byte counts as one; a newline starts a new count) and the
-final newline removed. The fence's info string is kept as `Lang` (first word only) but
+final newline removed. Before goldmark sees the source, `Parse` turns each `\r\n` and each lone
+`\r` into `\n`, so no text carries a CR. The fence's info string is kept as `Lang` (first word only) but
 changes nothing in rendering.
 
 **DOC-8. Lists.** Ordered and unordered lists map to `List` with `Ordered`, `Start` (the first
 number of an ordered list; 1 for unordered), `Tight` (goldmark's `IsTight`) and items. Each
 item holds its child blocks and a task state: `NotTask`, `Open` (`[ ]`) or `Done` (`[x]` or
-`[X]`). The checkbox is removed from the item's text. In a tight list goldmark's `TextBlock`
+`[X]`). The checkbox is removed from the item's text. An empty item has no blocks; a
+checkbox-only item (`- [ ]`) has one empty paragraph. In a tight list goldmark's `TextBlock`
 maps to `Paragraph`, and the list's `Tight` flag decides the spacing (STYLE-LIST-4).
 
 **DOC-9. HTML is dropped.** HTML blocks (including comments) and inline raw HTML produce no

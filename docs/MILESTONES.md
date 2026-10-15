@@ -306,6 +306,8 @@ on this file in this milestone.
   `Link`; an image in a heading becomes its alt text.
 - `TestHTMLDropped`: an HTML block, a comment and `a <span>b</span> c` give no HTML content,
   the text `a b c`, and `DroppedHTML` equal to the number of fragments.
+- `TestFootnoteDefinitionCaveat`: `[^1]: note` alone gives no block and `[^1]` gives a link
+  run (DOC-1's one-word caveat). M1 cannot test it, since its Link kind is unmapped until now.
 - `TestEveryKindIsMapped` and `TestParseDeterministic` move to `testdata/elements.md`, as M1's
   versions use an inline constant (see M1).
 - `TestLoadErrors` (in `t.TempDir()`): a missing file, a directory, a file over
