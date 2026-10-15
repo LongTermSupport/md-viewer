@@ -427,15 +427,15 @@ func (f *flow) strike(ts TextStyle, baseY, start, end int) {
 	top := baseY - int(math.Round(strikeRiseEm*size))
 	thick := max(f.gtx.Dp(strikeMin), int(math.Round(size/strikeDivisor)))
 	rect := image.Rect(start, top, end, top+thick)
-	f.fillRect(rect, ts.Colour)
+	fillRect(f.gtx, rect, ts.Colour)
 	f.tr.add(Mark{Kind: MarkStrike, Rect: rect, Colour: ts.Colour})
 }
 
-// fillRect fills r with colour c.
-func (f *flow) fillRect(r image.Rectangle, c color.NRGBA) {
-	stack := clip.Rect(r).Push(f.gtx.Ops)
-	paint.ColorOp{Color: c}.Add(f.gtx.Ops)
-	paint.PaintOp{}.Add(f.gtx.Ops)
+// fillRect fills r with colour c, in the current transform.
+func fillRect(gtx layout.Context, r image.Rectangle, c color.NRGBA) {
+	stack := clip.Rect(r).Push(gtx.Ops)
+	paint.ColorOp{Color: c}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
 	stack.Pop()
 }
 

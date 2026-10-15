@@ -99,8 +99,14 @@ func layoutHeading(gtx layout.Context, ctx blockCtx, h doc.Heading, tr *Trace) (
 	if err != nil {
 		return layout.Dimensions{}, err
 	}
-	height := dims.Size.Y + gtx.Dp(rule.PaddingBelow) + gtx.Dp(rule.Thickness)
-	return layout.Dimensions{Size: image.Pt(dims.Size.X, height)}, nil
+	ruleTop := dims.Size.Y + gtx.Dp(rule.PaddingBelow)
+	thick := gtx.Dp(rule.Thickness)
+	if rule.Thickness > 0 {
+		r := image.Rect(0, ruleTop, gtx.Constraints.Max.X, ruleTop+thick)
+		fillRect(gtx, r, rule.Colour)
+		tr.add(Mark{Kind: MarkHeadingRule, Rect: r, Colour: rule.Colour})
+	}
+	return layout.Dimensions{Size: image.Pt(dims.Size.X, ruleTop+thick)}, nil
 }
 
 // layoutQuote lays out a quote's children, indented past the bar and its padding, in muted text
