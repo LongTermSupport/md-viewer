@@ -32,15 +32,17 @@ const (
 	MarkLinkArea                    // a link's clickable area (LINK-1, STYLE-TEXT-3)
 )
 
-// Trace records what layout drew, in pixels relative to the block's top-left corner. The view
-// keeps one per visible block; tests read it to assert structure.
+// Trace records what layout drew. Its origin is the top-left corner of what the trace was made
+// for: the flow's in a flow trace, the list element's (gap and padding included) in a View
+// trace. Nested layout translates by its origin (push and pop), so a sub-layout records in the
+// coordinates of the trace it was given. Tests read it to assert structure.
 type Trace struct {
 	Marks  []Mark
-	origin image.Point // added to every mark's Rect as it is recorded (M5)
+	origin image.Point // added to every mark's Rect as it is recorded
 }
 
-// Mark is one thing layout drew. Rect is in pixels relative to the flow's top-left corner
-// (ARCHITECTURE "internal/render", mark rectangles).
+// Mark is one thing layout drew. Rect is in pixels relative to the trace's origin (see Trace,
+// and ARCHITECTURE "internal/render", mark rectangles).
 type Mark struct {
 	Kind   MarkKind
 	Rect   image.Rectangle
@@ -49,19 +51,31 @@ type Mark struct {
 	Link   *doc.Target // for LinkArea
 }
 
-// add appends m to the trace. A nil Trace records nothing, so layout code need not check for
-// one (ARCHITECTURE "internal/render": tr may be nil).
+// add appends m to the trace, moved by the origin. A nil Trace records nothing, so layout code
+// need not check for one (ARCHITECTURE "internal/render": tr may be nil).
 func (t *Trace) add(m Mark) {
 	if t == nil {
 		return
 	}
+	m.Rect = m.Rect.Add(t.origin)
 	t.Marks = append(t.Marks, m)
 }
 
-// push moves the origin by d and returns the previous origin, for pop. Stub: not yet implemented.
+// push moves the origin by d, so that marks recorded inside a nested layout are in the outer
+// trace's coordinates, and returns the previous origin for pop. A nil Trace has no origin.
 func (t *Trace) push(d image.Point) image.Point {
-	return image.Point{}
+	if t == nil {
+		return image.Point{}
+	}
+	prev := t.origin
+	t.origin = t.origin.Add(d)
+	return prev
 }
 
-// pop restores the origin that push returned. Stub: not yet implemented.
-func (t *Trace) pop(prev image.Point) {}
+// pop restores the origin that the matching push returned.
+func (t *Trace) pop(prev image.Point) {
+	if t == nil {
+		return
+	}
+	t.origin = prev
+}
