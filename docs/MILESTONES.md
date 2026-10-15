@@ -240,8 +240,8 @@ CI run: `build` green, `go-qa` red only at its install step (go-qa-ci is private
 **Covers:** DOC-1, DOC-2, DOC-3, DOC-6, DOC-7, DOC-8, DOC-12, DOC-14, DOC-15.
 
 **Files:** `internal/doc/model.go` (all model types of ARCHITECTURE.md, including those M2
-fills in), `internal/doc/parse.go`, `internal/doc/parse_test.go`. Add goldmark v1.8.6 to
-`go.mod` (`go get github.com/yuin/goldmark@v1.8.6`).
+fills in), `internal/doc/parse.go`, `internal/doc/parse_test.go`, `internal/doc/model_test.go`
+(written before `model.go`). Add goldmark v1.8.6 to `go.mod` (`go get github.com/yuin/goldmark@v1.8.6`).
 
 **Tests first** (each parses an inline Markdown string with `Parse(src, "/doc")` and compares
 `Blocks` with `reflect.DeepEqual`, printing both with `%#v` on failure):
@@ -261,9 +261,16 @@ fills in), `internal/doc/parse.go`, `internal/doc/parse_test.go`. Add goldmark v
   items `[ ]`, `[x]`, `[X]` (checkbox text removed).
 - `TestUnsupportedSyntaxIsText`: a footnote reference `[^1]` and its definition, and
   `:smile:`, come out as plain text.
-- `TestEveryKindIsMapped`: parse `testdata/elements.md`; no error.
-- `TestParseDeterministic`: parsing `testdata/elements.md` twice gives `DeepEqual` models.
-- `TestInvalidUTF8`: `"a\xffb"` parses without error.
+- `TestStyleFlagsDisjoint` (`model_test.go`): the four style flags are non-zero and disjoint.
+- `TestUnmappedKindIsError`: an unmapped block kind and an unmapped inline kind each return an
+  error naming the kind.
+- `TestNormaliseRuns`: the run merge, collapse and trim rules on hand-built runs.
+- `TestLinkReferenceDefinitionDropped`: `[a]: /url` followed by text gives only the text.
+- `TestEscapesAndEntities`: backslash escapes and entity references resolve outside code.
+- `TestEveryKindIsMapped`: parse an inline constant holding every M1 construct; no error, and
+  every M1 block kind and style flag occurs. (M2 adds the `testdata/elements.md` version.)
+- `TestParseDeterministic`: parsing that constant twice gives `DeepEqual` models.
+- `TestInvalidUTF8`: `"a\xffb"` parses without error and the bytes pass through.
 
 **Verification:** the standard checks.
 
@@ -280,6 +287,11 @@ fills in), `internal/doc/parse.go`, `internal/doc/parse_test.go`. Add goldmark v
 the first part of `Prepare` (arguments, then `doc.Load`, printing CLI-8's messages and the
 DOC-9 line); `cmd/md-viewer/main.go` uses `Prepare`.
 
+**Before the tests:** `testdata/elements.md` needs a real indented code block and a setext
+heading (it has neither now), and its misleading fence (a fenced block where an indented one
+is meant) renamed or replaced. M1's `TestEveryKindIsMapped` and `TestParseDeterministic` run
+on this file in this milestone.
+
 **Tests first:**
 
 - `TestResolveLink` (table): every row of DOC-5's table, plus `HTTPS://X`, `other.md#part`,
@@ -294,6 +306,8 @@ DOC-9 line); `cmd/md-viewer/main.go` uses `Prepare`.
   `Link`; an image in a heading becomes its alt text.
 - `TestHTMLDropped`: an HTML block, a comment and `a <span>b</span> c` give no HTML content,
   the text `a b c`, and `DroppedHTML` equal to the number of fragments.
+- `TestEveryKindIsMapped` and `TestParseDeterministic` move to `testdata/elements.md`, as M1's
+  versions use an inline constant (see M1).
 - `TestLoadErrors` (in `t.TempDir()`): a missing file, a directory, a file over
   `MaxFileSize` (create it sparse with `os.Truncate`, so it is not written out), and a file
   with a NUL byte; each gives its error type with the right fields. (A permission failure is

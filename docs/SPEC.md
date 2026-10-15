@@ -57,10 +57,14 @@ Quit: q or Esc.
 ```
 
 **CLI-5.** The version line is `md-viewer VERSION`, where VERSION is the main module version
-from `runtime/debug.ReadBuildInfo` (`v1.2.3` for a `go install …@v1.2.3` build). When that
-version is `(devel)` and the build info carries a `vcs.revision` setting, VERSION is
-`(devel) ` followed by the first 12 characters of the revision, and ` dirty` is appended when
-`vcs.modified` is `true`. When no build info is available VERSION is `unknown`.
+from `runtime/debug.ReadBuildInfo`, printed as the Go toolchain stamped it: `v1.2.3` for a
+`go install …@v1.2.3` build, and for a normal `go build` with Go 1.24 or later a VCS
+pseudo-version such as `v0.0.0-20261015095027-53092c9efe88`, with `+dirty` appended for a
+modified tree. When the main module version is `(devel)` and the build info carries a
+`vcs.revision` setting, VERSION is `(devel) ` followed by the first 12 characters of the
+revision, and ` dirty` is appended when `vcs.modified` is `true`; an empty `vcs.revision`
+gives just `(devel)`. An empty main module version gives `unknown`, and so does a build with
+no build info.
 
 **CLI-6. Exit codes.**
 
@@ -115,12 +119,14 @@ goldmark types, so the render layer depends on md-viewer's own types only. Types
 **DOC-1.** Parsing uses goldmark with the GFM extension set: tables, strikethrough, linkify and
 task lists (`extension.GFM`). No other extension is enabled, so footnotes, definition lists,
 emoji shortcodes, typographer quotes and heading attributes are not interpreted; their source
-text appears as ordinary text.
+text appears as ordinary text, unless that text is also valid CommonMark: `[^1]: note` is a
+link reference definition (DOC-2), so it produces no text and `[^1]` becomes a link.
 
 **DOC-2.** Every block in the goldmark AST maps to exactly one model block, except as stated in
-DOC-9 (HTML) and DOC-11 (images). A goldmark node kind with no mapping is a programming error:
-the conversion returns an error naming the kind, and a test covers every kind that GFM can
-produce, so that error is unreachable in practice.
+DOC-9 (HTML) and DOC-11 (images). A link reference definition (`[label]: destination`) produces
+no block. A goldmark node kind with no mapping is a programming error: the conversion returns
+an error naming the kind, and a test covers every kind that GFM can produce, so that error is
+unreachable in practice.
 
 **DOC-3. Inline text is flattened into runs.** A paragraph, heading, or table cell holds a list
 of runs. A run is a string with a style set and an optional link:
@@ -130,10 +136,16 @@ of runs. A run is a string with a style set and an optional link:
 - adjacent text with identical style and link is merged into one run;
 - a soft line break becomes one space;
 - a hard line break (two trailing spaces or a trailing backslash) becomes a run of kind
-  `Break`, which carries no text;
+  `Break`, which carries no text, has style 0 and no link, even inside emphasis or a link;
+- in runs without `Code`, backslash escapes and entity and numeric character references are
+  resolved as goldmark's HTML writer resolves them (`\*` is `*`, `&amp;` is `&`, `\&amp;` is
+  `&amp;`); `Code` runs are raw. Resolution happens before the spacing rules;
 - in runs without `Code`, every sequence of spaces and tabs collapses to one space (as HTML
-  does); in `Code` runs spaces are kept as written, and a tab becomes one space;
-- leading and trailing spaces of a paragraph, heading or cell are removed.
+  does); in `Code` runs spaces are kept as written, and a tab becomes one space. Collapsing
+  happens within a run after adjacent runs of equal style and link are merged, not across runs;
+- leading and trailing spaces of a paragraph, heading or cell are removed: the spaces at the
+  start of the first run and at the end of the last run, when that run is not `Code`. A run
+  emptied by the removal is dropped.
 
 **DOC-4. Links.** A link run's link holds the destination as written. `[text](dest)` gives the
 runs of `text` with the link `dest`; an autolink `<https://…>` and a bare URL found by linkify
@@ -154,7 +166,8 @@ give one run whose text is the URL and whose link is the URL; an email autolink 
 
 **DOC-7. Code blocks.** Fenced and indented code blocks both map to `CodeBlock`. Its text is
 the lines exactly as goldmark gives them, with tabs expanded to the next multiple of 8 columns
-and the final newline removed. The fence's info string is kept as `Lang` (first word only) but
+(a column is one rune; an invalid byte counts as one; a newline starts a new count) and the
+final newline removed. The fence's info string is kept as `Lang` (first word only) but
 changes nothing in rendering.
 
 **DOC-8. Lists.** Ordered and unordered lists map to `List` with `Ordered`, `Start` (the first
@@ -185,7 +198,8 @@ thematic break maps to `Rule`.
 
 **DOC-13. Loading.** `doc.Load(path)` applies CLI-8's checks in that order (stat, directory,
 size, read, NUL) and returns typed errors that the CLI turns into the messages of CLI-8.
-`Document.Dir` is the absolute directory of the file, and `Document.Name` its base name.
+`Document.Dir` is the absolute directory of the file, and `Document.Name` its base name. `Load`
+sets `Name` and passes the absolute directory to `Parse`, which stores it as `Document.Dir`.
 
 **DOC-14.** Parsing is deterministic: the same bytes give a model that is `reflect.DeepEqual`
 to the last one.
