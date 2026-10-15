@@ -117,7 +117,7 @@ is in `.claude/ccy/Dockerfile` and a rebuild by the owner, not an install by han
 - `internal/app/version.go`: `VersionLine(info *debug.BuildInfo, ok bool) string`.
 - `cmd/md-viewer/main.go`: parses the arguments; prints usage (stdout, exit 0), the version
   line (stdout, exit 0), or a usage error (CLI-7, exit 2). With a valid FILE it prints
-  `md-viewer: not implemented yet` to stderr and exits 1; M2 and M10 replace that line.
+  `md-viewer: not implemented yet` to stderr and exits 1; M10 replaces that line (M2 keeps it, P13).
 - `README.md` already exists; change nothing in it except to correct an error you find.
 
 `.github/workflows/ci.yml`:
@@ -296,7 +296,8 @@ on this file in this milestone.
 
 - `TestResolveLink` (table): every row of DOC-5's table, plus `HTTPS://X`, `other.md#part`,
   `../up.md`, `/abs/x.md`, `a%20b.md`, `file:///tmp/x.md`, `javascript:alert(1)`, `#top`,
-  and a destination that fails `url.Parse`.
+  a destination that fails `url.Parse`, and `javascript&colon;alert(1)`, `file://localhost/x`,
+  `file:///x%20y`, `C:\x.md` and `?q`.
 - `TestLinkRuns`: `[a *b*](x.md)` gives two runs sharing one link; `<https://e.org/>`,
   a bare `https://e.org/`, `<a@example.com>` give DOC-4's runs.
 - `TestTables`: alignments `:--`, `:-:`, `--:`, `---`; header and body cells with runs; a
@@ -310,13 +311,13 @@ on this file in this milestone.
   run (DOC-1's one-word caveat). M1 cannot test it, since its Link kind is unmapped until now.
 - `TestEveryKindIsMapped` and `TestParseDeterministic` move to `testdata/elements.md`, as M1's
   versions use an inline constant (see M1).
-- `TestLoadErrors` (in `t.TempDir()`): a missing file, a directory, a file over
-  `MaxFileSize` (create it sparse with `os.Truncate`, so it is not written out), and a file
+- `TestLoadErrors` (in `t.TempDir()`): a missing file, a directory, `/dev/zero` (not a regular
+  file), a file over `MaxFileSize` (create it sparse with `os.Truncate`, so it is not written out), and a file
   with a NUL byte; each gives its error type with the right fields. (A permission failure is
   not tested: the container runs as root, which reads mode-0 files; the missing-file case
   already proves REASON is passed through.)
 - `TestLoadOK`: `Load` of `testdata/elements.md` with a fake clock that advances 1 ms per
-  call gives `Name: "elements.md"`, an absolute `Dir`, and `LoadStats` of whole milliseconds.
+  call gives `Name: "elements.md"`, an absolute `Dir`, and `LoadStats` with `Read == Parse == 1 ms` (DOC-13).
 - `TestPrepareFileErrors` (`internal/app`): CLI-8's four messages, byte for byte, exit 1.
 - `TestPrepareHTMLLine`: a file with HTML prints DOC-9's line to stderr.
 - `TestPrepareArgs` (`internal/app`): help, version and usage output, which move into `Prepare`.

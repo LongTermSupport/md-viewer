@@ -118,7 +118,7 @@ type LoadStats struct{ Read, Parse time.Duration }   // for --time (SPEED-2)
 
 // Load errors, each a distinct type so the CLI chooses the message (CLI-8)
 // without matching strings:
-type ReadError     struct{ Path string; Err error } // Err is the *fs.PathError's Err
+type ReadError     struct{ Path string; Err error } // Err is the *fs.PathError's Err, or "not a regular file"
 type DirectoryError struct{ Path string }
 type TooLargeError struct{ Path string; Size int64 }
 type BinaryError   struct{ Path string }

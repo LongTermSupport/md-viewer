@@ -94,12 +94,16 @@ as typed.
 | ------------------------------------------- | ----------------------------------------------------------------- |
 | the file cannot be opened or read           | `md-viewer: cannot read PATH: REASON`                             |
 | PATH is a directory                         | `md-viewer: cannot read PATH: is a directory`                     |
+| PATH is not a regular file                  | `md-viewer: cannot read PATH: not a regular file`                 |
 | the file is larger than 64 MiB (67108864 B) | `md-viewer: PATH is too large: SIZE bytes, the limit is 67108864` |
 | the file contains a NUL byte                | `md-viewer: PATH is not a text file: it contains a NUL byte`      |
 
 REASON is the text of the operating system error underneath the `*fs.PathError` (for a missing
 file, `no such file or directory`; for a permission failure, `permission denied`). The size is
-checked with `Stat` before reading, so a huge file is refused without being read.
+checked with `Stat` before reading, so a huge file is refused without being read. A path that
+`Stat` shows is neither a regular file nor a directory (a device, FIFO or socket) is refused
+without being opened. The read is capped at the limit plus one byte, so a file that grows after
+its `Stat` is refused too, with SIZE the bytes read.
 
 **CLI-9.** If the window cannot be opened (no display, no GPU driver), md-viewer prints
 `md-viewer: cannot open a window: REASON` to stderr and exits 1, where REASON is the error Gio
@@ -167,7 +171,7 @@ host (`//e.org/x`) are `Refused` (P7).
 | ------------------------------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | scheme `http`, `https` or `mailto` (case-insensitive)  | `External`  | the destination unchanged                                                                                                                          |
 | scheme `file`                                          | `LocalFile` | the URL's path, cleaned                                                                                                                            |
-| no scheme, not starting with `#`                       | `LocalFile` | `docDir` joined with the path part, cleaned; an absolute path is kept as is; the `#fragment` and `?query` are dropped; percent-escapes are decoded |
+| no scheme and no host, not starting with `#`           | `LocalFile` | `docDir` joined with the path part, cleaned; an absolute path is kept as is; the `#fragment` and `?query` are dropped; percent-escapes are decoded |
 | starting with `#`                                      | `Fragment`  | the destination unchanged                                                                                                                          |
 | any other scheme, or a destination that fails to parse | `Refused`   | the destination unchanged                                                                                                                          |
 
@@ -215,12 +219,12 @@ neighbours (P3).
 thematic break maps to `Rule`.
 
 **DOC-13. Loading.** `doc.Load(path, now)` applies CLI-8's checks in that order (stat, directory,
-size, read, NUL) and returns typed errors, as pointers, that the CLI turns into the messages of
+regular file, size, read, NUL) and returns typed errors, as pointers, that the CLI turns into the messages of
 CLI-8 (the CLI owns the wording). `Document.Dir` is the absolute directory of the file, and
 `Document.Name` its base name. `Load` sets `Name` and passes the absolute directory to `Parse`,
 which stores it as `Document.Dir`. An error from `filepath.Abs` or `Parse` is returned as a plain
 error, and the CLI prints `md-viewer: ` + the error and exits 1 (P10). `now` is called exactly
-three times: before the stat, after the NUL check, and after `Parse`. `LoadStats.Read` is the
+three times on success: before the stat, after the NUL check, and after `Parse`. `LoadStats.Read` is the
 difference of the first two readings (stat, read and NUL check) and `LoadStats.Parse` that of the
 last two (P9).
 
