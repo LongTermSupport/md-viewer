@@ -2,6 +2,7 @@ package render
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"io"
 	"os"
@@ -506,6 +507,202 @@ func TestViewTinyWidth(t *testing.T) {
 		for _, w := range widths {
 			for i := 0; i < e.view.Len(); i++ {
 				e.layout(i, w)
+			}
+		}
+	}
+}
+
+// metricAt is a metric of px pixels per dp and per sp.
+func metricAt(px float32) unit.Metric { return unit.Metric{PxPerDp: px, PxPerSp: px} }
+
+// corpusFiles lists the documents that the geometry tests read: the rendering corpus and
+// elements.md.
+func corpusFiles(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob("../../testdata/corpus/*.md")
+	if err != nil {
+		t.Fatalf("glob the corpus: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no corpus files in testdata/corpus")
+	}
+	return append(files, "../../testdata/elements.md")
+}
+
+// fileEnv is a View of the Markdown file at path, its images resolved beside it, at metric m.
+func fileEnv(t *testing.T, path string, m unit.Metric) *viewEnv {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	dir, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("abs %s: %v", path, err)
+	}
+	return newViewEnvIn(t, string(src), dir, Light, m)
+}
+
+// TestGlyphOriginIsBaseline: every fragment's Origin is strictly inside its glyph box, so the
+// baseline it names is one the ink stands on (STYLE-TEXT-7). Over the corpus and elements.md, at
+// three metrics, and in one line of body and code and bold text, every fragment shares one Origin.Y.
+func TestGlyphOriginIsBaseline(t *testing.T) {
+	for _, path := range corpusFiles(t) {
+		for _, px := range []float32{1, 1.25, 2} {
+			e := fileEnv(t, path, metricAt(px))
+			for i := 0; i < e.view.Len(); i++ {
+				_, tr := e.layout(i, 800)
+				for _, m := range tr.Marks {
+					if m.Kind != MarkGlyphs && m.Kind != MarkNumber {
+						continue
+					}
+					if m.Rect.Min.Y >= m.Origin.Y || m.Origin.Y >= m.Rect.Max.Y {
+						t.Errorf("%s at %v, block %d: %q origin %v not inside glyph rect %v",
+							filepath.Base(path), px, i, m.Text, m.Origin, m.Rect)
+					}
+				}
+			}
+		}
+	}
+	for _, px := range []float32{1, 1.25, 2} {
+		e := newFlowEnvAt(t, 800, px)
+		tr := e.trace([]doc.Run{plain("body "), codeRun("mono "), styledRun("bold", doc.Strong), plain("end")})
+		gs := marks(tr, MarkGlyphs)
+		if len(gs) != 4 {
+			t.Fatalf("at %v: %d Glyphs marks for four runs on one line", px, len(gs))
+		}
+		for _, g := range gs {
+			if g.Origin.Y != gs[0].Origin.Y {
+				t.Errorf("at %v: %q origin y %d, %q has %d; one line has one baseline", px, g.Text, g.Origin.Y, gs[0].Text, gs[0].Origin.Y)
+			}
+		}
+	}
+}
+
+// TestDecorationsShareGeometry: the decorations of each fragment are placed from the baseline its
+// glyphs are drawn on (STYLE-TEXT-7). Over the corpus, at three metrics and two widths: a link
+// area holds its glyph box and its origin; a code background holds its glyphs; a strike starts
+// between the glyph box's top and the origin; and a bullet or task box is centred between the top
+// and the origin of the nearest fragment to its right.
+func TestDecorationsShareGeometry(t *testing.T) {
+	for _, path := range corpusFiles(t) {
+		for _, px := range []float32{1, 1.25, 2} {
+			for _, w := range []int{600, 970} {
+				e := fileEnv(t, path, metricAt(px))
+				for i := 0; i < e.view.Len(); i++ {
+					_, tr := e.layout(i, w)
+					checkDecorations(t, fmt.Sprintf("%s at %v, %d px, block %d", filepath.Base(path), px, w, i), tr)
+				}
+			}
+		}
+	}
+}
+
+// checkDecorations checks the geometry of tr's decorations against the Glyphs marks they belong
+// to (TestDecorationsShareGeometry). Marks are paired by record order: a code background precedes
+// the glyphs it lies behind, and a strike or link area follows them. A link area that does not
+// hold the last glyphs' x span is an image's, and is not paired.
+func checkDecorations(t *testing.T, where string, tr *Trace) {
+	t.Helper()
+	var glyphs []Mark
+	for _, m := range tr.Marks {
+		if m.Kind == MarkGlyphs {
+			glyphs = append(glyphs, m)
+		}
+	}
+	var last *Mark
+	var code *Mark
+	for k := range tr.Marks {
+		m := tr.Marks[k]
+		switch m.Kind {
+		case MarkCodeBg:
+			code = &m
+		case MarkGlyphs:
+			if code != nil && !within(code.Rect, m.Rect) {
+				t.Errorf("%s: code background %v does not hold its glyphs %v", where, code.Rect, m.Rect)
+			}
+			code = nil
+			last = &tr.Marks[k]
+		case MarkStrike:
+			if last == nil {
+				t.Errorf("%s: strike with no glyphs before it", where)
+				continue
+			}
+			if top := m.Rect.Min.Y; top < last.Rect.Min.Y || top > last.Origin.Y {
+				t.Errorf("%s: strike top %d outside [%d, %d] of %q", where, top, last.Rect.Min.Y, last.Origin.Y, last.Text)
+			}
+		case MarkLinkArea:
+			if last == nil || m.Rect.Min.X > last.Rect.Min.X || last.Rect.Max.X > m.Rect.Max.X {
+				continue
+			}
+			if !within(m.Rect, last.Rect) || last.Origin.Y < m.Rect.Min.Y || last.Origin.Y > m.Rect.Max.Y {
+				t.Errorf("%s: link area %v does not hold %q (glyphs %v, origin y %d)", where, m.Rect, last.Text, last.Rect, last.Origin.Y)
+			}
+		case MarkBullet, MarkTaskBox:
+			if m.Kind == MarkTaskBox && m.Text != taskMarkOpen && m.Text != taskMarkDone {
+				continue
+			}
+			checkMarkerLine(t, where, m, glyphs)
+		}
+	}
+}
+
+// checkMarkerLine checks that a marker's centre lies between the top and the origin of the
+// nearest Glyphs mark to its right, which is the first line of its item (STYLE-LIST-2, STYLE-LIST-5).
+func checkMarkerLine(t *testing.T, where string, m Mark, glyphs []Mark) {
+	t.Helper()
+	cy := (m.Rect.Min.Y + m.Rect.Max.Y) / 2
+	var near *Mark
+	for k := range glyphs {
+		g := &glyphs[k]
+		if g.Rect.Min.X < m.Rect.Max.X {
+			continue
+		}
+		if near == nil || abs(cy-g.Origin.Y) < abs(cy-near.Origin.Y) {
+			near = g
+		}
+	}
+	if near == nil {
+		t.Errorf("%s: marker %v has no text to its right", where, m.Rect)
+		return
+	}
+	if cy < near.Rect.Min.Y || cy > near.Origin.Y {
+		t.Errorf("%s: marker centre %d outside [%d, %d] of %q", where, cy, near.Rect.Min.Y, near.Origin.Y, near.Text)
+	}
+}
+
+// abs is the absolute value of x.
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// TestNoMarkPastContentEdge: no mark of a block reaches past the content edge, the width less the
+// content padding (DOC-LAYOUT-1), over the corpus and elements.md at 310, 600 and 970 dp and three
+// metrics. A table is skipped: STYLE-TABLE-5 clips it at the edge. The test guards against text
+// that runs past the window's right side.
+func TestNoMarkPastContentEdge(t *testing.T) {
+	for _, path := range corpusFiles(t) {
+		for _, px := range []float32{1, 1.25, 2} {
+			for _, dp := range []int{310, 600, 970} {
+				e := fileEnv(t, path, metricAt(px))
+				width := int(float32(dp) * px)
+				gtx := e.context(width)
+				edge := width - gtx.Dp(Padding(gtx.Metric.PxToDp(width)))
+				for i := 0; i < e.view.Len(); i++ {
+					if _, ok := e.d.Blocks[i].(doc.Table); ok {
+						continue
+					}
+					_, tr := e.layout(i, width)
+					for _, m := range tr.Marks {
+						if m.Rect.Max.X > edge {
+							t.Errorf("%s at %d dp, %v: block %d mark %v (%q) ends at %d, past the content edge %d",
+								filepath.Base(path), dp, px, i, m.Kind, m.Text, m.Rect.Max.X, edge)
+						}
+					}
+				}
 			}
 		}
 	}

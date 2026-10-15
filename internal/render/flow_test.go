@@ -8,10 +8,12 @@ import (
 	"unicode/utf8"
 
 	"gioui.org/f32"
+	"gioui.org/io/event"
 	"gioui.org/io/input"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/text"
 	"gioui.org/unit"
 
 	"github.com/LongTermSupport/md-viewer/internal/doc"
@@ -25,15 +27,22 @@ type flowEnv struct {
 	router input.Router
 	fp     flowParams
 	width  int
+	metric unit.Metric
 }
 
 func newFlowEnv(t *testing.T, width int) *flowEnv {
+	t.Helper()
+	return newFlowEnvAt(t, width, 1)
+}
+
+// newFlowEnvAt is newFlowEnv at px pixels per dp and per sp.
+func newFlowEnvAt(t *testing.T, width int, px float32) *flowEnv {
 	t.Helper()
 	faces, err := LoadFaces()
 	if err != nil {
 		t.Fatalf("LoadFaces: %v", err)
 	}
-	e := &flowEnv{t: t, width: width}
+	e := &flowEnv{t: t, width: width, metric: unit.Metric{PxPerDp: px, PxPerSp: px}}
 	e.fp = flowParams{
 		shaper:  NewShaper(faces),
 		base:    BodyStyle(Light),
@@ -48,9 +57,91 @@ func (e *flowEnv) context() layout.Context {
 	return layout.Context{
 		Ops:         &e.ops,
 		Source:      e.router.Source(),
-		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Metric:      e.metric,
 		Constraints: layout.Constraints{Max: image.Pt(e.width, 1<<20)},
 	}
+}
+
+// layoutAt lays out runs into a new trace with the flow's top at dy, so that its ink is not
+// above the router's coordinates (negative coordinates are never hit). The marks stay in the
+// flow's own coordinates.
+func (e *flowEnv) layoutAt(runs []doc.Run, dy int) *Trace {
+	e.t.Helper()
+	e.ops.Reset()
+	gtx := e.context()
+	stack := op.Offset(image.Pt(0, dy)).Push(gtx.Ops)
+	tr := &Trace{}
+	_, err := layoutFlow(gtx, e.fp, runs, tr)
+	stack.Pop()
+	if err != nil {
+		e.t.Fatalf("layoutFlow: %v", err)
+	}
+	return tr
+}
+
+// hits reports whether a press at p hits the outline of glyphs drawn at origin. The outline sits
+// under an event tag, and the router hit-tests it by its clip bounds (ARCHITECTURE, Ink probes).
+func (e *flowEnv) hits(glyphs []text.Glyph, origin, p image.Point) bool {
+	tag := new(int)
+	filter := pointer.Filter{Target: tag, Kinds: pointer.Press | pointer.Release | pointer.Enter | pointer.Leave | pointer.Cancel}
+	frame := func() {
+		e.ops.Reset()
+		gtx := e.context()
+		pop := pushGlyphs(gtx, e.fp.shaper, glyphs, origin)
+		event.Op(gtx.Ops, tag)
+		pop()
+		e.router.Frame(&e.ops)
+	}
+	// A handler takes the filter its Event calls set before a frame, as a Click's poll does, so
+	// the first frame registers the tag and the poll sets its filter, and the second frame takes it.
+	frame()
+	for {
+		if _, ok := e.router.Event(filter); !ok {
+			break
+		}
+	}
+	frame()
+	e.router.Queue(move(p), press(p), release(p))
+	for {
+		ev, ok := e.router.Event(filter)
+		if !ok {
+			return false
+		}
+		if pe, isPointer := ev.(pointer.Event); isPointer && pe.Kind == pointer.Press {
+			return true
+		}
+	}
+}
+
+// inkRect is the bounds of the outline of glyphs drawn at origin, as the probes find them inside
+// the box: a column of probes down box's centre column, and a row of probes across its centre
+// row. Both scans are over box, so ink outside it is not found.
+func (e *flowEnv) inkRect(glyphs []text.Glyph, origin image.Point, box image.Rectangle) image.Rectangle {
+	e.t.Helper()
+	c := centre(box)
+	var ink image.Rectangle
+	for y := box.Min.Y; y < box.Max.Y; y++ {
+		if e.hits(glyphs, origin, image.Pt(c.X, y)) {
+			ink = ink.Union(image.Rect(c.X, y, c.X+1, y+1))
+		}
+	}
+	for x := box.Min.X; x < box.Max.X; x++ {
+		if e.hits(glyphs, origin, image.Pt(x, c.Y)) {
+			ink = ink.Union(image.Rect(x, c.Y, x+1, c.Y+1))
+		}
+	}
+	return ink
+}
+
+// fragmentGlyphs shapes the text of one Glyphs mark in its style, as the flow shaped it.
+func (e *flowEnv) fragmentGlyphs(ts TextStyle, s string) []text.Glyph {
+	e.t.Helper()
+	f := &flow{gtx: e.context(), fp: e.fp}
+	glyphs, n := f.shape(ts, s, text.WrapWords, unboundedWidth)
+	if n != len(s) {
+		e.t.Fatalf("shaping %q shows %d of %d bytes", s, n, len(s))
+	}
+	return glyphs
 }
 
 // lay lays out runs into a new trace, failing the test on an error.
@@ -1041,5 +1132,117 @@ func TestFlowZeroGlyphs(t *testing.T) {
 	}
 	if perr := f.place(plain("x"), e.fp.base, "x", nil, 0, 0); perr == nil {
 		t.Fatal("a fragment with no glyphs: no error")
+	}
+}
+
+// styledRun is a text run with the style flags s.
+func styledRun(s string, st doc.Style) doc.Run { return doc.Run{Kind: doc.TextRun, Text: s, Style: st} }
+
+// TestGlyphInkInsideMark: a fragment's outline lies inside the glyph box its Glyphs mark records,
+// and the ink of "x" stands on the mark's Origin (STYLE-TEXT-7). Each run is laid out alone, and
+// its ink is probed at the mark's Origin, 64 px down so that no ink is above the router's
+// coordinates. The probes scan the box grown by 24 px, so ink outside the box is not missed.
+func TestGlyphInkInsideMark(t *testing.T) {
+	const dy = 64
+	shift := image.Pt(0, dy)
+	h1 := heading1(t)
+	cases := []struct {
+		name    string
+		base    TextStyle
+		heading bool
+		runs    []doc.Run
+	}{
+		{"body", BodyStyle(Light), false, []doc.Run{plain("Hxg"), plain("x"), styledRun("bold", doc.Strong), codeRun("code")}},
+		{"heading", h1, true, []doc.Run{plain("Title"), codeRun("code")}},
+	}
+	for _, c := range cases {
+		for _, px := range []float32{1, 1.25, 2} {
+			for _, r := range c.runs {
+				e := newFlowEnvAt(t, 800, px)
+				e.fp.base = c.base
+				e.fp.inHeading = c.heading
+				tr := e.layoutAt([]doc.Run{r}, dy)
+				g := needMarks(t, tr, MarkGlyphs, "Glyphs")[0]
+				ts := RunStyle(c.base, r.Style, false, e.fp.palette, c.heading)
+				glyphs := e.fragmentGlyphs(ts, g.Text)
+				want := g.Rect.Add(shift)
+				ink := e.inkRect(glyphs, g.Origin.Add(shift), want.Inset(-24))
+				if ink.Empty() {
+					t.Fatalf("%s at %v: %q has no ink found at its origin %v", c.name, px, g.Text, g.Origin)
+				}
+				if !within(want, ink) {
+					t.Errorf("%s at %v: %q ink %v not inside glyph rect %v", c.name, px, g.Text, ink, want)
+				}
+				if g.Text == "x" {
+					// The baseline is the glyph box's top plus the glyphs' ceiled ascent (STYLE-TEXT-7).
+					asc := 0
+					for _, gl := range glyphs {
+						asc = max(asc, gl.Ascent.Ceil())
+					}
+					if baseline := want.Min.Y + asc; ink.Max.Y < baseline-1 || ink.Max.Y > baseline+1 {
+						t.Errorf("%s at %v: ink of x ends at row %d, want its baseline %d within 1", c.name, px, ink.Max.Y, baseline)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestLinkPressOnInk: a press on the ink of a link is a click on that link (LINK-1, STYLE-TEXT-3).
+// The last fragment of the link is pressed at the centre of its ink: on a plain line, on the second
+// line of a wrapped link, and in a heading. The flow is laid out 64 px down, as the probes need.
+func TestLinkPressOnInk(t *testing.T) {
+	const dy = 64
+	shift := image.Pt(0, dy)
+	tg := &doc.Target{Kind: doc.External, Value: "https://e.org/"}
+	cases := []struct {
+		name    string
+		width   int
+		heading bool
+		runs    []doc.Run
+	}{
+		{"line", 800, false, []doc.Run{plain("go to "), linkRun("the docs", tg)}},
+		{"wrapped", 60, false, []doc.Run{plain("go to "), linkRun("the docs of the project", tg)}},
+		{"heading", 800, true, []doc.Run{plain("go to "), linkRun("the docs", tg)}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newFlowEnv(t, c.width)
+			if c.heading {
+				e.fp.base = heading1(t)
+				e.fp.inHeading = true
+			}
+			tr := e.layoutAt(c.runs, dy)
+			e.router.Frame(&e.ops)
+			var g Mark
+			for _, m := range marks(tr, MarkGlyphs) {
+				if m.Colour == Light.Accent {
+					g = m
+				}
+			}
+			if g.Text == "" {
+				t.Fatal("no link fragment")
+			}
+			ts := RunStyle(e.fp.base, 0, true, e.fp.palette, c.heading)
+			glyphs := e.fragmentGlyphs(ts, g.Text)
+			ink := e.inkRect(glyphs, g.Origin.Add(shift), g.Rect.Add(shift).Inset(-24))
+			if ink.Empty() {
+				t.Fatalf("link fragment %q has no ink found at its origin", g.Text)
+			}
+			pt := centre(ink)
+
+			// Frame 1 makes the link's gesture, and its poll takes no input; frame 2 is the press.
+			e.layoutAt(c.runs, dy)
+			e.router.Frame(&e.ops)
+			if early, polled := e.poll(); polled {
+				t.Fatalf("a poll with no input reported %+v", early)
+			}
+			e.layoutAt(c.runs, dy)
+			e.router.Frame(&e.ops)
+			e.router.Queue(move(pt), press(pt), release(pt))
+			if got, ok := e.poll(); !ok || got != *tg {
+				t.Fatalf("a press on the ink at %v = %+v, %t; want the link's target and true", pt, got, ok)
+			}
+		})
 	}
 }
