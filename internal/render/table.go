@@ -7,6 +7,7 @@ import (
 
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/op/clip"
 	"gioui.org/unit"
 
 	"github.com/LongTermSupport/md-viewer/internal/doc"
@@ -107,6 +108,24 @@ func rowColour(ctx blockCtx, r int) color.NRGBA {
 	return ctx.root.Canvas
 }
 
+// cutWidth is r cut at x = w, the right edge of a table's content (STYLE-TABLE-5). A rectangle
+// that starts at or past w is empty.
+func cutWidth(r image.Rectangle, w int) image.Rectangle {
+	// The fields are set directly: image.Rect would swap the corners of a rectangle that starts past w.
+	return image.Rectangle{Min: r.Min, Max: image.Pt(min(r.Max.X, w), r.Max.Y)}
+}
+
+// paintCut paints r cut at x = w in colour c, and records the part painted as a mark of kind k. A
+// rectangle with nothing left of w is neither painted nor recorded.
+func paintCut(gtx layout.Context, tr *Trace, k MarkKind, r image.Rectangle, w int, c color.NRGBA) {
+	in := cutWidth(r, w)
+	if in.Empty() {
+		return
+	}
+	fillRect(gtx, in, c)
+	tr.add(Mark{Kind: k, Rect: in, Colour: c})
+}
+
 // layoutRow lays out the cells of a row whose top line is at top, each in its column's text box
 // with its column's alignment (STYLE-TABLE-1, STYLE-TABLE-4). It returns the height of the tallest
 // cell's text.
@@ -140,7 +159,8 @@ func layoutRow(gtx layout.Context, ctx blockCtx, aligns []doc.Align, row []doc.C
 // layoutTable lays out a table as a grid (STYLE-TABLE-1, STYLE-TABLE-5, STYLE-TABLE-6). Line i of
 // the columns is at the sum of the widths before it, and row r's top line is the sum of the rows
 // before it, each a border, 6 dp, its tallest cell and 6 dp. Each row's cells are recorded, its
-// fill is painted, and then the cells are replayed on it. The lines are painted last.
+// fill is painted, and then the cells are replayed over it, clipped to the table's width. The lines
+// are painted last. Nothing of the table is drawn or recorded beyond the width it is given.
 func layoutTable(gtx layout.Context, ctx blockCtx, t doc.Table, tr *Trace) (layout.Dimensions, error) {
 	if err := checkTable(t); err != nil {
 		return layout.Dimensions{}, err
@@ -156,7 +176,8 @@ func layoutTable(gtx layout.Context, ctx blockCtx, t doc.Table, tr *Trace) (layo
 	for i, w := range cols {
 		xs[i+1] = xs[i] + w
 	}
-	tw := xs[len(cols)] + line // the table's width, with its closing border
+	tw := xs[len(cols)] + line      // the table's width, with its closing border
+	clipW := max(min(tw, width), 0) // the table's content is clipped at the width it is given
 
 	tops := []int{0} // tops[r] is the top line of row r; the last is the bottom line
 	y := 0
@@ -174,23 +195,18 @@ func layoutTable(gtx layout.Context, ctx blockCtx, t doc.Table, tr *Trace) (layo
 		}
 		y = top + line + 2*padY + h
 		tops = append(tops, y)
-		fill := image.Rect(0, top+line, tw, y)
-		colour := rowColour(ctx, r)
-		fillRect(gtx, fill, colour)
-		tr.add(Mark{Kind: MarkRowFill, Rect: fill, Colour: colour})
+		paintCut(gtx, tr, MarkRowFill, image.Rect(0, top+line, tw, y), clipW, rowColour(ctx, r))
+		stack := clip.Rect(image.Rect(0, top, clipW, y)).Push(gtx.Ops)
 		call.Add(gtx.Ops)
+		stack.Pop()
 	}
 
 	bottom := y + line // the table's height, with its closing border
 	for i := range xs {
-		r := image.Rect(xs[i], 0, xs[i]+line, bottom)
-		fillRect(gtx, r, ctx.root.Border)
-		tr.add(Mark{Kind: MarkTableLine, Rect: r, Colour: ctx.root.Border})
+		paintCut(gtx, tr, MarkTableLine, image.Rect(xs[i], 0, xs[i]+line, bottom), clipW, ctx.root.Border)
 	}
 	for _, top := range tops {
-		r := image.Rect(0, top, tw, top+line)
-		fillRect(gtx, r, ctx.root.Border)
-		tr.add(Mark{Kind: MarkTableLine, Rect: r, Colour: ctx.root.Border})
+		paintCut(gtx, tr, MarkTableLine, image.Rect(0, top, tw, top+line), clipW, ctx.root.Border)
 	}
 
 	// The first baseline is the header row's text's, which sits a border and 6 dp below the top.
@@ -198,8 +214,7 @@ func layoutTable(gtx layout.Context, ctx blockCtx, t doc.Table, tr *Trace) (layo
 	if err != nil {
 		return layout.Dimensions{}, err
 	}
-	size := image.Pt(max(min(tw, width), 0), bottom)
-	return layout.Dimensions{Size: size, Baseline: bottom - (line + padY + f.baseOff)}, nil
+	return layout.Dimensions{Size: image.Pt(clipW, bottom), Baseline: bottom - (line + padY + f.baseOff)}, nil
 }
 
 // cellAlign is how the lines of a column's cells sit (STYLE-TABLE-4): Left and a body None are at
