@@ -257,11 +257,11 @@ backgrounds, strike lines and link areas, and record them. For each run it calls
 `(*text.Shaper).LayoutString` with `text.Parameters{Font, PxPerEm, MaxWidth, WrapPolicy, LineHeightScale, MaxLines: 1 per line attempt}`, iterates glyphs with `NextGlyph`, and paints
 each line's glyph outlines with `Shaper.Shape(glyphs)` → `clip.Outline{Path: …}.Op()` and
 `paint.FillShape`. Line breaking: fill the line run by run; a run that does not fit is split at
-the last word break that fits (`text.WrapWords`, WRAP-1); at a line start a word wider than the
-line breaks by grapheme (`text.WrapHeuristically`). A zero-rune result mid-line means "next
-line" (`WrapWords` gives it when the first word is wider than the rest). `BreakRun` ends the
-line; two in a row give an empty line. No runs give one empty line of height L. A non-code run
-that starts a line drops its leading spaces. Each run is shaped alone, so the flow places
+the last word break that fits (`text.WrapWords`, WRAP-1). A word wider than a whole line breaks
+by grapheme (`text.WrapHeuristically`), and only when `WrapWords` shows no rune at a line start
+(`WrapHeuristically` tried first would fill line 1 of `ab` plus a long word with graphemes). A zero-rune result on a non-empty line
+means "next line". `BreakRun` ends the line; two in a row give an empty line. No runs give one
+empty line of height L. A non-code run that starts a line drops its leading spaces. Each run is shaped alone, so the flow places
 baselines itself. Each placed fragment records a `Glyphs` mark, and
 `CodeBg`, `Strike` and `LinkArea` marks as its style asks. Link fragments also push a
 `clip.Rect`, add `pointer.CursorPointer` and the link's `gesture.Click`.

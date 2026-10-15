@@ -548,10 +548,10 @@ and scales its offset into that block by the ratio of the new zoom to the old.
 
 ## 7. Word wrap
 
-**WRAP-1.** Text wraps at word boundaries to the content width. Mid-line, a word that does not
-fit moves to the next line (`text.WrapWords`). At a line start, a word wider than the line
-breaks at a character (`text.WrapHeuristically`). A run that starts a line drops its leading
-spaces, unless it is code. A break may fall between two runs of one word, as in
+**WRAP-1.** Text wraps at word boundaries to the content width. A word that does not fit the rest
+of its line moves to the next line (`text.WrapWords`). A word wider than a whole line breaks at
+a character (`text.WrapHeuristically`), and only then. A non-code run drops its leading spaces
+where it starts a line. A break may fall between two runs of one word, as in
 `gioui.org/x/styledtext` (`foo**bar**` may break between `foo` and `bar`). No text is clipped
 or scrolled sideways, except a too-wide table (STYLE-TABLE-5).
 
