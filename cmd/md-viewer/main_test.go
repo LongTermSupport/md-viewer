@@ -289,14 +289,20 @@ func TestBinaryTimeUnderXvfb(t *testing.T) {
 			if code != 0 {
 				t.Errorf("exit code = %d, want 0", code)
 			}
-			if !smokeLine.MatchString(stdout) {
-				t.Errorf("stdout = %q, want one --time line", stdout)
-			}
+			// Some xvfb-run scripts run the command with 2>&1, so the two streams cannot be told
+			// apart here: look at every line of both.
 			var own strings.Builder
-			for _, line := range strings.SplitAfter(stderr, "\n") {
-				if strings.HasPrefix(line, "md-viewer: ") {
+			timeLines := 0
+			for _, line := range strings.SplitAfter(stdout+stderr, "\n") {
+				switch {
+				case smokeLine.MatchString(line):
+					timeLines++
+				case strings.HasPrefix(line, "md-viewer: "):
 					own.WriteString(line)
 				}
+			}
+			if timeLines != 1 {
+				t.Errorf("found %d --time lines in stdout %q and stderr %q, want 1", timeLines, stdout, stderr)
 			}
 			if own.String() != preWindowLines {
 				t.Errorf("md-viewer's stderr lines are %q, want the three lines before the window", own.String())
