@@ -2,12 +2,15 @@ package app
 
 import (
 	"fmt"
+	"image"
 	"io"
 	"math"
 
 	"gioui.org/io/event"
 	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
+	"gioui.org/op/clip"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
@@ -21,14 +24,23 @@ const (
 	pageKeep = 40
 )
 
-// Viewer is the per-window state: the list position, the zoom and the key filters
-// (ARCHITECTURE "internal/app").
+// The wheel. wheelZoomStep is the accumulated Ctrl+wheel distance, in px, that changes the zoom by
+// one level (ZOOM-4). scrollRangeMax is the largest wheel distance the wheel area takes, so it
+// takes every vertical event (ARCHITECTURE "Input routing").
+const (
+	wheelZoomStep  = 10
+	scrollRangeMax = 1 << 30
+)
+
+// Viewer is the per-window state: the list position, the zoom, the wheel accumulator and the key
+// filters (ARCHITECTURE "internal/app").
 type Viewer struct {
-	view  *render.View
-	theme *material.Theme
-	list  widget.List
-	zoom  Zoom
-	keys  []event.Filter
+	view     *render.View
+	theme    *material.Theme
+	list     widget.List
+	zoom     Zoom
+	wheelAcc float32 // the Ctrl+wheel distance not yet zoomed by, in px (ZOOM-4)
+	keys     []event.Filter
 }
 
 // NewViewer makes the viewer of v, painted in p, whose links open with o and whose diagnostics go
@@ -63,11 +75,64 @@ func (vw *Viewer) Frame(gtx layout.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	vw.wheelInput(gtx)
 	material.List(vw.theme, &vw.list).Layout(gtx, vw.view.Len(), vw.element)
+	vw.wheelArea(gtx)
 	if err := vw.view.Err(); err != nil {
 		return quit, err
 	}
 	return quit, nil
+}
+
+// wheelInput applies the vertical wheel events of the frame, in order. Without Ctrl a scroll
+// moves the list by its pixels (SCROLL-3). With Ctrl it is a zoom step (ZOOM-4), and never scrolls.
+func (vw *Viewer) wheelInput(gtx layout.Context) {
+	filter := pointer.Filter{
+		Target:  vw,
+		Kinds:   pointer.Scroll,
+		ScrollY: pointer.ScrollRange{Min: -scrollRangeMax, Max: scrollRangeMax},
+	}
+	for {
+		ev, ok := gtx.Event(filter)
+		if !ok {
+			return
+		}
+		// Only pointer events match the wheel filter, so the switch has one case.
+		switch e := ev.(type) {
+		case pointer.Event:
+			if e.Modifiers.Contain(key.ModCtrl) {
+				vw.wheelZoom(e.Scroll.Y)
+			} else {
+				vw.list.Position.Offset += int(math.Round(float64(e.Scroll.Y)))
+			}
+		}
+	}
+}
+
+// wheelZoom adds the Ctrl+wheel distance dy, in px, to the accumulator. When the sum reaches
+// -wheelZoomStep or +wheelZoomStep the zoom goes one level in or out, and the sum is reset to 0,
+// even at a limit where the zoom does not change (ZOOM-4).
+func (vw *Viewer) wheelZoom(dy float32) {
+	vw.wheelAcc += dy
+	switch {
+	case vw.wheelAcc <= -wheelZoomStep:
+		vw.setZoom(vw.zoom.In())
+		vw.wheelAcc = 0
+	case vw.wheelAcc >= wheelZoomStep:
+		vw.setZoom(vw.zoom.Out())
+		vw.wheelAcc = 0
+	}
+}
+
+// wheelArea takes every vertical wheel event of the window (ARCHITECTURE "Input routing"). It is
+// added after the list, so it is on top of it. It is inside a pointer.PassOp, so presses still
+// reach the scrollbar and the links below it (SCROLL-4, STYLE-TEXT-3).
+func (vw *Viewer) wheelArea(gtx layout.Context) {
+	pass := pointer.PassOp{}.Push(gtx.Ops)
+	area := clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops)
+	event.Op(gtx.Ops, vw)
+	area.Pop()
+	pass.Pop()
 }
 
 // keyInput applies the key presses of the frame in the order they arrived, and reports quit.
