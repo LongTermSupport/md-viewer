@@ -74,8 +74,12 @@ no build info.
 | 1    | a runtime failure: the file cannot be read or is refused, no window opened, or a frame failed (below) |
 | 2    | a usage error: missing or extra FILE, an unknown flag                          |
 
-A frame failure is a layout error (`View.Err`) or a failed write to stderr during a frame. The
-window closes, md-viewer prints `md-viewer: ` followed by the error to stderr, and exits 1.
+A frame failure is a layout error (`View.Err`), a failed write to stderr during a frame, or a
+failed write of the `--time` line to stdout. The window closes, md-viewer prints `md-viewer: `
+followed by the error to stderr, and exits 1. The `--time` line is written only after a frame
+has succeeded, so a failed frame prints none. Once the window is closing, the frames the window
+still delivers are drawn without calling the viewer, so a second error or link action cannot
+happen.
 
 **CLI-7. Usage errors** print one line to stderr, then the line
 `Run 'md-viewer --help' for usage.`, and exit 2. The first line is exactly:
@@ -108,9 +112,10 @@ checked with `Stat` before reading, so a huge file is refused without being read
 without being opened. The read is capped at the limit plus one byte, so a file that grows after
 its `Stat` is refused too, with SIZE the bytes read.
 
-**CLI-9.** If the window cannot be opened (no display, no GPU driver), md-viewer prints
-`md-viewer: cannot open a window: REASON` to stderr and exits 1, where REASON is the error Gio
-reports.
+**CLI-9.** If the window cannot be opened (no display, no GPU driver), or Gio reports an error
+before the window closes, md-viewer prints `md-viewer: cannot open a window: REASON` to stderr
+and exits 1, where REASON is the error Gio reports. Gio tries Wayland first, then X11, and
+reports the Wayland error when neither works, even if X11 was the one meant.
 
 **CLI-10.** The file extension is not checked: any text file is shown as Markdown.
 
@@ -267,6 +272,7 @@ not follow the desktop's light or dark preference. See "Decisions for the owner"
 [MILESTONES.md](MILESTONES.md).
 
 **STYLE-PAL-3.** The whole window, outside and inside the content, is filled with `Canvas`.
+Gio's window decorations, where Gio draws them, keep Gio's colours.
 
 ### 3.2 Fonts
 
@@ -558,7 +564,8 @@ in a goroutine and, if the opener cannot start or exits non-zero, prints
 starting or waiting (for example `exec: "xdg-open": executable file not found in $PATH`, or
 `exit status 4`). The opener's own stdout and stderr are discarded, so only md-viewer's lines
 appear. md-viewer never kills the opener, on a click or on exit. A failed link never ends the
-program. If the line cannot be written, the next frame fails with that error, and the window
+program. If the line cannot be written, md-viewer invalidates the window, so the next frame
+comes at once, not at the next input event; that frame fails with the error, and the window
 closes as CLI-6 describes.
 
 **LINK-3.** A `LocalFile` Markdown link opens through the opener like any other file, so the
@@ -657,8 +664,9 @@ rule) close the window and exit 0. Closing the window by the window manager exit
 **WIN-5. No editing.** Nothing in the window changes the file, and there is no text cursor,
 selection or clipboard.
 
-**WIN-6. Wayland app ID.** The Wayland `app_id` and X11 class are `md-viewer` (Gio's default,
-the executable's base name).
+**WIN-6. Wayland app ID.** The Wayland `app_id` and X11 class are `md-viewer` when the binary is
+installed as `md-viewer` (Gio's default, the executable's base name). A renamed or symlinked
+binary, or `go run`, gets its own base name instead.
 
 ## 9. Speed
 
@@ -669,8 +677,10 @@ judged against the targets.
 
 **SPEED-1. Work before the window.** Before the window is created, md-viewer parses its
 arguments, stats and reads the file, parses it into the document model, reads each local
-image's header (`image.DecodeConfig`, for its size), and loads the six font faces. Nothing else
-happens before the window opens.
+image's header (`image.DecodeConfig`, for its size), and loads the six font faces. Building the
+view, the viewer's state and its theme is in-memory work done in the same preparation. No other
+I/O or parsing happens before the window opens. Gio's own work at window creation is not
+md-viewer's and is outside this rule.
 
 **SPEED-2. `--time`.** With `--time`, after the first frame has been submitted (the first
 `FrameEvent.Frame` call has returned), md-viewer prints exactly one line to stdout:
@@ -679,9 +689,11 @@ happens before the window opens.
 read_ms=0.4 parse_ms=12.3 fonts_ms=6.1 first_frame_ms=88.0
 ```
 
-`read_ms`, `parse_ms` and `fonts_ms` are the durations of those steps; `first_frame_ms` is the
-time from the first statement of `main` to the end of the first frame. Each value has one
-decimal place. md-viewer then closes the window and exits 0. The time before `main` (exec,
+`read_ms` is the read (stat, read and NUL check, DOC-13), `parse_ms` the parse into the document
+model (DOC-13), and `fonts_ms` the loading of the six faces and the making of the text shaper.
+`first_frame_ms` is the time from the first statement of `main` to the end of the first frame.
+Each value has one decimal place, rounded to the nearest tenth of a millisecond; the tie between
+two tenths is not specified. md-viewer then closes the window and exits 0. The time before `main` (exec,
 dynamic linking, Go runtime start) is not included; the wall-clock measurement (SPEED-7)
 includes it.
 
@@ -709,9 +721,11 @@ lays out (SCROLL-1), in a goroutine, one image at a time, in the order the image
 laid out. The window is invalidated when each is ready. The goroutine exits when no image is
 waiting, and the next request starts it again. The first frame never waits for image pixels.
 
-**SPEED-6. Nothing else.** No `init` functions with work in md-viewer's packages, no
-background goroutines other than image decoding and the link opener's wait, no network, no
-D-Bus, no file watching, no configuration reads.
+**SPEED-6. Nothing else.** No `init` functions in md-viewer's packages, no background goroutines
+other than the window loop, image decoding and the link opener's wait, no network, no D-Bus, no
+file watching, no configuration reads. Gio's own goroutines and platform work (on X11, its
+connection to IBus over D-Bus and its reads of the machine ID and IBus configuration) are
+Gio's, and outside this rule.
 
 **SPEED-7. Benchmarks and measurement.** Go benchmarks in the repository measure parse, first
 viewport layout and font loading on `testdata/large.md` (ARCHITECTURE "Benchmarks"). The owner

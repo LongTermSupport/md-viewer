@@ -50,6 +50,8 @@ jobs:
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       - run: go build -trimpath -o dist/md-viewer ./cmd/md-viewer
+      - name: Smoke run under Xvfb (must exit 0; speed is judged on a real desktop)
+        run: env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u DISPLAY XDG_RUNTIME_DIR="$(mktemp -d)" xvfb-run -a dist/md-viewer --time testdata/elements.md
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: md-viewer-linux-amd64
