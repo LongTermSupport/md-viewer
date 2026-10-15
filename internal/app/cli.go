@@ -36,7 +36,7 @@ const (
 )
 
 // UsageHint is the second line of every usage error (CLI-7).
-const UsageHint = "Run 'md-viewer --help' for usage."
+const UsageHint = "Run '" + progName + " --help' for usage."
 
 // Options is what the command line asked for. Path is the FILE operand, as typed (CLI-1).
 type Options struct {
@@ -79,7 +79,7 @@ func ParseArgs(args []string) (Options, error) {
 			opts.Version = true
 		case arg == argDash:
 			operands = append(operands, arg)
-		case strings.HasPrefix(arg, "-"):
+		case strings.HasPrefix(arg, argDash):
 			if unknown == "" {
 				unknown = arg
 			}
