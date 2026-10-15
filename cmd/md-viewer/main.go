@@ -45,11 +45,9 @@ func exitCode(err error, stderr io.Writer) app.ExitCode {
 	if errors.As(err, &fe) {
 		line = fmt.Sprintf(msgFrameFailed, fe.Err)
 	}
-	if werr := write(stderr, line); werr != nil {
-		// A failed write has no stream left to report on, and the exit code is ExitFailure either
-		// way.
-		return app.ExitFailure
-	}
+	// A failed write has no stream left to report on (P12), so its error is not reported. The exit
+	// code is ExitFailure whether or not the line lands.
+	write(stderr, line)
 	return app.ExitFailure
 }
 
