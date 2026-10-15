@@ -824,3 +824,13 @@ decides otherwise.
     a read-only token as a repository secret. The plain Go toolchain gate does not depend on it.
 11. **Installing md-viewer on the desktop** (a play, a `.desktop` file, the default for
     `text/markdown`) is fedora-desktop's Plan 00199 Phase 2, not part of this repository.
+12. **SPEED-6 carve-out, the new indirect modules, and the SPEED-1 reading.** (Awaiting the
+    owner; built to the suggested reading.) SPEED-6 already leaves Gio's own platform work to
+    Gio, which on X11 includes its IBus connection over D-Bus. md-viewer's code starts only the
+    window loop, the image-decoding spawn and the opener's wait (`TestGoStatements` pins them),
+    and does no D-Bus itself. Importing `gioui.org/app` adds four indirect modules:
+    `gioui.org/shader`, `github.com/godbus/dbus/v5`, `golang.org/x/net` and `golang.org/x/sys`.
+    ARCHITECTURE lists them. SPEED-1 is read as allowing the view, the viewer's state and the
+    theme to be built before the window, since that is in-memory work; no other I/O or parsing
+    happens first. The alternative is to build them after the window opens. The SPEC wording is
+    unchanged: the owner accepts it or asks for a change.
