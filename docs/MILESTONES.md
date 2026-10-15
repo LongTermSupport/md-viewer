@@ -482,8 +482,8 @@ proves it).
 
 **Tests first:**
 
-- `TestBulletShape`: depths 0 to 3 and 9 give disc, circle, square, square, square; the
-  shapes' texts are `disc`, `circle`, `square`.
+- `TestBulletShape`: depths 0 to 3 and 9 give disc, circle, square, square, square; -1 and 0
+  give disc; the shapes' texts are `disc`, `circle`, `square`.
 - `TestLeadsWithText`: which first blocks start with a text line (an empty item counts), and
   the errors for a nil block and for a pointer block.
 - `TestListIndent`: item glyphs start 32 px right of the list's left edge; a nested list's

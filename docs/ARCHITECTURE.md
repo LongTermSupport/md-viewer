@@ -215,13 +215,16 @@ func Gap(prevBottom, nextTop unit.Dp) unit.Dp                           // DOC-L
 func Padding(windowWidth unit.Dp) unit.Dp                               // DOC-LAYOUT-1
 // OrderedMarker: n below 1 or a roman numeral above 3999 prints decimal (F8).
 func OrderedMarker(n, depth int) string // STYLE-LIST-3
+
 // Bullet is the shape of an unordered marker. Its String is the Mark text (disc, circle, square).
 type Bullet uint8
+
 const (
 	BulletDisc Bullet = iota
 	BulletCircle
 	BulletSquare
 )
+
 func BulletShape(depth int) Bullet // STYLE-LIST-2, M6 (F2); depth below 1 is disc
 // ColumnWidths: floor(N × W ÷ ΣN) with a minimum of minCol; "fits" is ΣN <= W; overflow is
 // clipped in M7 (F9).
@@ -328,8 +331,9 @@ Flow rules:
 a `blockCtx` whose `depth` counts the lists around the block and whose `tight` is set for a direct
 child of a tight list's item; `quoteCtx` clears `tight` and keeps `depth`. **Tables and images**
 are laid out by `table.go` and `image.go`. Until M7 and M8 each is a placeholder: height 0 content
-with its DOC-LAYOUT-4 margins, and no marks. Images use `paint.NewImageOp` with `op.Affine` scaling, or `widget.Image`
-with `Fit: widget.ScaleDown` and `Scale: 1` (one image pixel per dp before zoom).
+with its DOC-LAYOUT-4 margins, and no marks. Images use `paint.NewImageOp` with `op.Affine`
+scaling, or `widget.Image` with `Fit: widget.ScaleDown` and `Scale: 1` (one image pixel per dp
+before zoom).
 
 ### internal/app
 
