@@ -702,7 +702,7 @@ async write; `cmd/md-viewer/main.go` in the shape of ARCHITECTURE.md (the `not i
 line is removed); in `.github/workflows/ci.yml`, after the `go build` step of the `build` job, add:
 
 ```yaml
-      - name: Smoke run under Xvfb (information only; speed is judged on a real desktop)
+      - name: Smoke run under Xvfb (must exit 0; speed is judged on a real desktop)
         run: env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET -u DISPLAY XDG_RUNTIME_DIR="$(mktemp -d)" xvfb-run -a dist/md-viewer --time testdata/elements.md
 ```
 
