@@ -160,7 +160,9 @@ func layoutRow(gtx layout.Context, ctx blockCtx, aligns []doc.Align, row []doc.C
 // the columns is at the sum of the widths before it, and row r's top line is the sum of the rows
 // before it, each a border, 6 dp, its tallest cell and 6 dp. Each row's cells are recorded, its
 // fill is painted, and then the cells are replayed over it, clipped to the table's width. The lines
-// are painted last. Nothing of the table is drawn or recorded beyond the width it is given.
+// are painted last. Nothing is drawn beyond the width it is given, and the lines and fills that
+// are recorded are cut there; glyph and link marks of a clipped column stay in the trace, and the
+// clip blocks their clicks.
 func layoutTable(gtx layout.Context, ctx blockCtx, t doc.Table, tr *Trace) (layout.Dimensions, error) {
 	if err := checkTable(t); err != nil {
 		return layout.Dimensions{}, err

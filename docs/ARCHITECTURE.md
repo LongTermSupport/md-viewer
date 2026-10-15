@@ -11,7 +11,7 @@ to that file. The order of work is in [MILESTONES.md](MILESTONES.md).
 | `gioui.org`                | v0.10.3                                           | window, input, layout, text shaping, painting                              |
 | `github.com/yuin/goldmark` | v1.8.6                                            | CommonMark parser with the GFM extensions                                  |
 | `golang.org/x/image`       | v0.26.0                                           | the Go font files (`font/gofont/...`); the version Gio v0.10.3 requires    |
-| go-qa-ci                   | commit `f125f711e6f6f59fbe5db1443bb4f41df22224d7` | QA; no tag is published yet, so the pin is a commit (`qa/go-qa-ci.ref`)    |
+| go-qa-ci                   | commit `7fc4547e92f2fb0cf67c0c91f1f2068774be5d5a` | QA; no tag is published yet, so the pin is a commit (`qa/go-qa-ci.ref`)    |
 
 No other direct dependency is added without the owner's agreement: no `gioui.org/x`, no test
 assertion library (tests use the standard library), no CLI flag library.
