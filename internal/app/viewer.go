@@ -64,44 +64,51 @@ type Viewer struct {
 	stderrMu sync.Mutex
 
 	// asyncMu guards asyncErr, the error of a write made by a spawned function, which the next
-	// frame returns.
-	asyncMu  sync.Mutex
-	asyncErr error
+	// frame returns, and invalidate, the window's Invalidate, which that function calls after it
+	// records the error.
+	asyncMu    sync.Mutex
+	asyncErr   error
+	invalidate func()
 }
 
 // NewViewer makes the viewer of v, painted in p, whose links open with o and whose diagnostics go
-// to stderr. The viewer serialises its own writes to stderr, from the frame and from the opener's
-// goroutine, so stderr need not be safe for concurrent use; nothing else may write to it while
-// the viewer runs.
+// to stderr. The viewer serialises its own writes, from the frame and from the opener's goroutine.
+// stderr is also written by render.Images from layout, on the frame goroutine, so stderr must be
+// safe for concurrent use: *os.File, which main passes, is.
 func NewViewer(v *render.View, p render.Palette, o Opener, stderr io.Writer) *Viewer {
 	return newViewer(v, p, o, stderr, goSpawn)
 }
 
 // newViewer is NewViewer with the function that runs the opener's wait. spawn is goSpawn in the
 // window; the tests pass one that records the functions. The theme is material's, with the
-// scrollbar's indicator in the palette's Fg (STYLE-TEXT-1, SCROLL-4).
+// scrollbar's indicator in the palette's Fg (SCROLL-4). Until Bind, invalidate does nothing.
 func newViewer(v *render.View, p render.Palette, o Opener, stderr io.Writer, spawn func(func())) *Viewer {
 	th := material.NewTheme()
 	th.Palette.Fg = p.Fg
 	return &Viewer{
-		view:   v,
-		theme:  th,
-		list:   widget.List{List: layout.List{Axis: layout.Vertical}},
-		keys:   keyFilters(),
-		opener: o,
-		stderr: stderr,
-		spawn:  spawn,
+		view:       v,
+		theme:      th,
+		list:       widget.List{List: layout.List{Axis: layout.Vertical}},
+		keys:       keyFilters(),
+		opener:     o,
+		stderr:     stderr,
+		spawn:      spawn,
+		invalidate: func() {},
 	}
+}
+
+// Bind sets the function that a failed write from a spawned function calls, so that the next
+// frame comes at once (LINK-2). It is the window's Invalidate.
+func (vw *Viewer) Bind(invalidate func()) {
+	vw.asyncMu.Lock()
+	defer vw.asyncMu.Unlock()
+	vw.invalidate = invalidate
 }
 
 // goSpawn runs f in its own goroutine (LINK-2: the viewer does not wait for the opener).
 func goSpawn(f func()) {
 	go f()
 }
-
-// Bind sets the function that a failed write from a spawned function calls, so that the next
-// frame comes at once (LINK-2). It is the window's Invalidate.
-func (vw *Viewer) Bind(invalidate func()) {}
 
 // Frame handles the input of the frame, lays out the document, and reports quit and the error
 // that ends the window (CLI-6). The input comes first, so the layout shows its result.
@@ -174,24 +181,29 @@ func (vw *Viewer) followLink(t doc.Target) error {
 }
 
 // open runs the opener on t in a spawned function (LINK-2). The opener's error, if any, is
-// printed from that function. A failed write there is kept for the next frame.
+// printed from that function. A failed write there is kept for the next frame, and the window is
+// invalidated so that frame comes at once.
 func (vw *Viewer) open(t doc.Target) {
 	vw.spawn(func() {
 		err := vw.opener.Open(context.Background(), t.Value)
 		if err == nil {
 			return
 		}
-		if werr := vw.printf(msgLinkOpenFailed, t.Value, err.Error()); werr != nil {
-			vw.asyncMu.Lock()
-			vw.asyncErr = errors.Join(vw.asyncErr, werr)
-			vw.asyncMu.Unlock()
+		werr := vw.printf(msgLinkOpenFailed, t.Value, err.Error())
+		if werr == nil {
+			return
 		}
+		vw.asyncMu.Lock()
+		vw.asyncErr = errors.Join(vw.asyncErr, werr)
+		invalidate := vw.invalidate
+		vw.asyncMu.Unlock()
+		invalidate()
 	})
 }
 
 // takeAsyncErr returns the error kept from a spawned function, and clears it. The spawned function
-// does not invalidate the window, so the error is seen at the next frame (LINK-2); a window that
-// closes first never sees it.
+// invalidates the window after it keeps the error, so the frame that returns it comes at once
+// (LINK-2); a window that closes first never sees it.
 func (vw *Viewer) takeAsyncErr() error {
 	vw.asyncMu.Lock()
 	defer vw.asyncMu.Unlock()
