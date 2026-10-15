@@ -343,7 +343,8 @@ scaling, or `widget.Image` with `Fit: widget.ScaleDown` and `Scale: 1` (one imag
 before zoom).
 
 **Tables** (`table.go`). `checkTable` first: no columns, a count of alignments other than the
-header's, or a body row whose length is not the header's is an error naming it. The header row's
+header's, a body row whose length is not the header's, or an alignment that is not one of the four
+is an error naming it. The header row's
 cells use `headerStyle` (the body style, bold); `cellAlign` maps each column's alignment (an
 exhaustive switch, whose default names the value). For each column, N is the widest cell's
 natural width (its flow laid out unwrapped into a scratch op list) plus 2 × 13 dp and 1 dp.
@@ -352,11 +353,12 @@ it, for i = 0..m, and T = x_m + 1 dp. Row r's top line is y_r, with y_0 = 0 and
 y_{r+1} = y_r + 1 dp + 2 × 6 dp + h_r, where h_r is its tallest cell's flow height; H = y_{n+1} + 1 dp
 for n body rows. A cell's flow is at (x_i + 1 dp + 13 dp, y_r + 1 dp + 6 dp), wide
 max(w_i − 1 dp − 26 dp, 0). Each row's cells are recorded, its fill painted, then the cells are
-replayed; the lines are painted last. The whole table is under `clip.Rect(0, 0, min(T, W), H)`.
-Marks: `MarkTableLine` for each whole line (vertical `(x_i, 0)-(x_i + 1, H)`, horizontal
+replayed under `clip.Rect(0, y_r, min(T, W), y_{r+1})`; the lines are painted last. Marks:
+`MarkTableLine` for each whole line (vertical `(x_i, 0)-(x_i + 1, H)`, horizontal
 `(0, y_r)-(T, y_r + 1)`) in `Border`, and `MarkRowFill` for each row, `(0, y_r + 1)-(T, y_{r+1})`,
-in `Canvas` for the header and body rows 1, 3, … and `BgMuted` for body rows 2, 4, …. Marks are
-intersected with the clip and dropped when empty. `Size` is `(min(T, W), H)`, and `Baseline` is
+in `Canvas` for the header and body rows 1, 3, … and `BgMuted` for body rows 2, 4, …. A mark is cut
+at x = min(T, W) and dropped when nothing is left (`cutWidth`); `image.Rect` is not used for the cut,
+since it swaps corners that are out of order. `Size` is `(min(T, W), H)`, and `Baseline` is
 H − (1 dp + 6 dp + the header's first baseline). Colours come from the block's root palette, text
 from its text palette (STYLE-QUOTE-1).
 
