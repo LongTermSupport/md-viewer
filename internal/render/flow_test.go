@@ -82,6 +82,13 @@ func (e *flowEnv) frame(runs []doc.Run) *Trace {
 	return tr
 }
 
+// poll is one frame's click poll, made before that frame is laid out, as View.Clicked is each
+// frame (M5). A gesture takes its pointer events from the polls before them (P9).
+func (e *flowEnv) poll() (doc.Target, bool) {
+	e.ops.Reset()
+	return e.fp.links.clicked(e.context())
+}
+
 // heading1 is the level 1 heading style, which has a rule (STYLE-TEXT-2).
 func heading1(t *testing.T) TextStyle {
 	t.Helper()
@@ -482,31 +489,35 @@ func TestFlowLinkClick(t *testing.T) {
 	tg := &doc.Target{Kind: doc.External, Value: "https://e.org/"}
 	runs := []doc.Run{plain("go to "), linkRun("the docs", tg)}
 	e := newFlowEnv(t, 800)
+	// Frame 1 lays out, which makes the link's gesture. Frame 2 polls before it lays out, as
+	// every frame does, so the gesture takes the events queued after it (P9).
 	tr := e.frame(runs)
-	la := needMarks(t, tr, MarkLinkArea, "LinkArea")[0]
-	e.router.Queue(press(centre(la.Rect)), release(centre(la.Rect)))
-
-	e.ops.Reset()
-	got, ok := e.fp.links.clicked(e.context())
-	if !ok || got != *tg {
-		t.Fatalf("first poll = %+v, %t; want the link's target and true", got, ok)
+	if early, polled := e.poll(); polled {
+		t.Fatalf("a poll with no input reported %+v", early)
 	}
-	if again, more := e.fp.links.clicked(e.context()); more {
+	tr = e.frame(runs)
+	la := needMarks(t, tr, MarkLinkArea, "LinkArea")[0]
+	e.router.Queue(move(centre(la.Rect)), press(centre(la.Rect)), release(centre(la.Rect)))
+
+	got, ok := e.poll()
+	if !ok || got != *tg {
+		t.Fatalf("poll after the click = %+v, %t; want the link's target and true", got, ok)
+	}
+	if again, more := e.poll(); more {
 		t.Fatalf("second poll in the same frame reported %+v again", again)
 	}
 	e.frame(runs)
-
-	e.ops.Reset()
-	if later, more := e.fp.links.clicked(e.context()); more {
-		t.Fatalf("the frame after the click reported %+v again", later)
+	if later, more := e.poll(); more {
+		t.Fatalf("the poll after that frame reported %+v again", later)
 	}
 
 	e = newFlowEnv(t, 800)
 	tr = e.frame(runs)
+	e.poll()
+	tr = e.frame(runs)
 	g := glyphMark(t, tr, "go to ")
-	e.router.Queue(press(centre(g.Rect)), release(centre(g.Rect)))
-	e.ops.Reset()
-	if plainHit, hit := e.fp.links.clicked(e.context()); hit {
+	e.router.Queue(move(centre(g.Rect)), press(centre(g.Rect)), release(centre(g.Rect)))
+	if plainHit, hit := e.poll(); hit {
 		t.Fatalf("a click on plain text reported %+v", plainHit)
 	}
 }

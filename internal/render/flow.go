@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"gioui.org/gesture"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -30,13 +31,42 @@ type links struct {
 
 // newLinks returns an empty set of link gestures.
 func newLinks() *links {
-	return &links{}
+	return &links{clicks: make(map[*doc.Target]*gesture.Click)}
+}
+
+// click returns the gesture of link target t, made on first use.
+func (l *links) click(t *doc.Target) *gesture.Click {
+	if l.clicks == nil {
+		l.clicks = make(map[*doc.Target]*gesture.Click)
+	}
+	c, ok := l.clicks[t]
+	if !ok {
+		c = &gesture.Click{}
+		l.clicks[t] = c
+		l.order = append(l.order, t)
+	}
+	return c
 }
 
 // clicked drains the link gestures and returns the first click, if any (LINK-1). It is polled
-// once per frame.
+// once per frame, and the events of every gesture are consumed, so a click is reported once.
 func (l *links) clicked(gtx layout.Context) (doc.Target, bool) {
-	return doc.Target{}, false
+	var first doc.Target
+	found := false
+	for _, t := range l.order {
+		c := l.clicks[t]
+		for {
+			e, ok := c.Update(gtx.Source)
+			if !ok {
+				break
+			}
+			if e.Kind == gesture.KindClick && !found {
+				first = *t
+				found = true
+			}
+		}
+	}
+	return first, found
 }
 
 // flowParams are the inputs to layoutFlow that do not change within one call.
@@ -97,6 +127,16 @@ type flow struct {
 // The line box is the base style's size times its line height (STYLE-TEXT-1, F6), and every
 // line is that tall, so the block is lines × L tall. A run's style sets its font, colour and
 // marks; the base style sets the baseline.
+//
+// The algorithm follows gioui.org/x/styledtext v0.10.3 (styledtext.go and iterator.go; the
+// module is Unlicense OR MIT, see its LICENSE). Each run is shaped alone with MaxLines 1 and a
+// truncator, and the runes it shows fill the line; what does not fit moves to the next line.
+// It differs in three ways. First, a word wider than a whole line breaks by grapheme
+// (WrapHeuristically), where styledtext's WrapWords leaves the word whole and overflows the line
+// (styledtext.go, layoutSpan). Second, the baseline comes from the base face, shared by every
+// run in a line, and the line height is fixed, so styledtext's per-line ascent does not apply.
+// Third, the flow paints code backgrounds, strike lines and link areas, and records each as a
+// mark (ARCHITECTURE "internal/render").
 func layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace) (layout.Dimensions, error) {
 	f, err := newFlow(gtx, fp, tr)
 	if err != nil {
@@ -184,6 +224,9 @@ func fixedPx(v fixed.Int26_6) float64 {
 // wider than a whole line breaks at a character (WrapHeuristically), and only then. A non-code
 // run drops its leading spaces where it starts a line.
 func (f *flow) textRun(r doc.Run) error {
+	if r.Link != nil && f.fp.links == nil {
+		return fmt.Errorf("render: link run %q with no link state", r.Text)
+	}
 	ts := RunStyle(f.fp.base, r.Style, r.Link != nil, f.fp.palette, f.fp.inHeading)
 	code := r.Style&doc.Code != 0
 	padX, padY := f.codePads(ts, code)
@@ -322,7 +365,21 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 	if r.Style&doc.Strike != 0 {
 		f.strike(ts, baseY, boxStart, f.cursor)
 	}
+	if r.Link != nil {
+		f.linkArea(r.Link, image.Rect(boxStart, f.top, f.cursor, f.top+f.lineH))
+	}
 	f.hasContent = true
+}
+
+// linkArea makes rect a link's clickable area: the hand cursor shows over it, and a press and
+// release in it is the link's click (LINK-1, STYLE-TEXT-3). The area is the link fragment's
+// width and the whole line box.
+func (f *flow) linkArea(t *doc.Target, rect image.Rectangle) {
+	stack := clip.Rect(rect).Push(f.gtx.Ops)
+	pointer.CursorPointer.Add(f.gtx.Ops)
+	f.fp.links.click(t).Add(f.gtx.Ops)
+	stack.Pop()
+	f.tr.add(Mark{Kind: MarkLinkArea, Rect: rect, Link: t})
 }
 
 // strike draws the line through a struck fragment that spans x from start to end (STYLE-TEXT-4):
