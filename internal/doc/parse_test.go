@@ -61,6 +61,7 @@ func TestHeadings(t *testing.T) {
 		{"##### a", []Block{hd(5, txt("a", 0))}},
 		{"###### a", []Block{hd(6, txt("a", 0))}},
 		{"a\n===", []Block{hd(1, txt("a", 0))}},
+		{"Foo\nbar\n===", []Block{hd(1, txt("Foo bar", 0))}},
 		{"a\n---", []Block{hd(2, txt("a", 0))}},
 		{"# a ##", []Block{hd(1, txt("a", 0))}},
 		{"## *a* b", []Block{hd(2, txt("a", Emphasis), txt(" b", 0))}},
@@ -148,6 +149,16 @@ func TestNormaliseRuns(t *testing.T) {
 			in:   []Run{txt("a", 0), brk(), txt("b", 0)},
 			want: []Run{txt("a", 0), brk(), txt("b", 0)},
 		},
+		{
+			name: "trims the start into the next run when the first is emptied",
+			in:   []Run{txt(" ", 0), txt(" a", Strong)},
+			want: []Run{txt("a", Strong)},
+		},
+		{
+			name: "trims the end into the previous run when the last is emptied",
+			in:   []Run{txt("a ", Strong), txt(" ", 0)},
+			want: []Run{txt("a", Strong)},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -164,6 +175,10 @@ func TestCodeBlocks(t *testing.T) {
 		{"```go extra\nx\n```", []Block{CodeBlock{Lang: "go", Text: "x"}}},
 		{"```\na\n\n```", []Block{CodeBlock{Text: "a\n"}}},
 		{"    a\n    b\n", []Block{CodeBlock{Text: "a\nb"}}},
+		{"    \ta\n", []Block{CodeBlock{Text: strings.Repeat(" ", 8) + "a"}}},
+		{"- a\n\n  ```\n  x\n  ```", []Block{List{Tight: false, Start: 1, Items: []Item{
+			li(NotTask, para(txt("a", 0)), CodeBlock{Text: "x"}),
+		}}}},
 		{"```\na\tb\n```", []Block{CodeBlock{Text: "a" + strings.Repeat(" ", 7) + "b"}}},
 		{"```\n\tx\n```", []Block{CodeBlock{Text: strings.Repeat(" ", 8) + "x"}}},
 		{"```\na\tbc\td\n```", []Block{CodeBlock{
@@ -227,6 +242,11 @@ func TestLists(t *testing.T) {
 			li(Done, para(txt("a", 0))),
 			li(Open, para(txt("b", 0))),
 		}}}},
+		{"-", []Block{List{Tight: true, Start: 1, Items: []Item{li(NotTask)}}}},
+		{"- [ ]", []Block{List{Tight: true, Start: 1, Items: []Item{li(Open, para())}}}},
+		{"0. a", []Block{List{Ordered: true, Tight: true, Start: 0, Items: []Item{
+			li(NotTask, para(txt("a", 0))),
+		}}}},
 	})
 }
 
@@ -258,6 +278,7 @@ func TestEscapesAndEntities(t *testing.T) {
 		{"&#35; x", []Block{para(txt("# x", 0))}},
 		{"`\\*`", []Block{para(txt("\\*", Code))}},
 		{"\\&amp;", []Block{para(txt("&amp;", 0))}},
+		{"&#32;*a*", []Block{para(txt("a", Emphasis))}},
 	})
 }
 
