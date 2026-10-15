@@ -149,7 +149,8 @@ const (
 )
 
 // Margins gives a block's top and bottom margins (DOC-LAYOUT-4). nested is true for a list
-// inside a list item, the only block whose margins depend on nesting (F7). A block with no row
+// inside a list at any depth, through quotes too: the only block whose margins depend on
+// nesting (F7). A block with no row
 // is an error (F3). Margins does not check Heading.Level: HeadingStyle rejects levels outside
 // 1 to 6.
 func Margins(b doc.Block, nested bool) (top, bottom unit.Dp, err error) {
