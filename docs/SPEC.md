@@ -485,7 +485,9 @@ only `LocalFile` targets whose decoded format is `png` or `jpeg` are drawn. An i
 taller than 8192 px, or of more than 40 million pixels, is not drawn: a texture that size can
 exceed the GPU's limit, and the graphics layer panics when the GPU refuses one. Its header is
 read before the window and gives its size, so such an image is a placeholder with REASON
-`image too large: WxH` (STYLE-IMG-3).
+`image too large: WxH` (STYLE-IMG-3). The cap is a judgement, not a measured limit: at the pixel
+cap an image is about 160 MB as decoded (4 bytes per pixel), and up to twice that when its pixels
+are converted for drawing.
 
 **STYLE-IMG-2. Size.** One image pixel is one dp, so the image follows the zoom. An image wider
 than the width available to it is scaled down, keeping its aspect ratio, to that width
