@@ -289,7 +289,8 @@ with `Emphasis` is upright).
 **DOC-LAYOUT-1. Content padding.** The content is inset from the window edges by 45 dp on all
 four sides when the window is at least 768 dp wide (after zoom, STYLE-ZOOM-3), and 15 dp when
 it is narrower. Source: github-markdown-css's README recommends
-`.markdown-body { padding: 45px }` with `padding: 15px` under `max-width: 767px`.
+`.markdown-body { padding: 45px }` with `padding: 15px` under `max-width: 767px`. The width
+tested is the width the view is given (its constraints), which M9 settles for any scrollbar.
 
 **DOC-LAYOUT-2. No maximum width.** The content fills the window's width minus the padding.
 GitHub caps the column at 980 px; md-viewer does not, because it wraps to the window
@@ -337,7 +338,8 @@ on `nested`.
 Sources: `h1 { font-size: 2em; padding-bottom: .3em; border-bottom: 1px solid }`,
 `h2 { font-size: 1.5em; … }`, `h3 { 1.25em }`, `h4 { 1em }`, `h5 { .875em }`,
 `h6 { .85em; color }`, `h1, …, h6 { line-height: 1.25 }`. The rule spans the full content
-width, directly under the padding.
+width, directly under the padding. An empty heading (no runs) is one empty line of its line
+height, with its padding and rule.
 
 **STYLE-TEXT-3. Links** are drawn in `Accent`, with no underline, keeping their other style
 flags. The pointer turns into the hand cursor (`pointer.CursorPointer`) over a link
@@ -369,14 +371,17 @@ spans the full content width, with 16 dp padding on all sides (`pre { padding: 1
 highlighting is done; `Lang` is ignored.
 
 **STYLE-CODE-2. Code lines wrap.** A code line longer than the box's inner width wraps at the
-character that would overflow (`text.WrapGraphemes`). GitHub instead scrolls a code block
-sideways (`pre { overflow: auto; word-wrap: normal }`); md-viewer has no horizontal scrolling,
-so it wraps.
+character that would overflow (`text.WrapGraphemes`). The text of a block with n newlines shows
+n + 1 lines, so the empty text shows one empty line; the leading spaces of a line are kept. GitHub
+instead scrolls a code block sideways (`pre { overflow: auto; word-wrap: normal }`); md-viewer has
+no horizontal scrolling, so it wraps.
 
 **STYLE-QUOTE-1. Quotes** draw a 4 dp wide bar (`.25em` of 16) in `Border` down their full
 height at the left edge, and lay out their child blocks with 20 dp of left inset (the bar plus
 16 dp padding) and 16 dp of right inset. Text inside a quote is drawn in `FgMuted`, except
-links (`Accent`) and code blocks (`Fg`), which set their own colour
+links (`Accent`) and code blocks (`Fg`), which set their own colour. Inside a quote, headings
+levels 1 to 5 and inline code are `FgMuted` as well; heading rules keep `BorderMuted`, and rules
+and quote bars keep `Border`
 (`blockquote { padding: 0 1em; color; border-left: .25em solid }`). Nested quotes nest.
 
 **STYLE-RULE-1. A rule** is a 4 dp tall bar (`.25em`) in `Border` across the full content

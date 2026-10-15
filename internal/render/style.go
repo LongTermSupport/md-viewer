@@ -37,6 +37,22 @@ const (
 // heading. In a heading the code is 100% of the heading size.
 const codeScale = 0.85 // STYLE-TEXT-5
 
+// Code block text (STYLE-CODE-1): 85% of the body size, with a line height of 1.45.
+const (
+	codeBlockSize          = bodySize * codeScale // STYLE-CODE-1: 85% of 16 sp, 13.6 sp
+	lineHeightCode float32 = 1.45                 // STYLE-CODE-1: line height 1.45 × font size
+)
+
+// codeBlockStyle is a code block's text style (STYLE-CODE-1): Go Mono, in the palette's Fg.
+func codeBlockStyle(p Palette) TextStyle {
+	return TextStyle{
+		Font:       font.Font{Typeface: typefaceMono, Style: font.Regular, Weight: font.Normal},
+		Size:       codeBlockSize,
+		LineHeight: lineHeightCode,
+		Colour:     p.Fg,
+	}
+}
+
 // Font weight and heading constants. Go Bold declares weight 600, which Gio names font.SemiBold
 // (STYLE-FONT-3), and GitHub asks for 600 too.
 const boldWeight font.Weight = font.SemiBold // STYLE-FONT-3

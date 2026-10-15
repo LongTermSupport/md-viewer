@@ -437,7 +437,8 @@ The tests are in `trace_test.go` and `flow_test.go`, 23 in all: `TestTraceAdd`, 
 ## M5 The view and simple blocks
 
 **Covers:** STYLE-TEXT-2 (layout), STYLE-CODE-1, STYLE-CODE-2, STYLE-QUOTE-1, STYLE-RULE-1,
-DOC-LAYOUT-1, DOC-LAYOUT-2, DOC-LAYOUT-3 (applied), STYLE-PAL-3 (inside the view).
+DOC-LAYOUT-1, DOC-LAYOUT-2, DOC-LAYOUT-3 (applied). Not STYLE-PAL-3: the View paints no
+canvas, and the window's fill is tested in M10.
 
 **Files:** `internal/render/view.go`, `blocks.go`, and their tests. `View.Layout` dispatches
 on the block type; lists, tables and images return an error-free placeholder of height 0 until
@@ -460,6 +461,9 @@ proves it).
 - `TestRule`: a `RuleBar` 4 px tall in `Border`, full content width, with 24 px above and
   below.
 - `TestNoMaxWidth`: at 2000 px wide a long paragraph's glyphs reach past 980 px.
+- Also: `TestTraceShift` (trace origin), `TestCodeBlockStyle`, `TestFlowCodeMode` (code wrapping
+  and trailing lines), `TestViewPlaceholders`, `TestViewLayoutError` (`Err`), `TestViewNilTrace`,
+  `TestViewClicked`, `TestViewElements` (every block of `elements.md`).
 
 **Verification:** the standard checks.
 

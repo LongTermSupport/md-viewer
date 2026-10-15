@@ -69,6 +69,14 @@ func (l *links) clicked(gtx layout.Context) (doc.Target, bool) {
 	return first, found
 }
 
+// wrapMode is how a flow wraps its lines. The zero value is prose.
+type wrapMode uint8
+
+const (
+	wrapProse wrapMode = iota // WRAP-1: at word breaks, then at characters
+	wrapCode                  // STYLE-CODE-2: at the character that overflows, leading spaces kept
+)
+
 // flowParams are the inputs to layoutFlow that do not change within one call.
 type flowParams struct {
 	shaper    *text.Shaper
@@ -76,6 +84,7 @@ type flowParams struct {
 	palette   Palette
 	inHeading bool // RunStyle's code rule (STYLE-TEXT-5)
 	links     *links
+	wrap      wrapMode // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
 }
 
 // Inline code padding in em of the run's size (STYLE-TEXT-5).
@@ -142,7 +151,8 @@ type flow struct {
 //     is fixed, so styledtext's per-line ascent does not apply.
 //   - The flow paints code backgrounds, strike lines and link areas, and records each as a mark
 //     (ARCHITECTURE "internal/render").
-//   - A non-code run drops its leading spaces where it starts a line (WRAP-1).
+//   - A non-code run drops its leading spaces where it starts a line (WRAP-1). A code block keeps
+//     them, and wraps by grapheme at the character that overflows (STYLE-CODE-2).
 //   - If not even one grapheme fits, the first rune is placed alone past the line's end, so the
 //     loop always advances (WRAP-1).
 func layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace) (layout.Dimensions, error) {
@@ -162,7 +172,9 @@ func layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace) (l
 			return layout.Dimensions{}, fmt.Errorf("render: no text flow for run kind %d", r.Kind)
 		}
 	}
-	if f.hasContent || f.lines == 0 {
+	// A code block closes its last line even after a break, so text ending in a newline shows
+	// the empty line after it (STYLE-CODE-2).
+	if f.hasContent || f.lines == 0 || f.fp.wrap == wrapCode {
 		f.closeLine()
 	}
 	size := image.Pt(max(f.widest, gtx.Constraints.Min.X), f.lines*f.lineH)
@@ -228,10 +240,12 @@ func fixedPx(v fixed.Int26_6) float64 {
 	return float64(v) / 64
 }
 
-// textRun places the text of one run, breaking it across lines as needed (WRAP-1). A word that
-// does not fit the rest of its line moves to the next line (WrapWords, words first). A word
-// wider than a whole line breaks at a character (WrapHeuristically), and only then. A non-code
-// run drops its leading spaces where it starts a line.
+// textRun places the text of one run, breaking it across lines as needed (WRAP-1). In prose, a
+// word that does not fit the rest of its line moves to the next line (WrapWords, words first),
+// and a word wider than a whole line breaks at a character (WrapHeuristically), and only then.
+// A code block wraps by grapheme at the character that overflows (STYLE-CODE-2, WrapGraphemes).
+// A non-code run drops its leading spaces where it starts a line; a code run and a code block
+// keep them.
 func (f *flow) textRun(r doc.Run) error {
 	if r.Link != nil && f.fp.links == nil {
 		return fmt.Errorf("render: link run %q with no link state", r.Text)
@@ -239,16 +253,22 @@ func (f *flow) textRun(r doc.Run) error {
 	ts := RunStyle(f.fp.base, r.Style, r.Link != nil, f.fp.palette, f.fp.inHeading)
 	code := r.Style&doc.Code != 0
 	padX, padY := f.codePads(ts, code)
+	first, err := firstPolicy(f.fp.wrap)
+	if err != nil {
+		return err
+	}
+	// Leading spaces are kept in a code run and in a code block, and dropped elsewhere (WRAP-1).
+	keepSpaces := code || f.fp.wrap == wrapCode
 	rest := r.Text
 	for rest != "" {
-		if !f.hasContent && !code {
+		if !f.hasContent && !keepSpaces {
 			rest = strings.TrimLeft(rest, " ")
 			if rest == "" {
 				break
 			}
 		}
 		width := f.width - f.cursor - 2*padX
-		glyphs, n := f.shape(ts, rest, text.WrapWords, width)
+		glyphs, n := f.shape(ts, rest, first, width)
 		if n == 0 {
 			if f.hasContent {
 				f.closeLine()
@@ -275,6 +295,19 @@ func (f *flow) textRun(r doc.Run) error {
 		}
 	}
 	return nil
+}
+
+// firstPolicy is the policy a line's text is first shaped with. A code block wraps at the
+// character that overflows (STYLE-CODE-2); prose at a word break (WRAP-1).
+func firstPolicy(m wrapMode) (text.WrapPolicy, error) {
+	switch m {
+	case wrapProse:
+		return text.WrapWords, nil
+	case wrapCode:
+		return text.WrapGraphemes, nil
+	default:
+		return 0, fmt.Errorf("render: no wrap policy for wrap mode %d", m)
+	}
 }
 
 // shape lays out s as one line at most maxWidth px wide. It returns the glyphs without the
@@ -397,15 +430,15 @@ func (f *flow) strike(ts TextStyle, baseY, start, end int) {
 	top := baseY - int(math.Round(strikeRiseEm*size))
 	thick := max(f.gtx.Dp(strikeMin), int(math.Round(size/strikeDivisor)))
 	rect := image.Rect(start, top, end, top+thick)
-	f.fillRect(rect, ts.Colour)
+	fillRect(f.gtx, rect, ts.Colour)
 	f.tr.add(Mark{Kind: MarkStrike, Rect: rect, Colour: ts.Colour})
 }
 
-// fillRect fills r with colour c.
-func (f *flow) fillRect(r image.Rectangle, c color.NRGBA) {
-	stack := clip.Rect(r).Push(f.gtx.Ops)
-	paint.ColorOp{Color: c}.Add(f.gtx.Ops)
-	paint.PaintOp{}.Add(f.gtx.Ops)
+// fillRect fills r with colour c, in the current transform.
+func fillRect(gtx layout.Context, r image.Rectangle, c color.NRGBA) {
+	stack := clip.Rect(r).Push(gtx.Ops)
+	paint.ColorOp{Color: c}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
 	stack.Pop()
 }
 
