@@ -101,12 +101,28 @@ Targets, on a desktop under GNOME on Wayland (SPEC SPEED-3):
 
 | Measure                                  | Target     | Desktop        | Container (Xvfb, information only) |
 | ---------------------------------------- | ---------- | -------------- | ---------------------------------- |
-| `first_frame_ms`, `testdata/elements.md` | ≤ 120 ms   | to be measured | to be measured                     |
-| `first_frame_ms`, `testdata/large.md`    | ≤ 150 ms   | to be measured | to be measured                     |
-| wall clock, `--time testdata/large.md`   | ≤ 250 ms   | to be measured | to be measured                     |
-| `BenchmarkParseLarge`                    | ≤ 25 ms/op | to be measured | to be measured                     |
-| `BenchmarkFirstViewportLarge`            | ≤ 15 ms/op | to be measured | to be measured                     |
-| `BenchmarkLoadFonts`                     | ≤ 10 ms/op | to be measured | to be measured                     |
+| `first_frame_ms`, `testdata/elements.md` | ≤ 120 ms   | to be measured | 107.5 ms (median of 10)            |
+| `first_frame_ms`, `testdata/large.md`    | ≤ 150 ms   | to be measured | 121.2 ms (median of 10)            |
+| wall clock, `--time testdata/large.md`   | ≤ 250 ms   | to be measured | not measured (see below)           |
+| `BenchmarkParseLarge`                    | ≤ 25 ms/op | to be measured | 17.0 ms/op (median of 10)          |
+| `BenchmarkFirstViewportLarge`            | ≤ 15 ms/op | to be measured | 5.3 ms/op (median of 10)           |
+| `BenchmarkLoadFonts`                     | ≤ 10 ms/op | to be measured | 4.2 ms/op (median of 10)           |
+
+The container column is information only: a virtual display is not a desktop. Wall clock is not
+measured there: hyperfine is not in the development container, and Xvfb's own start-up would
+dominate the figure.
+
+To fill the desktop column (SPEC SPEED-3 takes the median of each row):
+
+1. `go build -trimpath -o dist/md-viewer ./cmd/md-viewer`
+2. First frame: ten `--time` runs per file, the median of their `first_frame_ms` (stderr to
+   `/dev/null`, as `large.md` prints a line per image):
+   `for i in $(seq 10); do dist/md-viewer --time testdata/large.md 2>/dev/null; done | awk -F'first_frame_ms=' '{print $2}' | sort -n | awk '{a[NR]=$1} END {print (a[5]+a[6])/2}'`
+3. Wall clock: `hyperfine --warmup 3 --runs 20 --export-json wall.json 'dist/md-viewer --time testdata/large.md'`,
+   and the median in `wall.json` (`results[0].median`, in seconds).
+4. Benchmarks: `go test -run '^$' -bench . -benchtime 20x -count 10 ./internal/...`, and the median
+   of the ten ns/op values of each one, divided by 1e6 for ms/op.
+5. Compare each with its target. A miss is reported with its number.
 
 How it stays fast: it parses before the window opens and does nothing else then; it uses
 embedded fonts and never scans the system's; it lays out only the blocks in view; it decodes

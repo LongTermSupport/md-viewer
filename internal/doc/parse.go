@@ -277,7 +277,7 @@ func expandTabs(s string) string {
 
 // inlineFlow collects the inline content of one block. In split mode (a paragraph or a text
 // block) an image ends the paragraph so far and becomes a block of its own (DOC-11); otherwise
-// an image's alt text is a text run in its place (P3).
+// an image's alt text is a text run in its place (DOC-11).
 type inlineFlow struct {
 	split    bool
 	runs     []Run   // the runs since the last split
@@ -382,7 +382,7 @@ func (c *converter) collectRuns(parent ast.Node, st Style, link *Target, f *inli
 
 // addImage handles an image in running text (DOC-11). In split mode the paragraph so far ends
 // and the image becomes a block of its own, linked when it is a link's content. Otherwise its
-// alt text is a text run with the surrounding style and link (P3).
+// alt text is a text run with the surrounding style and link (DOC-11).
 func (c *converter) addImage(n *ast.Image, st Style, link *Target, f *inlineFlow) error {
 	alt, err := c.altText(n)
 	if err != nil {
@@ -399,7 +399,7 @@ func (c *converter) addImage(n *ast.Image, st Style, link *Target, f *inlineFlow
 	return nil
 }
 
-// altText returns the plain text of an image's content (DOC-11, P4): its runs with escapes and
+// altText returns the plain text of an image's content (DOC-11): its runs with escapes and
 // references resolved, code raw, spaces collapsed and trimmed, and each break as one space.
 func (c *converter) altText(n *ast.Image) (string, error) {
 	f := &inlineFlow{}
@@ -451,7 +451,7 @@ func (c *converter) codeSpanText(n *ast.CodeSpan) (string, error) {
 }
 
 // autoLinkDest returns the destination of an autolink: its URL, with mailto: in front of an
-// email address (DOC-4, P2).
+// email address (DOC-4).
 func autoLinkDest(n *ast.AutoLink, src []byte) string {
 	dest := string(n.URL(src))
 	if n.AutoLinkType == ast.AutoLinkEmail && !strings.HasPrefix(dest, mailtoPrefix) {

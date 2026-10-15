@@ -164,16 +164,16 @@ of runs. A run is a string with a style set and an optional link:
 resolved, classified by DOC-5. `[text](dest)` gives the runs of `text` with that link; an
 autolink `<https://…>` and a bare URL found by linkify give one run whose text is the URL as
 written and whose link is the URL. A `www.` link found by linkify keeps its written text
-(`www.e.org`) and its link is `http://www.e.org` (P1). An email autolink, `<a@b.c>`, and a bare
+(`www.e.org`) and its link is `http://www.e.org`. An email autolink, `<a@b.c>`, and a bare
 address found by linkify give the text as written and the link `mailto:` plus the address; that
-`mailto:` target goes through DOC-5 like any other destination (P2).
+`mailto:` target goes through DOC-5 like any other destination.
 
 **DOC-5. Link targets.** `doc.ResolveLink(docDir, dest)` classifies a destination. Backslash
 escapes and entity and numeric references in `dest` are resolved first, as DOC-3 does (`x\_y.md`
-is `x_y.md`), and `Target.Dest` holds the resolved text (P6). An empty destination (`[a]()`) is
-the document's directory, as `LocalFile` (P8). A `file` URL with a host other than empty or
+is `x_y.md`), and `Target.Dest` holds the resolved text. An empty destination (`[a]()`) is
+the document's directory, as `LocalFile`. A `file` URL with a host other than empty or
 `localhost`, an opaque `file:` URL (`file:x.md`), and a destination with no scheme that has a
-host (`//e.org/x`) are `Refused` (P7).
+host (`//e.org/x`) are `Refused`.
 
 | Destination                                            | Target kind | Target value                                                                                                                                       |
 | ------------------------------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -205,7 +205,7 @@ model content. The text between inline tags is ordinary Markdown text and is kep
 `Document.DroppedHTML`, and md-viewer prints one line to stderr when that count is not zero:
 `md-viewer: N HTML fragment(s) not shown: HTML is not rendered`. A fragment is one goldmark HTML
 block (a block tag or a comment, however many lines it spans), or one inline raw-HTML tag or
-comment: `<span>b</span>` is two fragments and a tag split over two lines is one (P22).
+comment: `<span>b</span>` is two fragments and a tag split over two lines is one.
 
 **DOC-10. Tables.** A GFM table maps to `Table` with one alignment per column (`Left`,
 `Centre`, `Right`, `None`), a header row and body rows, each cell holding runs. Rows shorter
@@ -214,14 +214,14 @@ than the header are padded with empty cells; GFM already drops extra cells.
 **DOC-11. Images.** An image is laid out as a block of its own. A paragraph, or a tight list
 item's text, containing images is split at each image into: the paragraph of the runs before it,
 an `Image` block, the paragraph of the runs after it, and so on. Each split paragraph is
-normalised as a paragraph of its own (DOC-3), and is omitted when that leaves no runs (P5). An
+normalised as a paragraph of its own (DOC-3), and is omitted when that leaves no runs. An
 `Image` holds its `Alt` text, its destination (escapes and references resolved, as in DOC-5),
 its `Target` (DOC-5) and, when it is a link's content (`[![alt](img)](href)`), the link. `Alt` is
 the image's inline content flattened to plain text: its DOC-3 runs with escapes and references
 resolved, code raw, spaces collapsed and trimmed, and a break as one space. That is the text of
-goldmark's HTML `alt` attribute (P4). An image inside a heading or a table cell is replaced by
+goldmark's HTML `alt` attribute. An image inside a heading or a table cell is replaced by
 its alt text as a text run, with the style and link around the image, so it merges with its
-neighbours (P3).
+neighbours.
 
 **DOC-12. Block quotes, rules.** A block quote maps to `Quote` holding its child blocks; a
 thematic break maps to `Rule`.
@@ -231,10 +231,10 @@ regular file, size, read, NUL) and returns typed errors, as pointers, that the C
 CLI-8 (the CLI owns the wording). `Document.Dir` is the absolute directory of the file, and
 `Document.Name` its base name. `Load` sets `Name` and passes the absolute directory to `Parse`,
 which stores it as `Document.Dir`. An error from `filepath.Abs` or `Parse` is returned as a plain
-error, and the CLI prints `md-viewer: ` + the error and exits 1 (P10). `now` is called exactly
+error, and the CLI prints `md-viewer: ` + the error and exits 1. `now` is called exactly
 three times on success: before the stat, after the NUL check, and after `Parse`. `LoadStats.Read` is the
 difference of the first two readings (stat, read and NUL check) and `LoadStats.Parse` that of the
-last two (P9).
+last two.
 
 **DOC-14.** Parsing is deterministic: the same bytes give a model that is `reflect.DeepEqual`
 to the last one.
@@ -526,7 +526,11 @@ order, after DOC-9's line and before the window opens:
   not opened);
 - `image too large: WxH`, from the size rule of STYLE-IMG-1;
 - the text of the operating system's error after the path (`no such file or directory`,
-  `permission denied`), or the decoder's error for a PNG or JPEG whose header is unreadable.
+  `permission denied`), or the decoder's error for a PNG or JPEG whose header is unreadable;
+- the decoder's error, for a PNG or JPEG whose pixels fail to decode after the window has
+  opened (STYLE-IMG-5);
+- `decodes to no pixels`, for a decoder that returns an empty image (the standard decoders do
+  not).
 
 An image whose pixels fail to decode after the window has opened (SPEED-5) prints its line once,
 when it is first laid out, and is a placeholder from then on (STYLE-IMG-5).
@@ -697,8 +701,11 @@ two tenths is not specified. md-viewer then closes the window and exits 0. The t
 dynamic linking, Go runtime start) is not included; the wall-clock measurement (SPEED-7)
 includes it.
 
-**SPEED-3. Targets.** Release build (`go build -trimpath`), on the owner's desktop under
-GNOME on Wayland, median of 10 runs:
+**SPEED-3. Targets.** Each row is a median, measured on the owner's desktop under GNOME on
+Wayland: of 10 `--time` runs for the two `first_frame_ms` rows, of the 20 runs hyperfine times
+for the wall clock (the median in its JSON export, SPEED-7), and of 10 `go test -count` runs
+for the benchmarks. The binary rows use a release build (`go build -trimpath`); the benchmarks
+use `go test`:
 
 | Measure                                                      | Target     |
 | ------------------------------------------------------------ | ---------- |

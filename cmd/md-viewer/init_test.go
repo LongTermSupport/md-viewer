@@ -1,12 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -34,9 +36,7 @@ func goFiles(root string, visit func(rel string, f *ast.File) error) error {
 			return err
 		}
 		if d.IsDir() {
-			name := d.Name()
-			if path != root && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") ||
-				name == "testdata" || name == "untracked") {
+			if skipDir(root, path, d) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -53,6 +53,96 @@ func goFiles(root string, visit func(rel string, f *ast.File) error) error {
 			return err
 		}
 		return visit(filepath.ToSlash(rel), f)
+	})
+}
+
+// skipDir reports whether a walk under root skips the directory d at path: names starting with
+// "." or "_", testdata, and untracked, which holds scratch work, not project code.
+func skipDir(root, path string, d fs.DirEntry) bool {
+	name := d.Name()
+	return path != root && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") ||
+		name == "testdata" || name == "untracked")
+}
+
+// plannerLabel is a planner's label: one capital letter from a fixed set and one or two digits,
+// as a whole word.
+var plannerLabel = regexp.MustCompile(`\b[PFDQ][0-9]{1,2}\b`)
+
+// labelScope reports whether the file at the slash-separated path rel is text the label gate reads:
+// every .go file, README.md and docs/*.md.
+func labelScope(rel string) bool {
+	return strings.HasSuffix(rel, ".go") || rel == "README.md" ||
+		(strings.HasPrefix(rel, "docs/") && strings.HasSuffix(rel, ".md"))
+}
+
+// plannerLabels lists "file:line" for each line under root that holds a planner label, in the
+// files labelScope accepts, test files included.
+func plannerLabels(root string) ([]string, error) {
+	var found []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if skipDir(root, path, d) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if !labelScope(rel) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for n, line := range strings.Split(string(data), "\n") {
+			if plannerLabel.MatchString(line) {
+				found = append(found, fmt.Sprintf("%s:%d", rel, n+1))
+			}
+		}
+		return nil
+	})
+	return found, err
+}
+
+// TestNoPlannerLabels: no Go file, README or doc names a planner's label (the labels belong to a
+// planning tree, not to this repository). The fixture rows show the check finds a label and passes
+// an expectation number such as DOC-14. The fixture labels are split across two literals so that
+// this file holds none.
+func TestNoPlannerLabels(t *testing.T) {
+	t.Run("fixture", func(t *testing.T) {
+		dir := writeTree(t, map[string]string{
+			"x.go":           "package x\n\n// x (P" + "12)\n",
+			"docs/SPEC.md":   "A rule (DOC-14) and a note (SPEED-6).\n",
+			"docs/x.txt":     "not scanned: (F" + "3)\n",
+			"README.md":      "See (D" + "1).\n",
+			"nested/y.go":    "package y\n\n// the label is Q" + "9\n",
+			"nested/y_ok.go": "package y\n\n// no label here: DOC-5\n",
+		})
+		got, err := plannerLabels(dir)
+		if err != nil {
+			t.Fatalf("plannerLabels: %v", err)
+		}
+		want := []string{"README.md:1", "nested/y.go:3", "x.go:3"}
+		if !slices.Equal(got, want) {
+			t.Errorf("plannerLabels = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("module", func(t *testing.T) {
+		got, err := plannerLabels(moduleRoot(t))
+		if err != nil {
+			t.Fatalf("plannerLabels: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("planner labels at %q, want none", got)
+		}
 	})
 }
 

@@ -190,7 +190,7 @@ func (failWriter) Write([]byte) (int, error) {
 
 // TestPrepareImages: after DOC-9's line, one stderr line for each image that is not drawn, in
 // document order (STYLE-IMG-3, SPEED-1). The file loads with its images probed. A failed write to
-// stderr is ExitFailure and opens no window (P12).
+// stderr is ExitFailure and opens no window.
 func TestPrepareImages(t *testing.T) {
 	tmp := t.TempDir()
 	var ok bytes.Buffer
