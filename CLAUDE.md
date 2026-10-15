@@ -29,6 +29,10 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 
 <!-- handler: block-artefact-publishing -->
 
+<!-- handler: block-comment-changelog -->
+
+<!-- handler: block-comment-size -->
+
 <!-- handler: block-curl-pipe-shell -->
 
 <!-- handler: block-dangerous-permissions -->
@@ -38,6 +42,8 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 <!-- handler: block-git-stash -->
 
 <!-- handler: block-pip-break-system -->
+
+<!-- handler: block-plan-time-estimates -->
 
 <!-- handler: block-secret-file-read -->
 
@@ -63,7 +69,13 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 
 <!-- handler: dispatch-declaration -->
 
+<!-- handler: docs-qa-commit-gate -->
+
+<!-- handler: docs-qa-edit -->
+
 <!-- handler: enforce-project-containment -->
+
+<!-- handler: enforce-tdd -->
 
 <!-- handler: error-hiding-blocker -->
 
@@ -77,6 +89,8 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 
 <!-- handler: issue-filing-gate -->
 
+<!-- handler: lint-on-edit -->
+
 <!-- handler: lock-file-edit-blocker -->
 
 <!-- handler: lsp-noise-checker -->
@@ -85,9 +99,17 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 
 <!-- handler: plan-journal-guard -->
 
+<!-- handler: plan-number-helper -->
+
+<!-- handler: plan-qa-commit-gate -->
+
+<!-- handler: plan-qa-edit -->
+
 <!-- handler: prevent-destructive-git -->
 
 <!-- handler: prevent-worktree-file-copying -->
+
+<!-- handler: qa-suppression-blocker -->
 
 <!-- handler: reference-repo-freshness -->
 
@@ -119,6 +141,8 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 
 <!-- handler: usage-pause-tool-gate -->
 
+<!-- handler: verification-result-gate -->
+
 | ID                                 | Blocked                                                                                                                                                      | Why                                                                                                                                                                                               | Fix                                                                                                                                                                                                                   |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | R-PERMISSION-REQUEST-NON-READ-TOOL | a permission request for a tool that is not Read, Glob or Grep                                                                                               | Only read-only tools are auto-approved; a write or execute request is not this handler's to grant                                                                                                 | Control write/execute operations with PreToolUse hooks                                                                                                                                                                |
@@ -134,11 +158,14 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 | R-GH-PR-MERGE-SQUASH               | `gh pr merge --squash`                                                                                                                                       | Severs ancestry -- git branch -d refuses the branch forever                                                                                                                                       | Use gh pr merge --merge instead                                                                                                                                                                                       |
 | R-GH-PR-MERGE-REBASE               | `gh pr merge --rebase`                                                                                                                                       | Severs ancestry -- git branch -d refuses the branch forever                                                                                                                                       | Use gh pr merge --merge instead                                                                                                                                                                                       |
 | R-ARTIFACT-PUBLISH                 | publishing an artefact via the `Artifact` tool                                                                                                               | The page lives OUTSIDE the project and the repository cannot audit or retract it                                                                                                                  | Write the file locally and tell the user its path, or ask a human to publish                                                                                                                                          |
+| R-COMMENT-CHANGELOG                | changelog narrative in a code comment                                                                                                                        | A comment describes CURRENT STATE; history belongs elsewhere                                                                                                                                      | Move it to git, a changelog file, or the plan's JOURNAL/                                                                                                                                                              |
+| R-COMMENT-SIZE                     | a comment growing past its configured size limit                                                                                                             | Comments should describe current state, not accumulate                                                                                                                                            | Shorten the comment, or declare MUST_EXCEED_COMMENT_SIZE_BECAUSE                                                                                                                                                      |
 | R-CURL-PIPE-SHELL                  | \`curl                                                                                                                                                       | wget ...                                                                                                                                                                                          | bash                                                                                                                                                                                                                  |
 | R-CHMOD-WORLD-WRITABLE             | `chmod 777`/`chmod a+w`/`chmod o+w`                                                                                                                          | Allows anyone to read, write, and execute, bypassing all file permission security                                                                                                                 | Use least-privilege permissions instead (755/644/600)                                                                                                                                                                 |
 | R-GIT-MESSAGE-BACKTICK             | an unescaped backtick in a double-quoted git commit/tag message                                                                                              | Bash performs command substitution inside double quotes -- the span is EXECUTED, not quoted                                                                                                       | Use single quotes, or git commit -F <file>                                                                                                                                                                            |
 | R-GIT-STASH-PUSH                   | `git stash` / `git stash push` / `git stash save`                                                                                                            | Stashes get forgotten, lost, and block git pull                                                                                                                                                   | Use git commit instead — WIP commits are fine                                                                                                                                                                         |
 | R-PIP-BREAK-SYSTEM-PACKAGES        | `pip install --break-system-packages`                                                                                                                        | Bypasses PEP 668 protection and can corrupt the system Python installation                                                                                                                        | Use a virtual environment or `pip install --user` instead                                                                                                                                                             |
+| R-PLAN-TIME-ESTIMATE               | Time estimates not allowed in plan documents                                                                                                                 | Time estimates in plans create false expectations and pressure                                                                                                                                    | Break work into concrete tasks and implementation steps; let the user decide scheduling                                                                                                                               |
 | R-SECRET-READ                      | Read/Write/Edit/NotebookEdit/Grep targeting a protected path                                                                                                 | The file's contents must NEVER be read into context by any route — not Read, not Bash, not an interpreter one-liner, not a copy                                                                   | Use `bin/hooks-daemon secret-meta <path>` for metadata, or ask the user                                                                                                                                               |
 | R-SECRET-BASH-MENTION              | a Bash command whose text mentions a protected path                                                                                                          | The file's contents must NEVER be read into context by any route — not Read, not Bash, not an interpreter one-liner, not a copy                                                                   | Use `bin/hooks-daemon secret-meta <path>` for metadata, or ask the user                                                                                                                                               |
 | R-SECRET-SCRIPT-AUTHOR             | a script authored via Write/Edit whose content references a protected path                                                                                   | The file's contents must NEVER be read into context by any route — not Read, not Bash, not an interpreter one-liner, not a copy                                                                   | Use `bin/hooks-daemon secret-meta <path>` for metadata, or ask the user                                                                                                                                               |
@@ -163,7 +190,10 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 | R-CRON-SUBAGENT-STOP-DECLARED      | a SubagentStop while a declared `persistent_crons` job is missing from `session_crons` or due a refresh                                                      | A declared cron that does not exist (or that expires within the day) fires no more ticks, so nothing would bring the session back                                                                 | CronCreate (recurring) the named job with the schedule and prompt given, deleting the old copy first when refreshing; or `hooks-daemon cron-pause <job>`                                                              |
 | R-DAEMON-DIR-CD                    | `cd`/`pushd` into `.claude/hooks-daemon/`                                                                                                                    | Daemon CLI commands must be run from PROJECT ROOT, causing path confusion otherwise                                                                                                               | Run daemon commands from project root, e.g. `bin/hooks-daemon status`                                                                                                                                                 |
 | R-DISPATCH-DECLARATION-MISSING     | a `Task` dispatch prompt that declares no plan folder and no non-plan destination (strict mode)                                                              | A subagent's long-form reply travels over a bounded channel that silently elides an oversized inline report, so its output must go to a declared file                                             | Name the plan folder the dispatch belongs to, or say 'not plan work' and declare where its files go                                                                                                                   |
+| R-DOCS-QA-COMMIT                   | a git commit violates a block-level docs QA staged-tree check                                                                                                | Most doc rot that matters at commit time is cross-file drift a single-file edit hook cannot see                                                                                                   | Fix the content per each finding's remediation below and amend the commit                                                                                                                                             |
+| R-DOCS-QA-EDIT                     | a documentation Write/Edit violates a block-level docs QA check                                                                                              | A finding only denies the write when it is BLOCK severity AND the resolved mode for that check is block                                                                                           | Fix the content per each finding's remediation below and retry                                                                                                                                                        |
 | R-WRITE-OUTSIDE-PROJECT-ROOT       | a write whose target is outside the repository root                                                                                                          | Outside the repo nothing is version-controlled, reviewed or durable — a container's temp directory is wiped on restart, and every other path rule is scoped to the repo so none of them judges it | Write it inside the repository — `untracked/scratch/` is the scratch location                                                                                                                                         |
+| R-TDD-TEST-FIRST                   | a Write that creates a production source file (a path that does not exist yet) without its test file                                                         | TDD requires the test file to exist before the source file                                                                                                                                        | Create the test file first (RED), then the source file (GREEN)                                                                                                                                                        |
 | R-ERROR-HIDING                     | an error-hiding pattern (bare except,                                                                                                                        |                                                                                                                                                                                                   | true, empty catch, result, _ := ..., ...)                                                                                                                                                                             |
 | R-FAILSAFE-CRON-SUPPRESSED         | A delivered failsafe-cron tick, while a 'blocked only on human input' marker is live                                                                         | Every tick against a session blocked only on human input is a guaranteed no-op model turn                                                                                                         | Nothing to do -- this is expected. Send a real message to clear the marker and resume ticks                                                                                                                           |
 | R-FAILSAFE-CRON-BACKED-OFF         | A delivered failsafe-cron tick, while this session is producing nothing and owes no ledgered work                                                            | An hourly tick against a session with nothing to recover costs a full model turn and finds nothing                                                                                                | Nothing to do -- ticks continue, just less often. Any real user message restores hourly cadence                                                                                                                       |
@@ -175,12 +205,17 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 | R-CRONTAB-REMOVE                   | `crontab -r`                                                                                                                                                 | Deletes every scheduled job with no confirmation and no undo                                                                                                                                      | `crontab -l` to inspect, `crontab -e` to edit; stop and ask the human to run `-r`                                                                                                                                     |
 | R-STOP-IDLE-WITH-WORKABLE-ISSUE    | a main-thread stop with workable issues listed, nothing in flight, and the next one left for a cron tick                                                     | The declared cron is a safety net, not a scheduler: a stop that waits for the tick while workable issues exist idles the loop for up to an hour                                                   | Start the named issue now; or stop naming the real blocker (`[awaiting-human]` if only a human can unblock it)                                                                                                        |
 | R-UPSTREAM-ISSUE-UNVERIFIED-BODY   | `gh issue create` against the hooks-daemon tracker with a body no generator produced                                                                         | that tracker is PUBLIC and an issue cannot be retracted -- a pasted config, log excerpt or absolute path costs the CLIENT permanently, while an over-redacted report costs one round trip         | Generate the body with `hooks-daemon issue-report` and file the file it writes                                                                                                                                        |
+| R-LINT-FAILURE                     | a written/authored file that fails its language's lint check                                                                                                 | The write has already landed on disk; this is a failure report, not a rollback                                                                                                                    | Fix the reported problems with Edit — do not re-Write the file from scratch                                                                                                                                           |
 | R-LOCK-FILE-EDIT                   | Direct `Write`/`Edit` of a package manager lock file                                                                                                         | Lock files are generated artifacts; manual edits create checksum mismatches and broken dependency graphs                                                                                          | Use the package manager commands instead (e.g. `npm install`, `cargo update`)                                                                                                                                         |
 | R-LSP-CONFIG-EXCLUDE               | a language server config with no exclude for a tree that is not project code                                                                                 | The language server reports other checkouts' and fixtures' defects against this one, and a noisy stream is skimmed                                                                                | Add the listed exclude entries (the advisory prints them ready to use); a finding that instead names an entry as harmful means REMOVE it - follow the exact instruction printed, never assume every finding means add |
 | R-LSP-SERVER-STALE                 | a running language server older than the config file its check is anchored to                                                                                | It is still analysing the scope the OLD config declared                                                                                                                                           | End the named process (the harness respawns it on the next LSP use)                                                                                                                                                   |
 | R-PIPE-TO-TAIL                     | \`                                                                                                                                                           | tail\`                                                                                                                                                                                            | Truncates output and causes information loss                                                                                                                                                                          |
 | R-PIPE-TO-HEAD                     | \`                                                                                                                                                           | head\`                                                                                                                                                                                            | Truncates output and causes information loss                                                                                                                                                                          |
 | R-JOURNAL-HAND-WRITTEN-ENTRY       | a plan journal entry written by hand (Edit/Write/Bash into a JOURNAL/ day-file)                                                                              | Only `mkplan.bash --journal` stamps the real UTC time; hand-typed stamps have landed 40 minutes in the future                                                                                     | Write the entry body to a fresh file under untracked/scratch/, then run `mkplan.bash --journal <plan> <category> <body-file>`                                                                                         |
+| R-PLAN-NUMBER-DISCOVERY            | a bash discovery scan (ls/find/sort+tail) for the next plan number                                                                                           | Misses subdirectories like Completed/ and disagrees across branches                                                                                                                               | Use the printed next plan number, or the git counter directly                                                                                                                                                         |
+| R-PLAN-FOLDER-MKDIR                | `mkdir <plan-dir>/NNNNN-name` (hand-creating a plan folder)                                                                                                  | Claims a plan number the moment the folder appears, but nothing records the claim until PLAN.md is written                                                                                        | Use the mkplan.bash scaffolder instead                                                                                                                                                                                |
+| R-PLAN-QA-COMMIT                   | a git commit violates a block-level plan QA cross-file invariant                                                                                             | Most plan rot is cross-file and a single-file edit hook cannot see it                                                                                                                             | Amend the commit to also stage what each finding's remediation names below                                                                                                                                            |
+| R-PLAN-QA-EDIT                     | a PLAN.md/README.md Write/Edit violates a block-level plan QA check                                                                                          | Plan QA linting catches issues you can fix immediately, before they reach commit                                                                                                                  | Fix the content per each finding's remediation below and retry                                                                                                                                                        |
 | R-GIT-RESET-HARD                   | `git reset --hard`                                                                                                                                           | Permanently destroys all uncommitted changes                                                                                                                                                      | Ask the user to run it manually                                                                                                                                                                                       |
 | R-GIT-CLEAN-FORCE                  | `git clean -f`                                                                                                                                               | Permanently deletes untracked files                                                                                                                                                               | Ask the user to run it manually                                                                                                                                                                                       |
 | R-GIT-CHECKOUT-DISCARD             | `git checkout -- <file>` / `git checkout .`                                                                                                                  | Discards local changes to file(s) permanently                                                                                                                                                     | Ask the user to run it manually                                                                                                                                                                                       |
@@ -198,6 +233,7 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 | R-GIT-PUSH-DELETE-REMOTE           | `git push --delete <name>` / `git push <remote> :<name>` of a branch not merged into the default branch, or of a tag; `git push --mirror` / `--prune` always | Deletes a branch or tag in the shared remote repository, beyond any local recovery                                                                                                                | A branch already merged into the default branch is deleted freely; otherwise do not run it, stop and ask the human to run it themselves                                                                               |
 | R-GIT-DESTRUCTIVE-UNREADABLE       | a git command that may destroy changes and cannot be read in full                                                                                            | Fail closed: a command this handler cannot parse might be any of the rules above                                                                                                                  | Rewrite it as one plain git command per call, or ask the user to run it manually                                                                                                                                      |
 | R-WORKTREE-FILE-COPY               | `cp`/`mv`/`rsync` from a worktree into the main repo's code dirs                                                                                             | Defeats worktree isolation, bypasses git tracking, and can nuke untracked work in the target directory                                                                                            | cd into the worktree, commit, then git merge back                                                                                                                                                                     |
+| R-QA-SUPPRESSION                   | a QA suppression directive (noqa, type: ignore, eslint-disable, ...)                                                                                         | Suppression comments hide real problems and create technical debt                                                                                                                                 | Fix the underlying issue; do not suppress the warning                                                                                                                                                                 |
 | R-REFERENCE-REPO-STALE             | a read of a governed reference clone that is behind or off its default branch                                                                                | reasoning from a stale clone produces conclusions indistinguishable from correct ones -- no error, no failing test, just a wrong answer                                                           | Run the `fix:` command printed beside the repo, then retry the read                                                                                                                                                   |
 | R-REFERENCE-REPO-NOT-VERIFIED      | a read of a governed reference clone with no in-date freshness reading                                                                                       | nobody has checked this clone, which is a different fact from it being stale -- and treating the two the same either cries wolf or gives false comfort                                            | Run `hooks-daemon reference-repos` to fetch every governed repo and refresh                                                                                                                                           |
 | R-REMOTE-DOCS-STAGED-PROVENANCE    | a commit staging a remote-docs file without valid provenance frontmatter                                                                                     | An unattributed vendored document that reaches history needs a rewrite to remove, and cannot be refreshed, dated or trusted meanwhile                                                             | Capture with `hooks-daemon remote-docs add <url>` and re-stage                                                                                                                                                        |
@@ -214,6 +250,7 @@ Full detail on any rule: `bin/hooks-daemon explain-rule <ID>`.
 | R-USAGE-PAUSE-PROMPT               | A prompt, cron tick or supervisor message while the session is paused on its usage ceiling                                                                   | The session stopped taking on work to keep the account under its usage ceiling, and each prompt would cost a full model turn                                                                      | Nothing to do -- the session resumes by itself at the window reset; a human can override it by typing `! bin/hooks-daemon usage-pause clear` in the session                                                           |
 | R-USAGE-PAUSE-STOP                 | a stop while a usage-paused session's crons are not exactly the one resume cron                                                                              | A paused session is woken only by its resume cron, so any other cron would drive it past the usage ceiling and a missing one would never wake it                                                  | CronList, CronDelete every cron, CronCreate the one resume cron as the pause directive gave it, then stop again                                                                                                       |
 | R-USAGE-PAUSE-TOOL                 | any tool except CronCreate, CronDelete, CronList, SendMessage, TaskStop, ToolSearch while the session is paused on its usage ceiling                         | The session stopped taking on work to keep the account under its usage ceiling                                                                                                                    | Replace the session's crons with the one resume cron, then stop; the session resumes at the window reset                                                                                                              |
+| R-VERIFICATION-RESULT-NOT-CONSUMED | a verifier followed by a mutator with nothing consuming the result                                                                                           | The verifier can fail and the mutator would still run                                                                                                                                             | Gate with `&&`, \`                                                                                                                                                                                                    |
 
 ## Advisories and other active handlers
 
@@ -315,6 +352,10 @@ One line each; these fire with their own guidance when relevant. Full text: `bin
 
 - plan_workflow_asset_checker — plan tooling provisioning alert
 
+<!-- handler: plan-workflow-guidance -->
+
+- plan_workflow — PLAN.md, supporting docs and JOURNAL/ obey DIFFERENT contracts
+
 <!-- handler: project-handler-load-checker -->
 
 - project_handler_load_checker — project protection degraded alert
@@ -344,3 +385,58 @@ One line each; these fire with their own guidance when relevant. Full text: `bin
 - worktree_create — semantic worktree naming
 
 </hooksdaemon>
+
+# md-viewer: project instructions
+
+md-viewer is a Markdown viewer in Go with Gio: `md-viewer FILE.md` opens one window showing
+one file rendered in GitHub's style. Linux first, with seams left for other platforms. Start-up
+and rendering must be as fast as possible, and that is measured, not guessed.
+
+## The "no" list
+
+No editing, no syntax highlighting, no tabs, no second window or file, no live reload, no
+search, no selection or copy, no HTML rendering, no network, no settings. Anything not in
+[docs/SPEC.md](docs/SPEC.md) is out of scope; its section 10 lists the non-goals. Do not add a
+feature, a flag or a dependency the spec does not name: propose it to the owner instead.
+
+## Where things are
+
+- [docs/SPEC.md](docs/SPEC.md): the numbered, testable expectations. The contract.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): packages, public types, pinned versions, how
+  render is tested without a window.
+- [docs/MILESTONES.md](docs/MILESTONES.md): the build order, the tests to write first, the
+  verification commands, and the status list. Work one milestone at a time, in order.
+- [README.md](README.md): what users read.
+
+## Method
+
+- **Spec first.** Behaviour is written in SPEC.md before code. If the spec is wrong or
+  unclear, stop and say so; do not code around it.
+- **Tests first.** Every expectation gets a test, seen to fail on its assertion before the code
+  that makes it pass is written.
+- **Fail fast.** Every error is returned or reported; nothing is skipped, ignored or retried
+  silently. Only `main` exits.
+- **Strict typing.** Named types for every kind, style, exit code and target; exhaustive
+  switches.
+- **DRY.** Each spec value is one named constant, citing its expectation number.
+- **Diagnostics to stderr.** stdout carries only `--help`, `--version` and `--time` output.
+- **No suppressions.** No `//nolint`, no go-qa record entries without the owner.
+
+## QA
+
+QA is go-qa-ci, pinned to the commit in `qa/go-qa-ci.ref`. Install its tools with
+`scripts/install-qa-tools.sh`, run the gate with `scripts/qa.sh`. Also `go vet ./...` and
+`go test -race -count=1 ./...`. All must pass before every commit is pushed. go-qa-ci is
+private, so CI's `go-qa` job fails until it is published; its `build` job must be green.
+
+This container has Gio's headers and Xvfb but no display: the binary builds and runs under
+`xvfb-run -a`, and its timings there are information only. Speed targets are judged on the
+owner's desktop.
+
+The container's tools come from `.claude/ccy/Dockerfile`. A missing tool is fixed there and
+the image rebuilt by the owner; never install one by hand.
+
+## Public repository
+
+This repository is public. Never commit secrets, tokens, personal names, hostnames, local
+paths or anything that identifies a particular machine. Use placeholders.

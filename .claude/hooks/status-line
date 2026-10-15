@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# DAEMON-OWNED FILE - do not edit. Deployed into your project by the
+# claude-code-hooks-daemon installer and refreshed on every upgrade, so local
+# changes are discarded. See CLAUDE/LLM-INSTALL.md, "Which Files Under
+# .claude/ Are Yours?", for the full list and the linter exclusions.
+#
+# Claude Code Hooks - Status Line
+#
+# Forwards Status event to daemon via Unix socket and outputs plain text.
+# This hook is called by Claude Code to populate the status line display.
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../init.sh"
+
+# Ensure daemon is running (lazy startup)
+if ! _HOOKS_DAEMON_NONBLOCKING_START=true ensure_daemon; then
+    # raw_stdout event (generated; Plan 00189): Claude Code reads this
+    # hook's stdout RAW, so a JSON error here would be taken literally.
+    if [[ "${_HOOKS_DAEMON_STARTING:-false}" == "true" ]]; then
+        # Still starting, not failed: answered, so exit 0.
+        echo "${_HOOKS_DAEMON_STATUS_LOADING_TEXT:-⏳ hooks daemon loading…}"
+        exit 0
+    fi
+    # Diagnostic on stderr; the exit code is the event's (a value: non-zero =
+    # not handled; a display line: 0, as Claude Code blanks a failing one).
+    # This stdout is a DISPLAY line, so the outage stays visible.
+    echo "${_HOOKS_DAEMON_STATUS_DOWN_TEXT:-⚠️ DAEMON FAILED}"
+    echo "HOOKS DAEMON ERROR [daemon_startup_failed]: StatusLine hook: failed to start hooks daemon. Use the hooks-daemon skill to check logs (Skill tool: skill=hooks-daemon, args=logs)" >&2
+    exit 0
+fi
+
+# Plan 00156: no jq. send_request_stdin (status mode) injects
+# hook_event_name=Status into the payload, wraps it into the request envelope,
+# and extracts .text/.error from the daemon response with the same fallback the
+# old `jq -r` produced. Status event returns {"text": "..."} directly.
+send_request_stdin "Status" "status"

@@ -1,0 +1,1186 @@
+version: "2.0"
+
+# Daemon configuration
+daemon:
+  idle_timeout_seconds: 600  # Auto-shutdown after 10 minutes of inactivity
+  log_level: INFO
+  project_root: ../../  # Project root relative to this config file (always ../../)
+
+  stale_file_days: 7  # Remove daemon runtime files older than this (days)
+
+  # Path exclusion for content-scanning blockers (v3.35.0+, Plan 00150)
+  # Gitignore-style globs (*, ?, ** = zero-or-more segments) exempted from ALL
+  # three content blockers at once: security_antipattern, qa_suppression,
+  # error_hiding_blocker. Set once here; each handler inherits it on top of its
+  # own options.exclude_paths and built-in defaults. Use for QA/linting projects
+  # whose fixtures intentionally contain "bad" code. Default: [] (no exclusions).
+  # exclude_paths:
+  #   - "**/fixtures/**"
+  #   - "**/__fixtures__/**"
+  #   - "samples/**"
+
+  # CI enforcement (v2.27.0+) - Controls behaviour when daemon cannot start
+  # Default (false/omitted): fail open — warn once then silently passthrough
+  # When true: fail closed — block all tool use and tell agent to stop
+  # ci_enabled: false
+
+  # Input validation (v2.2.0+) - Catch malformed events at front controller layer
+  input_validation:
+    enabled: true              # Validate hook inputs (recommended)
+    strict_mode: true          # Fail-closed: return errors on validation failures
+    log_validation_errors: true
+  expected_version: "3.69.0"  # daemon version this project expects; `provision.sh` installs exactly this
+
+# Built-in handler configuration
+# Handlers run in priority order (lower number = earlier execution)
+# Priority ranges: 5=test, 10-20=safety, 25-45=workflow, 50-60=tool usage
+handlers:
+  # PreToolUse handlers (run before every tool call)
+  pre_tool_use:
+    # SAFETY HANDLERS (Priority 10-20) - HIGHLY RECOMMENDED
+    destructive_git:       # Blocks git reset --hard, git clean -f, etc
+      enabled: true
+      priority: 10
+
+    daemon_location_guard: # Prevents cd into .claude/hooks-daemon (run commands from project root)
+      enabled: true
+      priority: 11
+
+    sed_blocker:           # Blocks sed command usage (use Edit tool instead)
+      enabled: true
+      priority: 11
+
+    absolute_path:         # Enforces absolute paths in file operations
+      enabled: true
+      priority: 12
+
+    error_hiding_blocker:  # Blocks error-hiding patterns (|| true, empty catch, except: pass, etc.)
+      enabled: true
+      priority: 13
+
+    curl_pipe_shell:       # Blocks dangerous curl | sh patterns
+      enabled: true
+      priority: 14
+
+    security_antipattern:  # Blocks hardcoded secrets and injection patterns
+      enabled: true
+      priority: 15
+
+    write_clobber_guard:   # Blocks Write to an existing file not read this session
+      enabled: true         # New files and Edits are unaffected. `Read` the file to proceed —
+      priority: 16          # that is the remedy, so no escape hatch exists or is needed.
+
+    artifact_publish_blocker:  # Blocks publishing artefacts (a claude.ai URL outside the project)
+      enabled: true         # Read-only `action: "list"` is never blocked. No agent-side escape
+      priority: 14          # hatch by design — only a human sets this to false.
+
+    subagent_cron_delete_blocker:  # A SUBAGENT may not delete a session cron (issue #40)
+      enabled: true         # Wider than "the failsafe cron" on purpose: `session_crons` reaches
+      priority: 14          # Stop, not PreToolUse, so the id here is opaque. Coordinator unaffected.
+
+    usage_pause_tool_gate:  # A usage-paused session may use only CronList/CronDelete/CronCreate (Plan 00479)
+      enabled: true         # Inert unless a usage pause is recorded for the session. The deny halts the turn.
+      priority: 9
+
+    subagent_worktree_write_guard:  # A SUBAGENT working in a linked worktree writes only in it (N264)
+      enabled: true         # Denies Write/Edit/NotebookEdit into a sibling worktree or the main tree.
+      priority: 14          # The coordinator (main thread) and a subagent in the main tree are never judged.
+
+    issue_filing_gate:     # An upstream issue body must come from `hooks-daemon issue-report`
+      enabled: true         # Only `gh issue create` against the DAEMON's public tracker is judged.
+      priority: 14          # Your own repo, and comment/list/view anywhere, are never touched.
+
+    sensitive_content:     # Blocks configured public patterns + a gitignored secret word list
+      enabled: true         # Inert until configured: public_patterns defaults to [] and the
+      priority: 14          # secret word list path defaults to a file that does not exist yet.
+      # options:
+      #   public_patterns:
+      #     - name: example-pattern
+      #       pattern: 'some-safe-to-name-regex'
+      #       description: 'shown in the deny reason -- keep this STRUCTURAL, never a specific identifier'
+      #   secret_word_list_path: .claude/block-words.secret  # gitignored; a match here NEVER discloses the term
+
+    secret_file_guard:     # Protected files' CONTENTS never enter context (Plan 00272)
+      enabled: true         # Default globs: *.secret*, .vault-pass*, *.vault-password,
+      priority: 14          # *vault_pass*, id_rsa, id_ed25519. Metadata via `hooks-daemon secret-meta`.
+      # options:
+      #   mode: additive              # additive (merge onto defaults) | replace (only your list)
+      #   protected_paths:
+      #     - "secrets/prod-token"
+      #   allowed_consumers:          # additive to the shipped Ansible family
+      #     - command: "my-deploy-tool"
+      #       path_flags: ["--secret-file"]
+      #   allow_plain_hash: false     # true also exposes exact size + plain sha256 via secret-meta
+      #   exclude_paths: []           # scopes ONLY the authored-script content scan
+
+    flaggable_content_channel_guard:  # Deny content-revealing git/grep over flaggable paths (Plan 00278)
+      enabled: false        # Opt-in: closes the channel flaggable_work_advisor can only advise about
+      priority: 14
+      # options:
+      #   flaggable_path_globs: ["firewall/**"]
+      #   extra_content_revealing_patterns: ['^git\s+blame\b']  # always additive, never replaces the built-in shapes
+      #   mode: additive  # or: replace (governs only flaggable_path_globs)
+
+    quarantine_artefact_read_guard:  # Deny reading a *-opus-security-DETAIL* artefact (Plan 00278)
+      enabled: false        # Opt-in; pre-seeded, so enabling needs no further config
+      priority: 14
+      # options:
+      #   quarantine_artefact_globs: ["*-project-quarantine-RAW*"]
+      #   mode: additive  # or: replace
+
+    root_recursion_guard:  # Blocks recursive scans (grep -r, find, rg) rooted at / /proc /sys ~ $HOME
+      enabled: true
+      priority: 13  # Before secret_file_guard (14): judges text only, so no tree walk for a catastrophic root
+
+    # Blocks a pgrep -f / pkill -f / ps|grep probe whose literal pattern is in
+    # the calling shell's own argv, so the probe always finds itself and a
+    # waiter never returns. Advisory beside it: an uncapped while/until wait.
+    self_matching_process_probe:
+      enabled: true
+      priority: 17
+
+    pipe_blocker:          # Blocks dangerous pipe patterns in bash commands
+      enabled: true
+      priority: 15
+
+    dangerous_permissions: # Warns about dangerous file permission changes
+      enabled: true
+      priority: 18
+
+    git_stash:             # BLOCKS git stash creation by default (stashes get lost).
+      enabled: true        # Escape hatch: MUST_STASH_BECAUSE="reason"; git stash
+      priority: 17
+      # options:
+      #   mode: deny       # deny (default) | warn (advisory only)
+
+    github_auto_close_keywords: # BLOCKS GitHub auto-closing keyword refs (Fixes #N,
+      enabled: true             # closes GH-N, resolves owner/repo#N, issue URLs) in
+      priority: 18              # git commit/merge/tag messages, incl. -F files.
+      # options:                # No escape hatch: disable if auto-close is wanted
+      #   mode: block           # block (default) | warn (advisory only)
+
+    git_message_backtick:  # BLOCKS backticks in a DOUBLE-quoted git -m/--message.
+      enabled: true        # Bash substitutes them: the span is executed and its
+      priority: 20         # stdout replaces the text, silently. Use single quotes
+                           # or -F <file>. Escaped \` and 'single quotes' are fine.
+
+    ancestry_preserving_merge: # BLOCKS git merge --squash / gh pr merge --squash|--rebase (severs ancestry).
+      enabled: true             # Escape hatch: MUST_SQUASH_BECAUSE="reason"; git merge --squash <branch>
+      priority: 19
+      # options:
+      #   mode: block            # block (default) | warn (advisory only)
+
+    merge_to_main_approval: # A human approves the parent-to-main merge when
+      enabled: false         # worktree.merge_to_main_requires_human_approval is true (Plan 00367)
+      priority: 20            # Enable for worktree-based projects; inert until the key is true
+
+    lock_file_edit_blocker: # Prevents editing package lock files
+      enabled: true
+      priority: 19
+
+    pip_break_system:      # Blocks pip commands that break system packages
+      enabled: true
+      priority: 20
+
+    sudo_pip:              # Blocks sudo pip (use venv instead)
+      enabled: true
+      priority: 21
+
+    host_command_guard:    # docker run -v /:/host, gh auth token; HUMAN ONLY: non-PyPI pip index, crontab -r
+      enabled: true         # No agent-side escape hatch: only a human sets this to false.
+      priority: 21
+
+    write_protected_paths: # Paths agents may READ but never create, change, move onto or delete (IaC- or human-maintained files)
+      enabled: false        # Opt-in: does nothing until `paths` lists something.
+      priority: 18
+      options:
+        paths: []           # Repository-relative globs, e.g. [".claude/ccy/ccy.env.local", "deploy/*.env"]
+
+    ask_user_question_blocker: # Blocks AskUserQuestion so Claude works autonomously (for unattended workflows)
+      enabled: false           # Enable for fully unattended operation
+      priority: 23
+
+    worktree_file_copy:    # Prevents copying files between git worktrees
+      enabled: true
+      priority: 16
+
+    project_containment:   # Nothing is written outside the repository root
+      enabled: true
+      priority: 14
+      options:
+        # Absolute paths outside the repo that a write may still target.
+        # Empty by default: a declared exemption is a decision, an assumed
+        # one is a hole. Scratch belongs in untracked/scratch/ instead.
+        allowed_external_paths: []
+        # Claude Code's own state directory ($CLAUDE_CONFIG_DIR, else
+        # ~/.claude). Allowed by default -- it is not scratch, and where it is
+        # mapped into a bind mount it is durable. Set false if yours is not.
+        allow_claude_home: true
+
+    # CODE QUALITY HANDLERS (Priority 25-45) - Optional but recommended
+    qa_suppression:        # Unified multi-language QA suppression blocker (11 languages)
+      enabled: true        # Go: CLAUDE.md forbids //nolint and suppressions
+      priority: 30
+      options:
+        languages:         # Restrict to specific languages (default: ALL)
+          - Go
+
+    comment_changelog:     # Blocks changelog narrative accumulating in a code comment
+      enabled: true        # Comment hygiene: history belongs in git
+      priority: 31
+      # options:
+      #   max_history_entries: 1   # more than this many dated/versioned entries advises
+      #   mode: block               # block | warn
+
+    comment_size:          # Caps over-long comments, tiered like plan-doc-size
+      enabled: true        # Comment hygiene: keep Go comments short
+      priority: 33
+      # options:
+      #   max_comment_line_chars: 400
+      #   max_comment_block_lines: 40
+      #   mode: block               # block | warn
+
+    subagent_full_qa_blocker:  # A SUB-AGENT may not start a full-suite QA run; the coordinator runs it
+      enabled: false       # Opt-in, and inert until you declare full_qa_patterns. Main thread unaffected.
+      priority: 32
+      # options:
+      #   full_qa_patterns:             # matched on the PROGRAM a command runs, never as a substring
+      #     - id: pytest-whole-suite
+      #       command: pytest           # basename of the script, binary or `python -m` module
+      #       full_args: [tests, .]     # operands that make it the whole suite (omit: every run is full)
+      #       bare_is_full: true        # a run naming no path is the whole suite too
+      #       option_grammar: pytest    # pytest's full option set: a value is never a path
+      #       read_only_flags: [--collect-only]
+      #   exempt_agent_types:           # agent DEFINITION types that may run the full gate, one at a time
+      #     - my-qa-runner              # exact names; needs agent_dispatch_recorder enabled for named dispatches
+      #   targeted_qa_commands:         # named in the deny as what to run instead
+      #     - pytest <explicit test files>
+
+    bash_safe_mode:  # Require a `set` safety prelude (or && chaining) on sequenced Bash
+      enabled: true        # Ships ON and blocking; opt out with enabled: false or mode: warn
+      priority: 36
+      # options:
+      #   mode: block             # block (default) | warn (inject is reserved and rejected at load)
+      #   require:                # each independently requirable
+      #     - errexit             # set -e
+      #     - pipefail            # set -o pipefail
+      #     # - nounset           # set -u; off-default (breaks $OPTIONAL_VAR probing)
+      #   min_statements: 2       # single statements and pure && chains never flagged
+      #   only_with_mutator: false  # true scopes to mutator-bearing commands
+      #   exempt_patterns: []     # additive regexes over the whole command
+    verification_result_gate:  # Flags a verifier whose exit status nothing consumes
+      enabled: true        # Advisory: warns when go vet/test/qa could fail and a commit still run
+      priority: 34
+      # options:
+      #   mode: warn              # warn | block — ships advisory
+      #   extra_verifiers:        # additive; literal command names, never regexes
+      #     - "my-project-check"
+      #   extra_mutators:
+      #     - "terraform apply"
+
+    # Requires provenance frontmatter on every file in the remote-docs tree
+    # (source_url, fetched_at, fidelity, source_sha256, licence, stale_after).
+    # Inert until that tree exists — vendor a page with `remote-docs add <url>`.
+    remote_docs_provenance:
+      enabled: true
+      priority: 36
+
+    # Routes a WebFetch to the vendored copy when one exists and is fresh.
+    # Inert until the remote-docs tree exists.
+    remote_docs_routing:
+      enabled: true
+      priority: 37
+
+    # Backstop: a remote-docs file authored through Bash never reaches the
+    # write-time gate, so the index is checked at commit time.
+    remote_docs_commit_gate:
+      enabled: true
+      priority: 38
+
+    tdd_enforcement:       # Enforces test-first development
+      enabled: true        # CLAUDE.md method: tests first; Go uses collocated foo_test.go
+      priority: 32
+
+    lsp_enforcement:       # Steers LLMs toward LSP tools instead of Grep/Bash grep
+      enabled: false       # Enable once a code intelligence plugin is installed
+      priority: 38
+      options:
+        mode: block_once       # advisory | block_once | strict
+        no_lsp_mode: advisory  # advisory | block | disable (no enabled plugin serves the file type)
+
+    reference_repo_freshness:  # Gates a READ of a stale reference clone (Plan 00401)
+      enabled: true            # Silent unless the project actually governs repos
+      priority: 39             # After lsp_enforcement, before the workflow 40s
+      # Cache-only — this handler never touches the network. Scope, enforcement
+      # posture and auto-pull live in the TOP-LEVEL `reference_repos:` block,
+      # not here: one block feeds the session sweep, this backstop and the
+      # `reference-repos` CLI, so the three cannot disagree with each other.
+
+    # WORKFLOW HANDLERS (Priority 30-50) - Enable based on your workflow
+    plan_number_helper:    # Provides correct next plan number
+      enabled: true        # CLAUDE/Plan/ structure in use
+      priority: 33
+      # Plan directory is the top-level plan_workflow.directory (single source
+      # of truth) — no per-handler track_plans_in_project needed.
+
+    plan_journal_guard:    # A JOURNAL/ entry goes through `mkplan.bash --journal` (UTC-stamped)
+      enabled: true        # Inert unless plan_workflow is on and mkplan.bash --journal is deployed
+      priority: 31
+
+    plan_status_snapshot:  # Records a PLAN.md's pre-write status for post_tool_use.goal_injection to consume as ground truth
+      enabled: true         # On by default (opt-out) -- RV4-m4: goal_injection needs this to avoid its own inference fallback
+      priority: 30
+
+    agent_isolation_advisor:  # Advises worktree isolation when agents share a checkout
+      enabled: false          # Enable if you dispatch concurrent agents
+      priority: 46
+
+    agent_dispatch_recorder:  # Records name -> subagent_type of a named Agent dispatch; silent, never blocks
+      enabled: true           # Needed by subagent_full_qa_blocker's exempt_agent_types for named agents
+      priority: 46
+
+    installed_plugin_edit_advisor:  # Advises when a write lands in an installed Claude Code plugin's files
+      enabled: true
+      priority: 42
+
+    dispatch_declaration:  # Advises/enforces a file-handoff declaration on Task dispatch
+      enabled: true          # On by default (Plan 00307 Task 4.3); set false to opt out
+      priority: 48
+      options:
+        strict: false                        # true denies an undeclared dispatch instead of advising
+        fallback_report_dir: "untracked/agent-reports/"  # used when a dispatch is genuinely plan-less
+
+    gh_issue_comments:     # Requires --comments flag for gh issue view
+      enabled: true
+      priority: 40
+
+    github_issue_assignment_guard:  # Issue-tied work needs the issue assigned to you and opened by an approved author
+      enabled: false        # Opt-in. `bin/hooks-daemon issue-validity N --claim` claims an unassigned issue.
+      priority: 53
+      options:
+        auto_claim: false   # true lets the hook claim an unassigned issue itself (default: the agent runs the CLI)
+        approved_issue_authors: []   # GitHub logins (case-insensitive); empty = the author check does not apply
+
+    gh_pr_comments:        # Requires --comments flag for gh pr view
+      enabled: true
+      priority: 40
+
+    global_npm_advisor:    # Advises against global npm installs
+      enabled: true
+      priority: 42
+
+    conflict_marker_commit_gate:  # Deny a commit adding a merge-conflict marker, raw or disguised (Plan 00466 N211)
+      enabled: true
+      priority: 42
+      options:
+        # Globs for files that must hold a DOCUMENTED marker example; unioned
+        # with daemon.exclude_paths. A fenced example is judged like any line.
+        exclude_paths: []
+
+    staged_lint_gate:      # Cheap syntax-check backstop over staged files on git commit (Plan 00268)
+      enabled: false       # Enable to catch a file that reaches the index via a route Write/Edit never sees
+      priority: 43
+      # options:
+      #   mode: warn              # warn | block — ships advisory while the rollout settles
+      #   max_files: 20            # stand down (advisory only) above this many staged lintable files
+
+    plan_close_approval:   # A human closes a plan when plan_workflow.close_requires_human_approval is true (Plan 00367)
+      enabled: true        # Inert until plan_workflow.close_requires_human_approval is true
+      priority: 43
+
+    plan_qa_edit:          # Stage 1 plan QA lint on PLAN.md writes (Plan 00144)
+      enabled: true        # Policy under plan_workflow.qa
+      priority: 44
+
+    plan_qa_commit_gate:   # Stage 2 cross-file plan checks on git commit (Plan 00144)
+      enabled: true        # Warn-first via plan_workflow.qa
+      priority: 44
+
+    plan_time_estimates:   # Blocks time estimates in plan files
+      enabled: true        # CLAUDE/Plan/ structure in use
+      priority: 45
+
+    plan_workflow:         # Provides guidance when creating plans
+      enabled: true        # CLAUDE/Plan/ structure in use
+      priority: 44
+
+    docs_qa_edit:          # EDIT-stage docs QA lint on documentation writes (Plan 00284)
+      enabled: true        # Policy under documentation.qa
+      priority: 47
+
+    docs_qa_commit_gate:   # STAGED docs QA gate on git commit (Plan 00284)
+      enabled: true        # Warn-first via documentation.qa
+      priority: 47
+
+    guard_config_commit_gate:  # Guard weakenings named at commit time (Plan 00412 class 2a)
+      enabled: true        # Reports only -- never denies, so it costs nothing when nothing is weakened
+      priority: 49
+
+    validate_instruction_content: # Blocks ephemeral content in CLAUDE.md/README.md
+      enabled: false       # Enable to prevent implementation logs in instruction files
+      priority: 49
+
+    npm_command:           # Restricts npm commands to approved list
+      enabled: false       # Enable for strict npm usage control
+      priority: 50
+
+    markdown_organization: # Enforces markdown file organization rules & plan tracking
+      enabled: false       # Enable for md organization + plan tracking
+      priority: 51
+      # Docs: docs/guides/handlers/markdown_organization.md
+      options:
+        # Plan tracking is configured at the top-level plan_workflow: block
+        # (single source of truth). Set plan_workflow.enabled: true there to
+        # enable plan tracking for this handler — no per-handler option needed.
+        #
+        # Sub-project support: declared at the top-level `projects:` block, NOT
+        # here. Sub-projects get the same organization rules as the root
+        # project. See CLAUDE/Code/WorkspaceResolution.md, e.g.:
+        #   projects:
+        #     - name: frontend
+        #       root: packages/frontend
+        #     - name: backend
+        #       root: packages/backend
+        #
+        # (Removed in Plan 00300's hard cutover: `monorepo_subproject_patterns`
+        # regex patterns. Its presence in config is now a hard startup error.)
+        #
+        # Custom allowed markdown paths: OVERRIDES all built-in path rules.
+        # Each entry is a regex matched against the project-relative path.
+        # In monorepos, patterns match AFTER sub-project prefix stripping (same
+        # rules apply to root and all sub-projects). See HANDLER_REFERENCE.md.
+        # CLAUDE.md, README.md, CHANGELOG.md are always allowed regardless.
+        # Built-in defaults (used when this option is absent):
+        #   allowed_markdown_paths:
+        #     - "^CLAUDE/.*\\.md$"                              # LLM documentation
+        #     - "^docs/.*\\.md$"                                # Human-facing docs
+        #     - "^untracked/.*\\.md$"                           # Temporary docs
+        #     - "^RELEASES/.*\\.md$"                            # Release notes
+        #     - "^eslint-rules/.*\\.md$"                        # ESLint rule docs
+        #     - "^src/claude_code_hooks_daemon/guides/.*\\.md$" # Shipped guides
+        allowed_markdown_paths: null
+
+    # TOOL USAGE HANDLERS (Priority 50-60)
+    web_search_year:       # Fixes year in web search queries (uses current year)
+      enabled: true
+      priority: 55
+
+    merge_qa_advisor:      # Advises the static checks when a merged work branch has no recorded green llm_qa.py changed run (Plan 00475 Task 4.2)
+      enabled: true        # Advisory only; silent when the head's green run is recorded or git cannot answer
+      priority: 59
+
+    daemon_docs_guard:     # Warns when reading from hooks-daemon internal CLAUDE/ docs (wrong directory)
+      enabled: true
+      priority: 57
+
+    flaggable_work_advisor:  # Delegate-first advisory for safeguard-flaggable work (Plan 00278)
+      enabled: false          # Opt-in: enable in projects whose content can trip a safety classifier
+      priority: 58
+      # options:
+      #   flaggable_path_globs: ["firewall/**"]
+      #   flaggable_topic_terms: ["tarpit"]      # extends the built-in seed (mode: additive)
+      #   quarantine_agent: hooks-daemon-opus-security
+      #   mode: additive  # or: replace
+
+    british_english:       # Warns about American English spelling
+      enabled: false       # Enable if you prefer British English
+      priority: 60
+
+  # PostToolUse handlers (run after tool execution)
+  post_tool_use:
+    lint_on_edit:              # Language-aware lint validation after Write/Edit
+      enabled: true            # gofmt/go vet on every Go write; shellcheck on scripts/*.sh
+      priority: 25
+      options:
+        languages:
+          - Go
+          - Shell
+      # options:
+      #   timeouts:              # Per-language extended-lint timeout override (seconds), default 15
+      #     PHP: 30              # e.g. a slow/cold-cache extended linter wrapper
+
+    git_hooks_executable_fixer:  # Auto-chmod +x git hooks git skipped as non-executable
+      enabled: true
+      priority: 26
+
+    background_process_tracker:  # Tracks backgrounded processes; advises harvest-background + watchdog cron (never kills)
+      enabled: true              # On by default (opt-out); advisory-only and rate-limited. Set false to disable.
+      priority: 27
+
+    command_hints:  # Config-driven advisory reminder after a configured command (e.g. agent-browser -> close session)
+      enabled: true  # On by default (opt-out); advisory-only, never blocks. Set false to disable.
+      priority: 28
+      # options:
+      #   mode: additive          # additive (default) | replace
+      #   hints:
+      #     - id: agent-browser-close-session   # overrides the built-in hint of the same id
+      #       pattern: "agent-browser"
+      #       hint: "Custom reminder text"
+      #       ttl_seconds: 1800
+
+    recovery_cron_advisor:  # Advises on failsafe recovery cron lifecycle (creation, progress, completion)
+      enabled: true         # On by default (opt-out); advisory-only, fires only on CLAUDE/Plan/*/PLAN.md writes. Set false to disable.
+      priority: 29
+
+    goal_injection:  # Writes <session>.goal-intent for the ccy PTY supervisor when a plan flips to In Progress (Plan 00269)
+      enabled: false  # Opt-in: only useful when a supervisor is watching. Manual fallback: bin/hooks-daemon inject-goal NNNNN
+      priority: 30  # Ledger 00466 RV6-M1: MUST stay below markdown_table_formatter's priority
+      # options:
+      #   mode: additive                  # additive (default) | replace (fixed header line always kept)
+      #   once_per_plan_per_session: true
+      #   lines:
+      #     - id: subagents-encouraged    # enable a vetted built-in line without restating its text
+      #       enabled: true
+      #     - id: project-motto
+      #       text: "All findings are logged to {plan_path}/REPORTS/."
+
+    markdown_table_formatter:  # Auto-format markdown tables via mdformat + mdformat-gfm
+      enabled: false           # Enable for automatic markdown table alignment
+      priority: 31  # Ledger 00466 RV6-M1: MUST stay above goal_injection's priority
+
+    budget_exhaustion_detector:  # Advisory on a WebSearch budget-refusal or a sub-agent usage-limit termination (channel-scoped) (Plan 00315)
+      enabled: true   # On by default (opt-out); advisory-only, never blocks.
+      priority: 32
+      # options:
+      #   excluded_tools: [Read, Grep, Glob, Edit, Write, NotebookEdit, Bash]  # tools whose response is never scanned (default shown)
+      #   extra_patterns: []                   # additional regexes, additive to the built-in family; also applies to Task/Agent results
+
+    model_downgrade_recorder:  # Publish Claude Code's own automatic model-downgrade record (Plan 00328)
+      enabled: true   # On by default (opt-out); silent, and writes nothing unless a downgrade happened.
+      priority: 33
+      # Turning this OFF disables the ccy supervisor's model auto-restore: the
+      # restore arms only on this signal, so that a model YOU pick is never
+      # overridden. The supervisor says so in its decision log rather than
+      # going quiet.
+      # options:
+      #   tail_bytes: 1048576                  # bounded transcript tail scanned per tool call (default shown)
+
+    merge_qa_report:  # Post-hoc plan/docs QA report on what a git merge/pull/rebase introduced (Plan 00373)
+      enabled: true   # On by default; silent unless plan/docs QA sweeps are active AND the operation introduced attributable drift.
+      priority: 34
+
+    daemon_sync_after_merge:  # A pull can bring in daemon config the running daemon never loads (Plan 00389)
+      enabled: true   # On by default; silent unless the operation actually changed daemon config or handler code.
+      priority: 35
+      # options:
+      #   watch_paths:                      # Handler-code locations whose change makes the daemon stale.
+      #     - ".claude/project-handlers"     # Default. The config file itself is always watched, resolved
+      #                                      # from the running daemon. SET THIS if your project uses a
+      #                                      # non-default `project_handlers.path` -- it is not injected
+      #                                      # here, so the default would watch the wrong directory.
+
+    cron_record_keeper:  # Record when each CronCreate happened and forget each CronDelete, so the stop enforcers can refresh a job before the 7-day expiry (Plan 00470)
+      enabled: true   # On by default; silent bookkeeping in cron-records.json in the daemon's untracked directory, never blocks. The refresh in cron_stop_enforcer relies on it.
+      priority: 36
+
+    plan_fact_check_feed:  # Debounces plan edits; on the next tool call tells the session to dispatch hooks-daemon-plan-fact-checker on the diff (Plan 00480)
+      enabled: false  # Opt-in: each quiet plan edit asks the session to spend one agent run; never blocks
+      priority: 37
+      # options:
+      #   quiet_seconds: 5.0  # quiet period after the last edit to a plan before it fires
+
+    operator_signal_notice:  # A pending host reboot/shutdown warning reaches a busy agent at its next tool call (Plan 00508)
+      enabled: true   # On by default; adds the warning as context once per signal in each agent thread, never touches the signal file, never blocks
+      priority: 38
+
+    validate_eslint_on_write:  # Runs ESLint after file writes
+      enabled: false           # Enable for automatic ESLint validation
+      priority: 20
+
+  # PostToolUseFailure handlers (run when a tool call fails)
+  post_tool_use_failure:
+    agent_terminated_early_failure_detector:  # A foreground Agent/Task dispatch killed by a usage limit surfaces here (its error field), never on PostToolUse (Plan 00466 ledger 16 N46)
+      enabled: true   # On by default (opt-out); advisory-only, never blocks.
+      priority: 10
+
+  # SessionStart handlers (run when session starts)
+  session_start:
+    disclosure_reset_session_start:  # Reset per-agent rule-disclosure state on every SessionStart (Plan 00116 Phase 4)
+      enabled: true
+      priority: 15
+
+    autonomy_notice:  # Says once that autonomy is off in this environment, and why (Plan 00498)
+      enabled: true   # Advisory only; silent wherever the top-level `autonomy:` block allows autonomy
+      priority: 47
+
+    work_queue_rebrief:  # On resume/compact, list the agents the durable work queue records as running (Plan 00470 Task 3.3)
+      enabled: true      # Advisory only; silent unless a queue exists and something is running
+      priority: 48
+
+    guard_config_drift:  # Report an uncommitted config change that weakens a guard (Plan 00412)
+      enabled: true      # Silent unless this file differs from its committed form
+      priority: 49       # Ahead of every other advisory: they are all conditional on the guards being live
+
+    project_handler_load_checker:  # Loud alert when project handlers fail to load (Plan 00143)
+      enabled: true                 # Silent unless a project handler was skipped at startup
+      priority: 50
+
+    hook_registration_checker:  # Validates hook registrations in Claude Code settings
+      enabled: true             # Alerts when expected hooks are missing or misconfigured
+      priority: 51
+
+    plugin_hooks_advisor:  # Names enabled Claude Code plugins that ship hooks
+      enabled: true        # Never blocks; singles out PreToolUse hooks
+      priority: 51
+      options:
+        acknowledged_plugins: []  # Plugin ids (name@marketplace) the user has accepted
+
+    optimal_config_checker:  # Checks Claude Code env for optimal settings
+      enabled: true
+      priority: 52
+
+    git_filemode_checker:  # Warns when git core.fileMode=false (hooks lose exec perms)
+      enabled: true
+      priority: 53
+
+    gitignore_safety_checker:  # Warns when required .claude/ paths are missing from .gitignore
+      enabled: true            # Uses content-hash cache - only re-checks when .gitignore changes
+      priority: 54
+
+    git_upstream_checker:  # Full fetch + pull policy on session start (Plan 00178)
+      enabled: true        # New sessions only; silent unless the branch is behind upstream
+      priority: 56
+      options:
+        mode: warn         # warn | agent-pull | auto-pull
+        auto_fetch: true   # run additive `git fetch --all --no-prune` before checking ahead/behind
+
+    branch_count_advisor:  # Names open worktree-* branches beyond the limit or far behind main (Plan 00475)
+      enabled: true        # New sessions only; advisory, silent when within both limits
+      priority: 56
+      options:
+        max_open_branches: 3         # At most this many open worktree-* branches
+        behind_main_threshold: 50    # Name a work branch more than this many commits behind main
+
+    reference_repo_sweep:  # Freshness of reference clones under untracked/repos (Plan 00401)
+      enabled: true        # New sessions only; silent when every governed repo is current
+      priority: 71         # Last: the only SessionStart handler that fetches for SEVERAL repos
+      # Scope, enforcement posture and auto-pull live in the TOP-LEVEL
+      # `reference_repos:` block, not here — one block feeds the sweep, the
+      # PreToolUse backstop and the CLI, so the three cannot disagree.
+
+    routine_qa_sweep:  # Recurring work that has stopped recurring (Plan 00412)
+      enabled: false   # Opt-in: most projects have no CLAUDE/Routine/ tree
+      priority: 72     # Before session_actions_directive, which must stay last
+      # The dead-man's switch. A run that never happened writes no record, so
+      # its absence cannot be seen in the records themselves — something
+      # outside them has to assert it, and this is that something. Silent
+      # when the tree is clean. Re-check with `hooks-daemon routine-qa`.
+
+    session_actions_directive:  # The must-do list arrives as a TURN, not as context (Plan 00416)
+      enabled: false            # Opt-in: it types one line into your terminal via the ccy supervisor
+      priority: 73              # Last: counts what is STILL ACTION_REQUIRED after every other
+                                # handler has run (hook_registration_checker self-heals in its own).
+      # Writes a `<session>.session-actions` signal ONLY when a SessionStart
+      # verifier is currently failing AND an armed ccy supervisor is live to
+      # read it. Adds nothing to the session-start block itself — the whole
+      # point is the second channel, so saying it twice would dilute both.
+
+    suggest_status_line:  # Suggests daemon-based status line setup
+      enabled: true      # Recommends status line if not configured
+      priority: 55
+
+    version_check:  # Checks if daemon is up-to-date with latest release
+      enabled: true  # Notifies on new sessions if updates available (24h cache)
+      priority: 56
+
+    plan_qa_sweep:  # Plan-tree drift report at session start (Plan 00144; silent when clean)
+      enabled: true  # Policy lives under the top-level plan_workflow.qa section
+      priority: 57
+
+    ccy_supervisor_integrity:  # Warns when the ccy supervisor is armed but its files are unsafe (Plan 00148)
+      enabled: true            # Silent unless .claude/ccy/ is a ccy project with an armed ccy.env
+      priority: 58
+
+    plan_workflow_asset_checker:  # Advise deploy-plan-workflow when mkplan.bash is missing (Plan 00185)
+      enabled: true               # Silent unless plan_workflow enabled AND mkplan.bash absent
+      priority: 59
+
+    deployed_artefact_drift:  # Report a deployed daemon-owned file that no longer matches its template (Plan 00377 N6)
+      enabled: true           # Silent unless a PRESENT artefact differs; absence is plan_workflow_asset_checker's report
+      priority: 59
+
+    contract_staleness:  # Advise a hooks-contract refresh when Claude Code outruns the vendored audit (Plan 00271)
+      enabled: true      # Silent unless installed Claude Code > META.json last_audited_claude_code_version
+      priority: 60
+
+    remote_docs_staleness:  # Report vendored docs past their stale_after date (Plan 00326)
+      enabled: true         # Silent unless the remote-docs tree exists and something is stale
+      priority: 68
+
+    skill_opportunity_detector:  # TTL-gated advisory: run `bin/hooks-daemon skill-scan` (Plan 00274)
+      enabled: false             # Opt-in: the scan reads this machine's session transcripts
+      priority: 61
+      options:
+        check_interval_days: 7       # Advisory cadence floor; never advises more often
+        transcript_window_days: 14   # Only transcript files modified inside this window are read
+        model: haiku                 # Passed to headless `claude -p --model` (CLI auth only, v1)
+        max_prompts: 100             # Digest cluster cap (bounds model input tokens)
+        extra_exclude_patterns: []   # Additional content-level noise markers, additive
+        # transcript_dir: /path/override   # Test/unusual-layout override of ~/.claude/projects/<slug>
+
+    secret_file_hygiene_checker:  # On-disk hygiene for protected paths (Plan 00272 Task 6.1)
+      enabled: true                # gitignore/tracked/permissions -- never reads content
+      priority: 62
+
+    model_fallback_detector:  # Opt-in: loud SessionStart alert on a recorded model fallback (Plan 00278)
+      # Probably leave this OFF. A SessionStart scan reports a fallback that
+      # already happened, so for a project that never does safeguard-flaggable
+      # work it essentially never fires, and when it does it is noisy (one
+      # snapshot file per distinct record). The `downgrade_indicator` status
+      # line (enabled above) shows a LIVE downgrade instead. Enable this only
+      # to capture diagnostic snapshots for tuning delegation config.
+      enabled: false
+      priority: 63
+      # options:
+      #   snapshot_enabled: true
+      #   snapshot_dir: untracked/reports
+      #   snapshot_window_records: 20
+
+    docs_qa_sweep:  # Whole-corpus docs drift report at session start (Plan 00284; silent when clean)
+      enabled: false  # Enable via top-level documentation.enabled: true; also builds/refreshes the corpus index
+      priority: 64
+
+    unproven_venv_advisor:  # List venvs the code cannot prove stale, with evidence and the removal command (Plan 00517)
+      enabled: true  # Advisory only, never removes; silent when there are none
+      priority: 72
+
+    tool_disable_advisor:  # Check tool_policy.never_want tools against project settings (Plan 00293)
+      enabled: false  # Opt-in; advisory only, never edits settings; inert without tool_policy.never_want entries
+      priority: 65
+
+    monorepo_detector:  # Advise on an unconfigured monorepo shape (manifests found below the repo root, none at it) (Plan 00298)
+      enabled: true  # Advisory only, never resolves a boundary; silent when projects: already declared
+      priority: 66
+
+    config_optimisation_reminder:  # Remind to re-run /optimise after an upgrade (Plan 00308)
+      enabled: true  # Advisory only; silent once a run is recorded against the current version
+      priority: 67
+
+    lsp_noise_checker:  # Every supported language's server must exclude every tree that is not project code; stale langserver (Plan 00368)
+      enabled: true     # Python, TypeScript/JavaScript, Go, Rust, PHP; advisory, silent when the exclude is complete and no server predates it
+      priority: 69
+
+    persistent_cron_assertor:  # Re-state the crons declared under persistent_crons so a new session can re-create them (Plan 00384)
+      enabled: true            # Silent unless persistent_crons.enabled AND a job is declared; Claude Code crons are session-only, so they need re-creating each session
+      priority: 70
+
+    failsafe_cron_session_advisor:  # The failsafe recovery cron from session start, not from the first plan write (Plan 00394)
+      enabled: true                 # New sessions only; follows recovery_cron_advisor's switch; silent when the failsafe is declared under persistent_crons
+      priority: 70
+
+  # PreCompact handlers (run before conversation compaction)
+  pre_compact:
+    disclosure_reset_pre_compact:  # Reset per-agent rule-disclosure state before compaction (Plan 00116 Phase 4)
+      enabled: true
+      priority: 15
+
+    compaction_signal:  # Drops <session>.compacting for the PTY supervisor (opt-in)
+      enabled: false
+      priority: 20
+
+  # UserPromptSubmit handlers (run when user submits prompt)
+  user_prompt_submit:
+    usage_pause_gate:  # Pauses the session at its host usage ceiling, holds the pause, resumes it (Plan 00479)
+      enabled: true    # Inert unless `hosts:` gives this host a usage_ceiling; never terminal
+      priority: 9
+
+    git_context_injector:  # Injects git context into user prompts
+      enabled: true
+      priority: 10
+
+    failsafe_cron_blockage_suppressor:  # Suppress a delivered failsafe-cron tick while the session is blocked only on human input (Plan 00298)
+      enabled: true  # On by default (dogfooding purpose); never terminal
+      priority: 37
+
+    stop_failure_resolver:  # A later prompt resolves the session's recorded StopFailure, so the status line drops its chip (Plan 00470)
+      enabled: true  # Silent bookkeeping; never terminal
+      priority: 38
+
+    limit_rebrief:  # One-shot re-brief after a usage-limit resume; names a background/teammate agent a limit killed (Plan 00470)
+      enabled: true  # Never denies; never terminal
+      priority: 39
+
+    critical_thinking_advisory:  # Periodic advisory encouraging critical evaluation
+      enabled: false              # Enable for critical thinking nudges on substantial prompts
+      priority: 55
+
+    idle_housekeeping_advisory:  # BETA: report-first idle housekeeping (Plan 00161)
+      enabled: false             # Opt-in beta - leave off unless trying it. See docs/guides/CREATING_REPORTS.md
+      priority: 56
+      options:
+        # Plan 00470 Task 4.2: the report also names stale worktrees and daemons
+        # with the exact cleanup command for each. It never runs them, and says
+        # nothing when nothing is stale.
+        report_stale_checkouts: true  # false drops the stale worktree/daemon section
+        base_branch: main             # a worktree whose branch is merged into this is stale
+        stale_worktree_days: 7        # a worktree whose branch has no commit for this many days is stale
+        # Plan 00470 Task 4.1 follow-ups: report-only, nothing is ever deleted. Each
+        # finding prints the command a human may choose to run.
+        report_stale_scratch: true    # false drops the old untracked/scratch/ files section
+        stale_scratch_days: 14        # a scratch file not modified for this many days is old (integer >= 1)
+        report_gone_branch_refs: true # false drops the refs/integration/changed-green/* of deleted branches
+
+    standing_authorisations:  # Replay a standing request THIS project recorded (Plan 00223)
+      # The HANDLER ships on so the options are discoverable; every
+      # AUTHORISATION below ships off, so this is inert until you opt in.
+      # Deliberate: every other default-on handler ADDS a restriction, this
+      # one relaxes one, and the daemon must never assert consent nobody gave.
+      enabled: true
+      priority: 57
+      options:
+        authorisations:
+          # Set enabled: true to record the request. It is then replayed on
+          # each prompt, naming this file so it can be audited and withdrawn.
+          - id: subagent-delegation
+            enabled: false
+          - id: workflow-orchestration
+            enabled: false
+          - id: commit-push-cadence
+            enabled: false
+
+    daemon_upgrade_detector:  # Notice the INSTALLED daemon version changing underneath a running process (Plan 00395)
+      # Compares what this process loaded against `.daemon-metadata.json` in
+      # the CURRENT venv, re-resolved fresh every turn. Silent when they
+      # match; advises a restart (never self-restarts) when they differ.
+      # Dormant when daemon.self_install_mode is true -- only a client
+      # install with a deployed clone can be upgraded underneath it.
+      enabled: true
+      priority: 58
+
+  # Other hook events
+  permission_request:
+    auto_approve_reads:  # Auto-approves read-only file operations
+      enabled: true
+      priority: 10
+
+  # cron_stop_enforcer sits BELOW auto_continue_stop's priority 10 deliberately
+  # (see priority: 7), so it is not shadowed -- a handler placed above it would
+  # never run on the common stop that lacks a `STOPPING BECAUSE:` line. It is
+  # also non-terminal, so its own near-universal match cannot shadow
+  # auto_continue_stop in turn. See
+  # tests/integration/test_stop_chain_terminal_shadowing.py.
+  stop:
+    idle_workable_issue_stop_gate:  # Refuses an idle stop while a workable issue is cached and nothing is in flight (Plan 00470 Phase 7)
+      enabled: true         # Inert unless the project declares an `issue-sdlc` persistent cron job; never terminal
+      priority: 4
+      # options:
+      #   job_id: issue-sdlc          # The declared persistent_crons job whose idle stops are judged
+      #   max_cache_age_hours: 2      # A workable-issues cache older than this is not trusted
+      #   marker_expiry_hours: 24     # How long an [awaiting-human] marker keeps the gate aside
+
+    usage_pause_stop_gate:  # A usage-paused session stops only once its crons are exactly the one resume cron (Plan 00479)
+      enabled: true         # Inert unless a usage pause is recorded for the session; never terminal
+      priority: 6
+
+    cron_stop_enforcer:  # Blocks a stop while a declared persistent_crons job is verified missing, or is due a refresh (Plan 00416, 00470)
+      enabled: true       # Silent unless persistent_crons.enabled AND a job is declared
+      priority: 7
+      # options:
+      #   refresh_after_days: 6   # A live declared job older than this is refreshed (CronDelete + CronCreate) before the 7-day expiry; must be above 0 and below 7
+
+    teammate_reap_advisor:  # Reports the Stop payload's background_tasks count and names TaskStop (Plan 00419 N5)
+      enabled: true          # Advisory only, rate-limited; silent when the list is absent or empty
+      priority: 9
+
+    auto_continue_stop:  # Auto-continues after stop events based on criteria
+      enabled: true
+      priority: 10
+
+  subagent_stop:
+    cron_subagent_stop_enforcer:  # SubagentStop twin of cron_stop_enforcer above (Plan 00416)
+      enabled: true                 # Silent unless persistent_crons.enabled AND a job is declared
+      priority: 7
+
+    subagent_report_path_verifier:  # Blocks a stop whose final message claims a report file that is not on disk
+      enabled: true                 # On by default (Plan 00446); set false to opt out
+      priority: 8                   # Below the terminal size blocker's 15, so it is not shadowed
+
+    subagent_cache_aggregator:      # Records each sub-agent's prompt-cache cost for the status line
+      enabled: true                 # Sensor only (Plan 00452): renders nothing, never blocks a stop
+      priority: 9                   # Ahead of the terminal size blocker, so a rejected report still counts
+
+    subagent_report_persistence:    # Auto-saves every sub-agent's final reply to a gitignored file (Plan 00460)
+      enabled: true                 # Sensor only: never blocks a stop; runs before the size blocker below
+      priority: 10                  # Must run before the terminal size blocker, which looks up its output
+      options:
+        report_dir: "untracked/agent-reports/auto/"
+        max_kept_reports: 500
+        max_report_age_days: 30
+
+    subagent_report_size_blocker:  # Blocks an oversized subagent final message
+      enabled: true                 # On by default (Plan 00307 Task 4.3); set false to opt out
+      priority: 15
+      options:
+        threshold_chars: 4000
+
+  # Status line handlers (format daemon-based status display)
+  status_line:
+    model_context:  # Shows model name and color-coded context percentage
+      enabled: true
+      priority: 10
+
+    downgrade_indicator:  # Warns when the session model has silently downgraded (Plan 00278)
+      # Self-detected from model-family-rank high-water per session; silent
+      # unless a downgrade is active, so it costs nothing normally.
+      enabled: true
+      priority: 11
+
+    context_sidecar:  # Observe-only: writes context state for the PTY supervisor (opt-in)
+      enabled: false
+      priority: 12
+
+    environment_indicator:  # Shows 💻 desktop / 🐳 docker / 📦 podman (cached at startup)
+      enabled: true
+      priority: 11
+
+    host_hostname:  # Shows @machine — WHICH host, not which KIND of environment (opt-in)
+      # Opt-in: pure gain only if you work across several machines.
+      #
+      # Inside podman/docker the container's own hostname is the container ID
+      # and is never shown. Export the host's name from whatever starts the
+      # container — CCY_HOST_HOSTNAME (set by the ccy supervisor, checked
+      # first) or HOOKS_DAEMON_HOST_HOSTNAME for any other launcher. That is
+      # the only authoritative route, because a UTS namespace genuinely hides
+      # the host's name. A desktop or LXC session needs no export; its own
+      # hostname is the answer.
+      #
+      # The value is validated against an allowlist (letters, digits, dot,
+      # underscore, hyphen; 64 chars max) and refused outright otherwise: it is
+      # printed to a terminal once per second, so an ANSI escape in it would be
+      # an injection vector, not a cosmetic problem.
+      #
+      # A name recovered from /etc/hosts renders as @~name: the tilde means
+      # INFERRED. That read works on a Debian-family host (which writes
+      # `127.0.1.1 <hostname>`) and finds nothing on Fedora, so it is a hint.
+      #
+      # There is NO option to set the name here, deliberately. A hostname is
+      # per-machine and this file is tracked in git — an option for it would
+      # invite a machine name into a committed, often public file, and that
+      # leak is findable only by searching history nobody rewrites. Per-machine
+      # values belong in the environment.
+      enabled: false
+      priority: 7
+
+    supervisor_indicator:  # Top hat 🎩 w/ bg colour: green armed / yellow dry-run / orange down (ccy supervisor)
+      # On by default; renders NOTHING when no ccy supervisor status file exists.
+      enabled: true
+      priority: 13
+
+    git_branch:     # Shows current git branch if in repo
+      enabled: true
+      priority: 20
+      options:
+        # Keep remote-tracking refs fresh so ahead/behind icons are honest.
+        # TTL-gated background fetch in a daemon thread — never blocks the
+        # render, never prompts for credentials, tolerates being offline.
+        auto_fetch: true
+        fetch_interval_seconds: 300
+
+    git_repo_name:  # Shows git repository name
+      enabled: true
+      priority: 25
+
+    working_directory:  # Shows current working directory when different from project root
+      enabled: true
+      priority: 25
+
+    startup_cleanup:  # Shows 🧹 briefly after startup when stale files were removed
+      enabled: true
+      priority: 28
+
+    daemon_stats:   # Shows daemon uptime, memory, log level
+      enabled: false  # disabled at the owner's request: status bar clutter
+      priority: 30
+
+    upgrade_notifier:  # Shows "📦 vX → vY" when a newer daemon version is available
+      # On by default; renders NOTHING unless an upgrade is genuinely available.
+      enabled: true
+      priority: 32
+
+    account_display: # Shows account information
+      enabled: true
+      priority: 40
+
+    multithread_indicator:  # Shows "🧵 Y/X" — first segment; this thread's rank among live threads
+      enabled: true
+      priority: 2
+
+    current_time:   # Shows current local time (24-hour format)
+      enabled: true
+      priority: 14
+
+    prompt_cache_indicator:   # Prompt-cache chips: ⚡ main|⑂|Σ, coloured by hit ratio (Plan 00452)
+      # A HIGH ratio is good, the opposite direction from usage_indicator.
+      enabled: true
+      priority: 15
+      options:
+        healthy_pct: 90                # green (label only) at or above this hit ratio; below it a chip shows detail
+        warn_pct: 75                   # yellow from here
+        critical_pct: 50               # orange from here, red below it
+
+    usage_indicator:   # Subscription usage: 📈 5h|7d chips, detail from warn_pct (Plan 00479)
+      # Hidden when Claude Code reports no usage data (API-key sessions, before the first response).
+      enabled: true
+      priority: 16
+      options:
+        warn_pct: 60                   # yellow, and % + reset countdown shown, from here
+        high_pct: 80                   # orange from here
+        critical_pct: 90               # red from here
+
+  worktree_create:  # WorktreeCreate event (isolation:worktree agents / --worktree sessions)
+    worktree_create:  # Creates the git worktree at a semantic path and echoes it
+      # MUST stay enabled: Claude Code parses this hook's stdout as the created
+      # worktree path, so a disabled/passthrough hook breaks worktree creation.
+      enabled: true
+      priority: 50
+      # options:
+      #   # A fresh worktree is a clean CHECKOUT, so your git-ignored local
+      #   # files are simply absent from it — an agent working there runs
+      #   # against a different configuration from the session that spawned it,
+      #   # and nothing says so. List the paths to place into a new worktree.
+      #   #
+      #   # No default is shipped and none can be: only this project knows
+      #   # which of its git-ignored files matter. Run
+      #   #   bin/hooks-daemon check-worktree-seed
+      #   # to see what your repository suggests and what has gone stale. It
+      #   # reports; it never edits this file.
+      #   seed:
+      #     # Applies to any entry that does not name its own mode.
+      #     #   symlink — shared with the main checkout. One source of truth,
+      #     #             but a write from INSIDE a worktree flows back.
+      #     #   copy    — isolated. Safe to overwrite; may drift from the
+      #     #             canonical file after creation.
+      #     default_mode: symlink
+      #     entries:
+      #       # Repository-root-relative. Files or directories; no globs.
+      #       - .env.local
+      #       - path: .secrets       # anything an agent may WRITE to
+      #         mode: copy
+      #
+      #   # Seeding happens once, at creation. A re-fired event never re-seeds
+      #   # over an agent's own edits, and a listed path that does not exist
+      #   # ABORTS creation rather than yielding a quietly under-seeded worktree.
+
+  worktree_remove:  # WorktreeRemove event (worktree teardown)
+    worktree_remove:  # Prunes stale worktree registrations; removes a named worktree
+      enabled: true
+      priority: 50
+
+  notification:  # Notification event
+    quota_resume_recorder:  # Records a quota_auto_resume_* notification; limit_rebrief delivers the re-brief at the next prompt (Plan 00470)
+      enabled: true  # Silent bookkeeping; never terminal
+      priority: 50
+
+  stop_failure:  # StopFailure event (a turn that ended on an API error)
+    stop_failure_recorder:  # Records a rate_limit / authentication_failed / cloud_credential_error turn; the usage indicator shows it (Plan 00470)
+      enabled: true  # Silent bookkeeping; never terminal
+      priority: 50
+
+# Where the work-DRIVING machinery may run (Plan 00498): declared crons, the
+# failsafe-recovery advice, goal injection, goal-ledger stop challenges, the
+# awaiting-human stand-in cron, housekeeping and routine sweeps. Guards are never
+# affected. Environments: host (a desktop session), docker, podman, lxc, generic.
+# The default below is every environment, so nothing changes until you remove
+# one; for example drop `host` to keep a desktop session to the task it was given.
+# `hosts:` lists role aliases or globs (HOOKS_DAEMON_HOSTNAME) allowed anywhere.
+autonomy:
+  environments: [host, docker, podman, lxc, generic]
+  hosts: []
+
+# Pseudo-events: handlers driven on a trigger ratio over real events rather
+# than by a hook event of their own. The two nitpick detectors live ONLY here —
+# a `hedging_language_detector` / `dismissive_language_detector` entry under
+# `handlers.stop` is a retired key that does nothing (the upgrade moves it here
+# automatically; `hooks-daemon audit-handler-keys` reports any that remain).
+# An absent pseudo-event is never registered, so keep this block to keep the
+# behaviour.
+pseudo_events:
+  nitpick:
+    enabled: true
+    triggers:
+      - "pre_tool_use:1/5"    # Fire once every 5 PreToolUse events
+      - "stop:1/1"            # Fire on every Stop event
+    handlers:
+      dismissive_language:  # Do not deflect or prematurely halt
+        enabled: true
+      hedging_language:  # The guessing is the defect, not the wording
+        enabled: true
+
+# Project-level handlers (custom handlers in .claude/hooks/handlers/)
+# Example:
+# plugins:
+#   paths: []  # Optional: additional Python module search paths
+#   plugins:
+#     - path: ".claude/hooks/handlers/pre_tool_use/my_handler.py"
+#       event_type: pre_tool_use  # REQUIRED: the event this plugin handles
+#       handlers: ["MyHandler"]   # Optional: class names (null = load all)
+#       enabled: true
+
+# Plan workflow (single source of truth for plan tracking).
+# OPT-IN: disabled by default so a stock install does not scatter CLAUDE/Plan/
+# or deploy the mkplan scaffolding script while the plan handlers are off.
+# Uncomment and set enabled: true to turn on plan tracking. Enabling this
+# feeds the plan directory to all planning handlers (plan_number_helper,
+# markdown_organization, validate_plan_number, ...) AND deploys the CLAUDE/Plan/
+# scaffold + mkplan.bash on install/upgrade. The directory here is authoritative
+# — do not duplicate it in per-handler options.
+plan_workflow:
+  enabled: true
+  directory: "CLAUDE/Plan"
+  workflow_docs: "CLAUDE/PlanWorkflow.md"
+  enforce_claude_code_sync: false
+
+# Crons the daemon re-asserts each session (Plan 00384). Off by default. Claude
+# Code crons live in session memory only, so declared jobs are stated at session
+# start and checked at Stop. `initial_thread_only` (default true, Plan 00470 Task
+# 6.4): only the INITIAL thread of a Claude Code session must hold the jobs; a
+# thread opened later in the same session is told it holds none and is not asked
+# for them. Threads are told apart by their worker process under the shared
+# `claude daemon run --origin transient --spawned-by` ancestor (initial thread:
+# `--fork-session --resume`; later thread: `bg-spare`), not by arrival order; the
+# holder is a live process, so if it exits the next thread takes over. Whenever
+# the placement is unsure every session holds them. false: every thread does.
+# persistent_crons:
+#   enabled: true
+#   initial_thread_only: true
+#   jobs:
+#     - id: nightly-check
+#       schedule: "23 * * * *"
+#       prompt: "Run the nightly check."
+
+# Per-host settings (Plan 00479). A key is a label; `pattern` is an optional
+# case-sensitive fnmatch glob against the effective session hostname
+# (HOOKS_DAEMON_HOSTNAME, then CCY_HOST_HOSTNAME, then the system hostname);
+# without it the label is the exact hostname. Several matches: lowest limit wins.
+# hosts:
+#   sdlc-runner:
+#     pattern: "cchd-sdlc-*"
+#     usage_ceiling:
+#       max_used_percent: 80   # 0 < x <= 100, applies to both windows
+#       five_hour: 85          # optional per-window override
+#       seven_day: 70          # optional per-window override
+
+# Documentation SSoT enforcement (Plan 00284): one canonical home per fact,
+# everything else points. OPT-IN: disabled by default. Enabling this feeds
+# policy to docs_qa_edit/docs_qa_sweep above (both already registered, but
+# their matches() stays false while documentation.enabled is false).
+documentation:
+  enabled: true
+  trees:
+    agent: CLAUDE
+    human: docs
+    remote: remote-docs        # vendored upstream docs (Plan 00326)
+  remote:
+    default_staleness_days: 90 # freshness window applied at capture time
+    known_sources: {}          # domain -> licence, pre-fills the frontmatter
+  qa:
+    edit_mode: warn            # warn | block
+    commit_gate_mode: warn     # warn | block (STAGED stage not yet implemented)
+    sweep_mode: advise         # advise | off
+    check_modes: {}            # per-check override, e.g. rules-file-shape: block
+    grandfather_allowlist: []  # file globs; advise-only forever
+    generated_docs:
+      - glob: ".claude/HOOKS-DAEMON.md"
+        generator: "bin/hooks-daemon generate-docs"
+    registered_module_docs: []
+    resident_at_imports: ["CLAUDE.md"]

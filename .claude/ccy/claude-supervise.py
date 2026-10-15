@@ -1,0 +1,9903 @@
+#!/usr/bin/env python3
+#
+# DAEMON-OWNED FILE - do not edit. Deployed into your project by the
+# claude-code-hooks-daemon installer and refreshed on every upgrade, so local
+# changes are discarded. See CLAUDE/LLM-INSTALL.md, "Which Files Under
+# .claude/ Are Yours?", for the full list and the linter exclusions.
+#
+"""claude-supervise: a standalone, stdlib-only PTY supervisor for wrapping `claude`.
+
+This file is intentionally standalone: it imports nothing from
+`claude_code_hooks_daemon` (no pydantic, no daemon venv). It runs under the
+container's system `python3` so that upgrading (or breaking) the hooks-daemon
+venv can never take down every `ccy` launch.
+
+It spawns the wrapped process on a pseudo-terminal and forwards
+stdin/stdout/window-resize faithfully. On each idle poll tick it reads the
+daemon-written context sidecar and runs the Decision H state machine; when the
+context goes red (+ idle + cooldown/cap) it INJECTS a compact trigger into the
+session. In DRY-RUN (default) that injection is a harmless VISIBLE MARKER,
+proving the mechanism end-to-end without a real compaction; with ``--arm`` it
+injects the real ``/compact`` (and ``continue``).
+
+A further injection family shares the same choke point (idle + empty input
+box, subordinate to compact/continue): a ``/goal`` typed from a daemon-written
+goal-intent signal (Plan 00269).
+
+The supervisor injects NO effort of any kind (Plan 00466 N47, redesigned
+after adversarial review 2: every earlier design here -- a per-family floor,
+a downgrade xhigh compensation, a fable "DROP ANCHOR" invariant, a
+steady-state correction toward settings.json -- typed a real ``/effort
+<level>``, and Claude Code SAVES every interactively-typed level into the
+user's own ``settings.json`` under ``modelSettings`` (model-config.md:554,
+settings-reference.md:900). That made the supervisor's "restore" the SAME
+persistent fight the owner originally reported, just moved one layer down,
+into the single source of truth itself. Effort is now settings.json's job
+alone: the owner adds a ``modelSettings`` entry for Fable at ``low`` and for
+a downgrade fallback model at ``xhigh``, and Claude Code applies its saved
+per-model level itself on a request that model serves -- BUT ONLY while the
+session's own effort is still ``inherit`` (Plan 00466 N47 review 3): any
+``/effort <level>``, any ``/effort auto``, an effort choice made in the
+``/model`` picker's slider, ``--effort``, or ``CLAUDE_CODE_EFFORT_LEVEL``
+PINS the session to that one value across every later model and fallback
+(model-config.md:546, confirmed against the Claude Code 2.1.282 binary), and
+nothing found un-pins it mid-session. See ``CLAUDE/development/CcySupervisor.md``
+for the exact entries and this limit.
+
+The supervisor still types ``/model <original family>`` to flip a
+session-sticky downgrade back (capped, flip-flop backoff), because Claude
+Code's own downgrade is what forced the family change in the first place --
+this is model CHOICE, a different concern from effort. (Typing ``/model``
+does write the owner's *model* choice to user settings per
+model-config.md:134 -- effort is the thing settings.json plays no part in
+here.) The restore is TURN-GATED, not time-gated: the
+classifier flags turns, so recovery is safe the moment the flagged turn
+ends, and the injection choke point (idle + empty input box) is exactly
+that boundary -- the restore fires on the first injectable tick after the
+downgrade. ``CCY_MODEL_RESTORE_SECONDS`` adds an optional EXTRA quiet delay
+(default 0; "off" or negative disables auto-restore).
+
+On a REPEATED downgrade — a flip-flop, where a prior auto-restore was undone
+because the saturated context re-tripped the classifier on the next flagged
+turn — restoring the model alone cannot win. So, opt-in via ``CCY_FLAG_COMPACT``
+(default OFF; ``1``/``true``/``yes``/``on`` enables), the supervisor fires ONE
+armed ``/compact`` that asks the agent to summarise the sensitive material at a
+HIGH LEVEL, omitting the low-level specifics — so the compacted context stops
+re-triggering the classifier and the subsequent restore sticks. It is capped
+per process (``_MAX_FLAG_COMPACTIONS``) with a flip-flop backoff, audit-trailed
+with a 🧽 glyph, and fires only when idle (no ESC needed; the resume rides the
+normal compaction-signal path). It is checked just BEFORE the model restore, so
+on a qualifying flip-flop the compact fires instead of a re-restore.
+
+Every ``/model <family>`` injection (the auto-restore above, and the manual
+override below) sends a SECOND, confirming Enter after the normal submit:
+Claude Code's model switch shows a confirmation dialog that the ordinary
+single-Enter submit does not clear. The count is configurable via
+``CCY_MODEL_CONFIRM_ENTERS`` (default 1). A session can also be switched
+on demand — for end-to-end testing, or a genuine manual override — by
+writing a ``<session>.model-switch-intent`` signal (mirroring the
+goal-intent signal) and consuming it at the same idle choke point, ahead of
+goal/auto-model-restore. The CLI helper ``--emit-model-switch
+<family>`` writes one for whichever session owns the newest context
+sidecar; it does not start a supervisor.
+
+A third signal family, `hooks-daemon signal <kind>` (Plan 00417), warns the
+agent that the HOST machine is about to reboot or shut down -- the one
+channel of the three reachable from OUTSIDE the container. Its security shape
+is deliberately different: a closed `kind` (`reboot-warning`,
+`shutdown-warning`, `reboot-cancelled`) plus, for the two that need one, a
+bare positive integer minutes -- never free text. `load_operator_signal`
+validates AND renders the message in one step, from templates fixed in THIS
+file (`_render_operator_message`); `minutes` is the only value ever
+interpolated. It is consumed at the same idle choke point, ahead of the goal
+and model-switch/restore families, but still subordinate to
+compact/continue/escape. A transient WARNING-level status-line countdown
+(the message channel below) posts the moment a valid signal is observed,
+independent of whether the chat line can be typed yet, so a human watching
+the terminal sees it too.
+
+It also GUARDS the session against accidental terminal control keys that would
+otherwise freeze or kill it: Ctrl+Z (SUSP) is stripped from the forwarded input
+(``strip_suspend``) AND, belt-and-braces, the stop/quit SIGNALS are swallowed if
+ever delivered (``install_input_signal_guards``: SIGTSTP + SIGQUIT, plus ignored
+SIGTTIN/SIGTTOU). Ctrl+C (SIGINT) is deliberately left working. Each swallow
+surfaces a transient status-line notice via the message channel below.
+
+PLUGINS (Plan 00487). A launcher can extend the supervisor without forking it:
+each ``--plugin <name>=<worker.py>`` flag names a stdlib-only worker half (never
+found by scanning), vetted before it is imported and imported only by the
+``--worker`` subprocess. Its ``on_idle`` is asked at the END of the
+``decide_once`` cascade and may return ``ExitForRestart``; a plugin that fails
+in ANY way is disabled, the supervisor recovers, and the session is told once
+by a fixed-template notice. See ``CLAUDE/development/CcySupervisor.md`` for the
+contract, the failure path and the exit status.
+
+Usage:
+    claude-supervise.py [--dry-run | --arm] [--log PATH]
+                        [--plugin NAME=WORKER.PY ...] -- <child argv...>
+
+HOST-TIER SURFACE (Plan 00317). The PTY host (`supervise()`/`_forward_io()`)
+never reloads -- it owns the live child. Everything it does beyond raw byte
+forwarding and child/worker lifecycle is intentionally minimal, audited in
+`CLAUDE/Plan/00317-supervisor-host-thin-shim/AUDIT.md`:
+
+  * the Ctrl+C double-press byte-level swallow (`CtrlCGate.filter`) and
+    Ctrl+Z byte strip (`strip_suspend`) -- must act on a byte BEFORE it is
+    forwarded to the child, so a worker round-trip is not viable here;
+  * the fixed per-process signal guards (`install_input_signal_guards`);
+  * injecting a `TickOutcome` the worker already decided on
+    (`_apply_decision`), and adopting the worker's post-tick state.
+
+A model change the HUMAN makes is NEVER overridden, in any direction, by any
+mechanism here (owner ruling, 2026-09-04). That guarantee does NOT come from
+recognising what they typed. It comes from the opposite direction: the
+auto-restore arms only on a downgrade CLAUDE CODE RECORDED as its own, read
+from the daemon's `.model-downgrade` signal (Plan 00328). A model a human
+picks emits no such record, so it needs no recognition at all -- there is
+nothing to recognise, and nothing to get wrong.
+
+Keystroke recognition WAS how this worked, and it could not be made to work.
+The picker is navigated with arrow keys that carry no text, autocomplete
+completes the command inside Claude Code's own UI so the completed bytes never
+cross the PTY, and every widening of the match (a fuzzy stem, a bare-`/model`
+wildcard) traded one miss for a broader window in which a genuine substitution
+went unrestored. The negative inference -- "nothing was typed, so the machine
+did it" -- has no safe setting.
+
+Note the auto-restore is also scoped to drops that START at fable (the
+security fallback); see the SCOPE note above `_MODEL_FAMILY_RANKS`.
+
+Typed-command recognition (`/compact`) runs
+WORKER-SIDE: the host only forwards raw stdin bytes into a bounded
+`RawInputTap`, drained each tick into `TickFacts.human_raw_input`; the
+`--worker` subprocess owns the `HumanInputLine` parser that recognises
+commands from it, so a code change to recognition hot-reloads with the rest
+of the worker (`run_worker`'s own restart-scoped instance). The host's own
+`HumanInputLine` (on `InputActivity.line`) is kept ONLY to feed the
+in-process fallback path (`_poll_once`, used when the worker is
+unavailable) -- an intentional, already-accepted non-hot-reloading
+degradation, not the live path.
+
+THREAD / PROCESS SAFETY (FIRST-CLASS CONCERN — read before touching shared
+state or any file under the ``supervise/`` runtime dir).
+
+The supervisor does NOT run in isolation. Every file it writes under the daemon
+untracked dir (``supervise/``: the status file, the message file, sidecars,
+signal files) is concurrently accessed by OTHER processes and threads:
+
+  * the supervisor HOST process (the select loop),
+  * the ``--worker`` decision SUBPROCESS (a separate pid),
+  * the DAEMON (a different process entirely) reading these files on every
+    status-line render,
+  * MULTIPLE Claude sessions that may share one daemon (Plan 00127).
+
+Non-negotiable rules for anything in this area:
+
+  1. WRITES ARE ATOMIC-REPLACE ONLY. Write to a PRIVATE temp file, then
+     ``os.replace`` (atomic rename on POSIX) — never write a shared file in
+     place. A reader therefore always sees either the old or the new COMPLETE
+     file, never a partial one. Temp names carry the pid (and, where more than
+     one thread may write, the thread id) so concurrent writers never share a
+     temp path. See ``write_supervisor_status`` and ``write_status_message``
+     for the canonical form; last writer wins.
+  2. READS ARE FAIL-SILENT AND DEFENSIVE. A missing / malformed / partial /
+     foreign-schema file yields "no result", never an exception — a bad file
+     must never wedge the supervisor or break the status line.
+  3. IN-PROCESS SHARED MUTABLE STATE IS LOCK-GUARDED. Any state touched from
+     more than one thread (e.g. a poster's rate-limit counter) uses a
+     ``threading.Lock`` around the check-and-update. See ``StatusMessagePoster``.
+
+The paired daemon-side reader guidance lives in
+``src/claude_code_hooks_daemon/handlers/status_line/CLAUDE.md`` and
+``CLAUDE/Architecture/StatusLine.md``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import enum
+import errno
+import fcntl
+import functools
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import pty
+import re
+import select
+import signal
+import stat
+import struct
+import subprocess  # nosec B404 - spawns ONLY `python3 <self> --worker` and `<child> --version`, fixed argv, never a shell
+import sys
+import termios
+import threading
+import time
+import traceback
+import tty
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar, Protocol, cast
+
+if TYPE_CHECKING:
+    from types import FrameType
+    from typing import TextIO
+
+# Supervisor version. Kept in lockstep with the daemon version at release time
+# (see CLAUDE/development/RELEASING.md). Display-only for the banner and the
+# runtime status file; staleness detection (Plan 00164 Phase 3) uses a content
+# hash of THIS file so it is correct even between version bumps.
+__version__ = "3.69.0"
+
+# Absolute path to THIS running script — hashed for staleness detection so the
+# daemon can tell when the on-disk supervisor differs from the running one.
+_SELF_PATH = Path(__file__).resolve()
+
+_READ_CHUNK_SIZE = 4096
+_FALLBACK_WINSIZE = struct.pack("HHHH", 24, 80, 0, 0)
+_LOG_SUBDIRECTORY = "supervise"
+_LOG_FILENAME = "decision.log"
+# Plan 00181: a red-but-idle session ticks every ~1-2s indefinitely, each tick
+# potentially appending a NOOP-reason line, so decision.log is an unbounded
+# disk time-bomb. Front-cap it: when it exceeds _DECISION_LOG_MAX_BYTES after a
+# write, drop the oldest bytes so only the newest _DECISION_LOG_RETAIN_BYTES
+# (whole lines) survive. RETAIN < MAX gives hysteresis so a log sitting at the
+# ceiling is not rewritten on every single append. This mirrors the daemon's
+# utils.retention.cap_log_file, reimplemented inline because the standalone
+# supervisor cannot import daemon modules.
+_DECISION_LOG_MAX_BYTES = 4 * 1024 * 1024
+_DECISION_LOG_RETAIN_BYTES = 2 * 1024 * 1024
+
+
+def _front_truncate_file(path: Path, *, max_bytes: int, retain_bytes: int) -> None:
+    """Drop the oldest bytes of ``path`` so only the newest ``retain_bytes`` survive.
+
+    No-op below ``max_bytes``. ``retain_bytes`` should be < ``max_bytes`` for
+    hysteresis, so a file sitting at the ceiling is not rewritten on every
+    single append. Drops the (now partial) leading line so the kept content
+    starts on a line boundary. Shared by every on-disk log this standalone
+    supervisor caps (Plan 00181 decision.log; Plan 00319 F4 the worker error
+    log) so the bound has exactly one implementation.
+
+    Raises:
+        OSError: If the file cannot be read/replaced. Callers decide how loud
+            to report a capping failure for their own log.
+    """
+    size = path.stat().st_size
+    if size <= max_bytes:
+        return
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - retain_bytes))
+        tail = handle.read()
+    newline = tail.find(b"\n")
+    kept = tail[newline + 1 :] if newline != -1 else tail
+    tmp = path.with_name(path.name + ".retain.tmp")
+    tmp.write_bytes(kept)
+    tmp.replace(path)
+
+
+# Runtime identity file the running supervisor writes for staleness detection
+# (Plan 00164 Phase 3). Lives in the same 'supervise' subdir as the decision log.
+_SUPERVISOR_STATUS_FILENAME = "supervisor-status.json"
+
+_USAGE = (
+    "Usage: claude-supervise.py [--dry-run | --arm] [--log PATH] "
+    "[--plugin NAME=WORKER.PY ...] -- <child argv...>\n"
+)
+
+# CLI test-trigger mode: writes a manual model-switch signal and exits --
+# never starts a supervisor. See `_run_emit_model_switch`.
+_EMIT_MODEL_SWITCH_FLAG = "--emit-model-switch"
+
+# Opt-out env var for the startup banner + spinner (any non-empty value silences
+# them). The banner is also skipped whenever stderr is not a TTY (piped output,
+# the test suite, non-interactive launches).
+_NO_BANNER_ENV = "CLAUDE_SUPERVISE_NO_BANNER"
+
+# Policy-worker split (Plan 00164 Phase 4). The host spawns `python3 <self>
+# --worker` and streams TickFacts to it; the worker runs the decision logic and
+# streams TickOutcomes back. A host-side restart of the worker hot-reloads the
+# decision code without touching the PTY/child. Set the opt-out env to force the
+# in-process path (the same code runs either way — the worker just isolates it).
+_WORKER_FLAG = "--worker"
+_NO_WORKER_ENV = "CLAUDE_SUPERVISE_NO_WORKER"
+# A hung worker must never stall the PTY host: its reply is awaited at most this
+# long, after which the host falls back to an in-process decision for that tick.
+_WORKER_READ_TIMEOUT_SECONDS = 2.0
+# How often the host re-checks the on-disk supervisor fingerprint to hot-reload
+# the worker (cheap mtime pre-check gates the hash).
+_WORKER_RELOAD_CHECK_SECONDS = 5.0
+# Plan 00319 F8: the worker's HumanInputLine buffer lives in the subprocess, so
+# swapping it (reload or dead-worker restart) resets it -- any partially-typed
+# line the human has not yet submitted is gone. Dropping it may be correct
+# (there is nowhere to recover the bytes from); doing so with no trace is not,
+# hence this diagnostic. ``{trigger}`` names which of the two swap paths fired.
+_WORKER_SWAP_DROPPED_LINE_TRACE = (
+    "worker {trigger} while the human's input box was non-empty -- the "
+    "recognizer's buffer was reset, so a partially-typed line (e.g. /compact) "
+    "may have been lost"
+)
+# Plan 00361: a worker spawned from a half-edited on-disk file dies on its
+# first tick, and `if not alive(): restart()` every tick turned that into an
+# invisible crash loop with the host deciding in-process throughout. The guard
+# respawns a dead worker once per source fingerprint, logs the loop ONCE, then
+# holds respawns to this cadence until the source changes again.
+_WORKER_CRASH_BACKOFF_SECONDS = 10.0
+_WORKER_DIED_LINE = "worker died (exit {exit_code}, source {dead}) -> respawned"
+_WORKER_DIED_SOURCE_CHANGED_LINE = (
+    "worker died (exit {exit_code}, source {dead}); source changed on disk ({on_disk}) -> respawned"
+)
+_WORKER_CRASH_LOOP_LINE = (
+    "worker crash-looping on source {dead} ({deaths} deaths, exit {exit_code}); "
+    "host deciding in-process; respawn retried every {backoff:g}s or when the "
+    "source changes (see the worker error log)"
+)
+_WORKER_RECOVERED_LINE = "worker recovered (source {fingerprint})"
+_WORKER_FALLBACK_BEGAN_LINE = (
+    "worker did not answer -> host deciding in-process (see the worker error log)"
+)
+_WORKER_FALLBACK_ENDED_LINE = "worker answering again -> host in-process fallback ended"
+_WORKER_CRASH_RECORD = "worker crashed (source {fingerprint}):\n"
+_UNKNOWN_FINGERPRINT = "unknown"
+
+# ─── DOGFOODING: EDITING THIS FILE DOES NOT TAKE EFFECT UNTIL THE WORKER RELOADS ───
+# Every injection decision runs in the `--worker` SUBPROCESS, not the running
+# PTY host. So a fresh edit to this file is INERT in the live session until that
+# subprocess is respawned from the new code. The host auto-respawns it within
+# ~_WORKER_RELOAD_CHECK_SECONDS of a *content* change (reload_if_stale compares a
+# content hash, and an mtime pre-check gates it), on the next tick — the PTY/child
+# is never touched, so no full Claude Code session restart is needed.
+#
+# Two traps that make an edit look shipped while the worker is still stale — both
+# have bitten this project, hence this note:
+#   1. A bare `touch` (mtime bumps, content unchanged) triggers NOTHING — the
+#      content hash is identical. Only a real content change reloads the worker.
+#   2. A redeploy that PRESERVES mtime (`cp -p`, `rsync -a`, some installers) can
+#      change the content WITHOUT advancing mtime, so the mtime pre-check skips
+#      the hash and the reload never fires.
+#
+# To dogfood a change to this file IMMEDIATELY AND CORRECTLY, do not assume — VERIFY
+# the worker actually reloaded before testing behaviour:
+#     ps -eo pid,lstart,args | grep 'claude-supervise.py --worker' | grep -v grep
+# A NEW pid / start-time means the new code is live. If it has not changed, force
+# it: `kill <worker-pid>` — the host's dead-worker path (WorkerCrashGuard, Plan
+# 00361) respawns a fresh worker from current on-disk code on its next tick and
+# logs `worker died ... -> respawned` to decision.log. Kill it ONCE: a second
+# death on the same source fingerprint reads as a crash loop and holds respawns
+# to _WORKER_CRASH_BACKOFF_SECONDS. Never restart the whole ccy session just to
+# reload the worker.
+# See also .claude/rules/ccy-supervisor-dogfooding.md.
+
+# Braille spinner frames for the brief pre-fork "starting up" flourish.
+_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_SPINNER_INTERVAL_SECONDS = 0.08
+_BANNER_RULE = "━" * 46
+
+
+def render_startup_banner(*, version: str, armed: bool) -> str:
+    """Return the multi-line ECHD ccy supervisor startup banner.
+
+    Pure and deterministic: it takes the version + mode and returns text. The
+    caller decides whether and where to print it (see ``_should_show_banner``),
+    so this stays trivially testable. Left-aligned content under a top/bottom
+    rule avoids fragile right-border alignment across variable version/mode
+    widths.
+
+    Args:
+        version: Supervisor version string (e.g. ``"3.41.0"``).
+        armed: True when the supervisor injects a real ``/compact`` (armed);
+            False for the harmless dry-run marker.
+
+    Returns:
+        The banner as a multi-line string (no trailing newline).
+    """
+    mode = (
+        "ARMED — injects a real /compact when the context goes red"
+        if armed
+        else "dry-run — injects a harmless visible marker only"
+    )
+    return "\n".join(
+        (
+            f"┏━ ECHD ⟐ ccy Supervisor {_BANNER_RULE[24:]}",
+            f"┃  v{version}  ·  wrapping claude on a PTY",
+            f"┃  {mode}",
+            "┗━ starting up ⏳",
+        )
+    )
+
+
+def _should_show_banner(stream: object, env: dict[str, str] | None = None) -> bool:
+    """Return True iff the startup banner/spinner should be shown on ``stream``.
+
+    Shown only for an interactive launch: ``stream`` must be a TTY and the
+    opt-out env var must be unset. A non-tty stream (piped output, the test
+    harness, a non-interactive launch) is always silent.
+    """
+    resolved_env = env if env is not None else dict(os.environ)
+    if resolved_env.get(_NO_BANNER_ENV):
+        return False
+    isatty = getattr(stream, "isatty", None)
+    return bool(callable(isatty) and isatty())
+
+
+class _StartupSpinner:
+    """A brief 'starting up' spinner on a background thread.
+
+    It runs ONLY between the banner and the PTY fork and is always stopped —
+    with its line cleared — before the wrapped child takes over the terminal, so
+    it never coexists with the child's output. Any write error (closed/redirected
+    stream) silently ends the animation; the spinner is cosmetic and must never
+    affect the supervised session.
+    """
+
+    def __init__(self, stream: object, *, label: str = "starting claude") -> None:
+        self._stream = stream
+        self._label = label
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        index = 0
+        while not self._stop.is_set():
+            frame = _SPINNER_FRAMES[index % len(_SPINNER_FRAMES)]
+            if not self._write(f"\r  {frame} {self._label}… "):
+                return
+            index += 1
+            self._stop.wait(_SPINNER_INTERVAL_SECONDS)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+        # Clear the spinner line so the child starts on a clean row.
+        self._write("\r" + " " * (len(self._label) + 12) + "\r")
+
+    def _write(self, text: str) -> bool:
+        """Best-effort write+flush; return False if the stream is unusable."""
+        write = getattr(self._stream, "write", None)
+        flush = getattr(self._stream, "flush", None)
+        if not callable(write):
+            return False
+        try:
+            write(text)
+            if callable(flush):
+                flush()
+        except (OSError, ValueError):
+            return False
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Human input-line tracking (empty-input-box injection guard)
+#
+# Observed live failure: the supervisor pasted its injection into a NON-EMPTY
+# input box the human had partially typed into, then submitted the corrupted
+# mix. The fix: model the human's input line from the stdin bytes the
+# supervisor already forwards, and refuse to inject while that line holds any
+# non-whitespace human input. Supervisor-injected keystrokes are written
+# straight to the PTY master (never through `InputActivity.record`), so they
+# can never mark the box non-empty.
+# ---------------------------------------------------------------------------
+
+# Keys that clear the input box: Enter (CR / LF) submits it, Ctrl-U kills the
+# line, Ctrl-C discards the in-progress message in the Claude Code TUI.
+_LINE_CLEAR_BYTES = frozenset({0x0D, 0x0A, 0x15, 0x03})
+# The SUBSET of clear bytes that SUBMIT the line (Enter). Ctrl-U/Ctrl-C discard
+# without submitting, so they must NOT count as a human `/compact` request.
+_LINE_SUBMIT_BYTES = frozenset({0x0D, 0x0A})
+# Slash-line observability bounds: submitted '/'-prefixed lines are recorded
+# for the worker's diagnostic log, truncated and capped so a paste storm
+# cannot bloat memory or the log.
+_SLASH_BYTE = 0x2F
+_SLASH_OBSERVED_MAX_CHARS = 80
+_SLASH_OBSERVED_MAX_LINES = 8
+# Keys that delete one character: Ctrl-H and DEL.
+_LINE_BACKSPACE_BYTES = frozenset({0x08, 0x7F})
+# Bytes that never make the box "non-empty" on their own: space and tab.
+_LINE_WHITESPACE_BYTES = frozenset({0x20, 0x09})
+# Plan 00398 Phase 4: Ctrl-W (unix-word-rubout, 0x17) deletes the trailing
+# WORD in a real shell -- neither a full clear nor plain content, so it needs
+# its own handling rather than falling into `_LINE_CLEAR_BYTES` (wrong: it
+# does not clear the whole line) or the unrecognised-byte fallthrough (wrong:
+# appending the raw byte left the tracked box permanently non-empty, since
+# nothing ever removes it again short of Enter/Ctrl-U/Ctrl-C).
+_LINE_WORD_DELETE_BYTES = frozenset({0x17})
+# Ctrl-K (kill-to-end-of-line, 0x0B) deletes everything AFTER the cursor in a
+# real shell. This model tracks no cursor position (it assumes "typing at the
+# end", the same assumption `_LINE_BACKSPACE_BYTES` already makes) -- under
+# that assumption there is nothing after the cursor to kill, so it is modelled
+# as a harmless no-op: consumed, but neither appended (which wedged the box
+# non-empty forever) nor treated as a clear (which could silently drop content
+# still genuinely in the real box).
+_LINE_KILL_TO_END_BYTES = frozenset({0x0B})
+# Claude Code keys that toggle a view and add nothing to the box, so they are
+# consumed as no-ops (neither content nor a clear):
+#   0x0F Ctrl-O -- transcript / full-summary view; Claude Code prints "ctrl+o to
+#        see full summary" right after a compact, so a human opening it must not
+#        defer the post-compact resume.
+#   0x14 Ctrl-T -- todo-list view.
+# Ctrl-V (can paste an image into the box) and Ctrl-R (history search can fill
+# the box) are deliberately NOT here: they may add content.
+_LINE_NON_CONTENT_CONTROL_BYTES = frozenset({0x0F, 0x14})
+# A submitted line whose (whitespace-stripped) text starts with this is a human
+# `/compact` — the supervisor detects it to avoid stacking its own /compact on
+# top (Claude Code aborts the duplicate). Covers `/compact` and `/compact <args>`.
+_COMPACT_COMMAND_PREFIX = "/compact"
+
+# Ctrl+Z (SUSP, 0x1a): universal "undo" muscle memory, but a terminal turns it
+# into SIGTSTP (suspend). Under the supervisor the outer terminal is raw so it
+# arrives as this byte rather than a signal (see `_forward_io`); the input guard
+# strips it from the forwarded stream so Ctrl+Z can never reach the child PTY or
+# suspend the session — it becomes an inert, ignored keystroke (upstream
+# anthropics/claude-code#43596). 0x1a has no legitimate meaning in the input box.
+_SUSPEND_BYTE = 0x1A
+
+
+def strip_suspend(data: bytes) -> bytes:
+    """Return ``data`` with every Ctrl+Z (SUSP, ``0x1a``) byte removed.
+
+    The supervisor forwards operator stdin to the child byte-for-byte; this
+    filter drops the suspend byte so Ctrl+Z can never reach the child PTY or
+    suspend the session. ``0x1a`` has no legitimate meaning in Claude's input
+    line, so removing it is safe. Returns ``data`` unchanged (the same object)
+    when no suspend byte is present — the overwhelming common case on the hot
+    input-forwarding path, so the filter allocates nothing in the fast path.
+    """
+    if _SUSPEND_BYTE not in data:
+        return data
+    return bytes(byte for byte in data if byte != _SUSPEND_BYTE)
+
+
+# Ctrl+C double-press guard (Plan 00312). In current Claude Code a single ^C
+# kills background agents, so one accidental press can destroy hours of
+# delegated work. The outer terminal is raw, so Ctrl+C arrives as a lone 0x03
+# byte on stdin — the gate swallows the first lone press, arms a confirm
+# window, and forwards a second press inside the window (spamming always
+# wins). Only a chunk that is EXACTLY one 0x03 byte counts as a press: a 0x03
+# inside a larger chunk is a paste burst or a coalesced spam and passes
+# through untouched, so pasted content is never corrupted and the escape
+# hatch can never be delayed by read coalescing.
+_INTERRUPT_BYTE = 0x03
+_LONE_INTERRUPT_CHUNK = bytes([_INTERRUPT_BYTE])
+_CTRL_C_CONFIRM_WINDOW_SECONDS = 2.0
+_CTRL_C_GUARD_ENV_VAR = "CCY_CTRL_C_GUARD"
+_CTRL_C_WINDOW_ENV_VAR = "CCY_CTRL_C_WINDOW_SECONDS"
+_CTRL_C_EVENT_SWALLOWED = "ctrl-c-swallowed"
+_CTRL_C_EVENT_FORWARDED = "ctrl-c-forwarded"
+_CTRL_C_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+
+
+def _resolve_ctrl_c_guard_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Resolve the Ctrl+C guard enabled flag (default ON; CCY_CTRL_C_GUARD=0 off)."""
+    resolved_env = env if env is not None else os.environ
+    raw = resolved_env.get(_CTRL_C_GUARD_ENV_VAR, "").strip().lower()
+    return raw not in _CTRL_C_FALSE_WORDS
+
+
+def _resolve_ctrl_c_window_seconds(env: Mapping[str, str] | None = None) -> float:
+    """Resolve the confirm window seconds (CCY_CTRL_C_WINDOW_SECONDS; default 2.0).
+
+    Garbage or non-positive values fall back to the default rather than
+    disabling interruption semantics in a surprising way.
+    """
+    resolved_env = env if env is not None else os.environ
+    raw = resolved_env.get(_CTRL_C_WINDOW_ENV_VAR, "").strip()
+    if not raw:
+        return _CTRL_C_CONFIRM_WINDOW_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _CTRL_C_CONFIRM_WINDOW_SECONDS
+    if value <= 0:
+        return _CTRL_C_CONFIRM_WINDOW_SECONDS
+    return value
+
+
+class CtrlCGate:
+    """Double-press gate for Ctrl+C on the supervisor's stdin path.
+
+    ``filter(data)`` returns ``(forwarded_bytes, event)`` where ``event`` is
+    ``_CTRL_C_EVENT_SWALLOWED`` when a lone first press was withheld,
+    ``_CTRL_C_EVENT_FORWARDED`` when a confirmed second press goes through,
+    or ``None`` when the gate did not intervene. Non-press chunks (anything
+    other than exactly ``b"\\x03"``) pass through untouched and never disturb
+    an armed window — typing between the two presses must not disarm it.
+    """
+
+    def __init__(
+        self,
+        *,
+        window_seconds: float = _CTRL_C_CONFIRM_WINDOW_SECONDS,
+        enabled: bool = True,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._window_seconds = window_seconds
+        self._enabled = enabled
+        self._clock = clock
+        self._armed_at: float | None = None
+
+    @property
+    def window_seconds(self) -> float:
+        return self._window_seconds
+
+    def filter(self, data: bytes) -> tuple[bytes, str | None]:
+        """Gate one stdin chunk; see class docstring for the contract."""
+        if not self._enabled or data != _LONE_INTERRUPT_CHUNK:
+            return data, None
+        now = self._clock()
+        if self._armed_at is not None and now - self._armed_at <= self._window_seconds:
+            self._armed_at = None
+            return data, _CTRL_C_EVENT_FORWARDED
+        self._armed_at = now
+        return b"", _CTRL_C_EVENT_SWALLOWED
+
+
+# ANSI control-sequence parser states. Terminal-GENERATED sequences (focus
+# events ESC[I / ESC[O, cursor-position and device-attribute reports, mouse
+# tracking, SS3 function keys) arrive on stdin WITHOUT the human adding content
+# and must never mark the box non-empty. Counting their raw bytes as content
+# permanently wedged the guard (v3.34.1 field report: a single window-focus
+# switch left the box "non-empty" for the whole session -> every injection tick
+# deferred forever). The parser consumes whole control sequences as non-content,
+# with two deliberate exceptions that DO represent real box content: bracketed-
+# paste payload (between ESC[200~ and ESC[201~) and up/down history-recall arrows.
+_ST_GROUND = 0
+_ST_ESC = 1
+_ST_CSI = 2
+_ST_SS3 = 3
+_ST_STR = 4
+_ST_STR_ESC = 5
+
+_ESC = 0x1B
+_CSI_INTRODUCER = 0x5B  # '['
+_SS3_INTRODUCER = 0x4F  # 'O'
+# ESC followed by one of these starts a string sequence terminated by ST/BEL:
+# OSC ']' , DCS 'P', SOS 'X', PM '^', APC '_'.
+_STRING_INTRODUCERS = frozenset({0x5D, 0x50, 0x58, 0x5E, 0x5F})
+_BEL = 0x07
+_ST_TERMINATOR = 0x5C  # '\' completing ESC \ (ST)
+# CSI byte ranges (ECMA-48): parameter/intermediate 0x20-0x3F, final 0x40-0x7E.
+_CSI_PARAM_MIN, _CSI_PARAM_MAX = 0x20, 0x3F
+_CSI_FINAL_MIN, _CSI_FINAL_MAX = 0x40, 0x7E
+_CSI_FINAL_TILDE = 0x7E  # '~' terminates edit/function keys and paste markers
+_CSI_ARROW_UP = 0x41  # 'A'
+_CSI_ARROW_DOWN = 0x42  # 'B'
+_PASTE_START_PARAMS = (0x32, 0x30, 0x30)  # "200"
+_PASTE_END_PARAMS = (0x32, 0x30, 0x31)  # "201"
+# Plan 00398 Phase 4: bound on how many bytes `_in_paste` trusts without
+# seeing the end marker. Generous -- far past any real paste -- so it only
+# ever trips on a genuinely dropped/malformed ESC[201~, not a large legitimate
+# paste.
+_PASTE_LATCH_MAX_BYTES = 65536
+
+
+class HumanInputLine:
+    """ANSI-aware model of the human's input-box line, fed from forwarded stdin.
+
+    Only genuine box content marks the line non-empty: printable keystrokes,
+    bracketed-paste payload, and up/down history-recall arrows. Whole terminal
+    control sequences -- focus events, cursor/device reports, mouse tracking,
+    SS3 function keys -- are parsed and consumed WITHOUT counting their bytes,
+    because they arrive without the human adding content. Counting them was a
+    permanent poison: a single focus switch left the box "non-empty" for the
+    rest of the session and every injection tick was deferred forever.
+
+    View-toggle keys (Ctrl-O, Ctrl-T) are consumed as no-ops too.
+
+    Still conservative where it matters: any printable byte, unrecognised
+    control byte, or UTF-8 content counts, and a malformed/aborted escape
+    sequence falls back to ground without silently swallowing later content.
+    The parser is streaming -- a sequence split across read() chunks is carried
+    across feed() calls via the persisted state.
+    """
+
+    def __init__(self) -> None:
+        self._buffer: list[int] = []
+        self._state: int = _ST_GROUND
+        self._csi_params: list[int] = []
+        self._in_paste: bool = False
+        # Plan 00398 Phase 4: bytes consumed as paste payload since the
+        # current `_in_paste` spell started -- bounds the latch (see
+        # `_PASTE_LATCH_MAX_BYTES`). Meaningless while `_in_paste` is False.
+        self._paste_bytes: int = 0
+        # Plan 00398 Phase 2: wall-clock timestamp the buffer's CONTENT last
+        # changed (set/cleared/refreshed by every content-mutating `feed`, never
+        # by mere elapsed time) -- the stability guard's whole basis. `None`
+        # until the first change. Wall-clock to match every other timer in this
+        # file (cooldowns, escape intervals), and because it must be meaningful
+        # to BOTH the long-lived host instance and a short-lived worker instance
+        # fed only `now_wall` over JSON.
+        self._last_changed_at: float | None = None
+        # Edge flag: set when a submitted line was a human `/compact`, cleared by
+        # take_compact_submitted() so the supervisor acts on it exactly once.
+        self._compact_submitted: bool = False
+        # Observability: every submitted line starting with '/' is recorded
+        # verbatim (bounded), matched or not, so a recognition MISS (e.g.
+        # autocomplete swallowing the argument bytes) is diagnosable from the
+        # worker's diagnostic log instead of failing invisibly.
+        self._slash_submitted: list[str] = []
+        # Edge flag: the human pressed Enter (on ANY box content, even an empty
+        # one). Whatever the box held went with it -- including a line the
+        # supervisor itself typed -- so the own-line follow-up stands down.
+        self._enter_pressed: bool = False
+
+    def feed(self, data: bytes, *, now: float | None = None) -> None:
+        """Advance the line model with a chunk of forwarded human stdin bytes.
+
+        ``now`` (Plan 00398 Phase 2) stamps a CONTENT change for the stability
+        guard -- wall-clock, so it lines up with every other timer in this
+        file. Defaults to the real clock; tests pass a fixed value so
+        stability can be asserted deterministically.
+        """
+        before = bytes(self._buffer)
+        for byte in data:
+            self._consume(byte)
+        if bytes(self._buffer) != before:
+            self._last_changed_at = time.time() if now is None else now
+
+    def _consume(self, byte: int) -> None:
+        state = self._state
+        if state == _ST_GROUND:
+            self._consume_ground(byte)
+        elif state == _ST_ESC:
+            self._consume_esc(byte)
+        elif state == _ST_CSI:
+            self._consume_csi(byte)
+        elif state == _ST_SS3:
+            # SS3 is ESC O <one final byte> (function/keypad key): non-content.
+            self._state = _ST_GROUND
+        elif state == _ST_STR:
+            self._consume_str(byte)
+        else:  # _ST_STR_ESC: saw ESC inside a string sequence, want ST ('\').
+            self._state = _ST_GROUND if byte == _ST_TERMINATOR else _ST_STR
+
+    def _consume_ground(self, byte: int) -> None:
+        if byte == _ESC:
+            self._state = _ST_ESC
+            return
+        if self._in_paste:
+            # Inside bracketed paste every non-ESC byte is literal paste
+            # payload -- real box content, including embedded CR/LF.
+            self._buffer.append(byte)
+            self._paste_bytes += 1
+            if self._paste_bytes > _PASTE_LATCH_MAX_BYTES:
+                # Plan 00398 Phase 4: bound the latch. No real bracketed-paste
+                # burst is this large, so a dropped/missing ESC[201~ end
+                # marker must not swallow every later keystroke -- including
+                # the human's own Enter -- forever. Falls back to ground,
+                # consistent with this parser's policy for other malformed
+                # sequences (an aborted CSI does the same).
+                self._in_paste = False
+            return
+        if byte in _LINE_WORD_DELETE_BYTES:
+            self._word_delete()
+        elif byte in _LINE_KILL_TO_END_BYTES:
+            # No cursor tracking -- see `_LINE_KILL_TO_END_BYTES`. Consumed as
+            # a no-op: neither appended (which wedged the box permanently
+            # non-empty) nor a clear (which could drop real content).
+            pass
+        elif byte in _LINE_NON_CONTENT_CONTROL_BYTES:
+            # View toggle -- see `_LINE_NON_CONTENT_CONTROL_BYTES`. No-op.
+            pass
+        elif byte in _LINE_CLEAR_BYTES:
+            # Only Enter SUBMITS the line; Ctrl-U/Ctrl-C discard it. A submitted
+            # `/compact` sets the edge flag so the supervisor can defer to it.
+            if byte in _LINE_SUBMIT_BYTES:
+                self._enter_pressed = True
+                if self._buffer_is_compact():
+                    self._compact_submitted = True
+                if self._buffer and self._buffer[0] == _SLASH_BYTE:
+                    text = bytes(self._buffer).decode("utf-8", errors="replace")
+                    self._slash_submitted.append(text[:_SLASH_OBSERVED_MAX_CHARS])
+                    del self._slash_submitted[:-_SLASH_OBSERVED_MAX_LINES]
+            self._buffer.clear()
+        elif byte in _LINE_BACKSPACE_BYTES:
+            if self._buffer:
+                self._buffer.pop()
+        else:
+            self._buffer.append(byte)
+
+    def _word_delete(self) -> None:
+        """Delete the trailing WORD (Ctrl-W / unix-word-rubout), not the whole line.
+
+        Pops trailing whitespace, then the non-whitespace run behind it --
+        mirroring real shells (`readline`'s unix-word-rubout), and consistent
+        with `_LINE_BACKSPACE_BYTES` in operating purely on the tail of the
+        buffer (no cursor-position tracking exists in this model).
+        """
+        while self._buffer and self._buffer[-1] in _LINE_WHITESPACE_BYTES:
+            self._buffer.pop()
+        while self._buffer and self._buffer[-1] not in _LINE_WHITESPACE_BYTES:
+            self._buffer.pop()
+
+    def _consume_esc(self, byte: int) -> None:
+        if byte == _CSI_INTRODUCER:
+            self._state = _ST_CSI
+            self._csi_params = []
+        elif byte == _SS3_INTRODUCER:
+            self._state = _ST_SS3
+        elif byte in _STRING_INTRODUCERS:
+            self._state = _ST_STR
+        else:
+            # Two-char escape (e.g. ESC M) or a bare ESC: consumed, non-content.
+            self._state = _ST_GROUND
+
+    def _consume_csi(self, byte: int) -> None:
+        if _CSI_PARAM_MIN <= byte <= _CSI_PARAM_MAX:
+            self._csi_params.append(byte)
+        elif _CSI_FINAL_MIN <= byte <= _CSI_FINAL_MAX:
+            self._finish_csi(byte)
+            self._state = _ST_GROUND
+        else:
+            # Control byte mid-sequence: abort the sequence, count nothing.
+            self._state = _ST_GROUND
+
+    def _finish_csi(self, final: int) -> None:
+        params = tuple(self._csi_params)
+        if final == _CSI_FINAL_TILDE and params == _PASTE_START_PARAMS:
+            self._in_paste = True
+            self._paste_bytes = 0
+        elif final == _CSI_FINAL_TILDE and params == _PASTE_END_PARAMS:
+            self._in_paste = False
+            self._paste_bytes = 0
+        elif not params and final in (_CSI_ARROW_UP, _CSI_ARROW_DOWN):
+            # Up/Down recall history into an empty box -- conservatively content.
+            self._buffer.append(final)
+        # else: focus (I/O), cursor/device reports (R/c/n), mouse (M/m),
+        # left/right arrows (C/D) etc. -- terminal noise, never box content.
+
+    def _consume_str(self, byte: int) -> None:
+        if byte == _BEL:
+            self._state = _ST_GROUND
+        elif byte == _ESC:
+            self._state = _ST_STR_ESC
+
+    def _buffer_is_compact(self) -> bool:
+        """True when the current line (stripped) begins with the /compact command."""
+        text = bytes(self._buffer).decode("utf-8", errors="ignore")
+        return text.strip().startswith(_COMPACT_COMMAND_PREFIX)
+
+    def take_compact_submitted(self) -> bool:
+        """Return True once if a human `/compact` was submitted, then clear it.
+
+        Edge-triggered and consume-once so a single human `/compact` defers a
+        single supervisor evaluation, never a permanent suppression.
+        """
+        if self._compact_submitted:
+            self._compact_submitted = False
+            return True
+        return False
+
+    def take_slash_submitted(self) -> list[str]:
+        """Return submitted '/'-prefixed lines observed since last checked."""
+        lines = self._slash_submitted
+        self._slash_submitted = []
+        return lines
+
+    def take_enter_pressed(self) -> bool:
+        """Return True once if the human pressed Enter since last checked."""
+        pressed = self._enter_pressed
+        self._enter_pressed = False
+        return pressed
+
+    @property
+    def is_empty(self) -> bool:
+        """True when the box holds no non-whitespace human input."""
+        return all(byte in _LINE_WHITESPACE_BYTES for byte in self._buffer)
+
+    def is_abandoned(self, *, now: float, threshold_seconds: float) -> bool:
+        """True when the box holds content UNCHANGED for >= ``threshold_seconds``.
+
+        Plan 00398 Phase 2: deliberately NOT "non-empty for threshold_seconds".
+        The clock restarts on every content-mutating `feed` (including one that
+        clears the box), so a human typing continuously is never judged
+        abandoned no matter how long the box has been non-empty -- only a box
+        that has stopped changing is. Always False while empty: there is
+        nothing to abandon.
+        """
+        if self.is_empty or self._last_changed_at is None:
+            return False
+        return (now - self._last_changed_at) >= threshold_seconds
+
+    def clear(self) -> None:
+        """Reset the tracked box to empty, as if a real submit had cleared it.
+
+        Plan 00398 Phase 3: the abandoned-box flush presses Enter directly on
+        the PTY master (the same path every other supervisor injection uses),
+        which never passes through `feed` -- so without an explicit reset the
+        model would keep showing the just-submitted text forever and judge it
+        abandoned again on every later tick. Called ONLY by that flush path,
+        immediately after deciding to fire it.
+        """
+        self._buffer.clear()
+        self._state = _ST_GROUND
+        self._csi_params = []
+        self._in_paste = False
+        self._last_changed_at = None
+
+
+@dataclass
+class InputActivity:
+    """Tracks observed stdin activity forwarded to the supervised child."""
+
+    bytes_seen: int = 0
+    last_input_monotonic: float | None = None
+    line: HumanInputLine = field(default_factory=HumanInputLine)
+
+    def record(self, data: bytes, *, now: float | None = None) -> None:
+        """Record a chunk of stdin data that was forwarded to the child.
+
+        ``now`` (Plan 00398 Phase 2) is the wall-clock stamp forwarded to
+        `HumanInputLine.feed` for its stability clock; defaults to the real
+        clock, same as `feed` itself.
+        """
+        self.bytes_seen += len(data)
+        self.last_input_monotonic = os.times().elapsed
+        self.line.feed(data, now=now)
+
+    def take_compact_submitted(self) -> bool:
+        """Return True once if the human submitted a `/compact` since last checked."""
+        return self.line.take_compact_submitted()
+
+
+_DEFAULT_RAW_INPUT_TAP_MAX_BYTES = 4096
+
+
+class RawInputTap:
+    """Bounded, fail-open buffer of raw stdin bytes forwarded to the child.
+
+    Plan 00317: the host-side ``HumanInputLine`` in ``InputActivity`` remains
+    for the in-process fallback path, but the LIVE typed-command recognition
+    now runs inside the hot-reloadable ``--worker`` subprocess, fed by this
+    tap (drained into ``TickFacts.human_raw_input`` once per tick). The tap
+    itself does no parsing -- it only accumulates bytes -- so it carries no
+    recognition logic to keep host-side.
+
+    Bounded so a slow/dead worker (drain not happening) can never grow this
+    buffer without limit: appending past ``max_bytes`` drops the OLDEST bytes,
+    never raises, and never blocks the forwarding call site.
+    """
+
+    def __init__(self, max_bytes: int = _DEFAULT_RAW_INPUT_TAP_MAX_BYTES) -> None:
+        self._buffer = bytearray()
+        self._max_bytes = max_bytes
+
+    def append(self, data: bytes) -> None:
+        """Append forwarded bytes, dropping the oldest on overflow."""
+        self._buffer.extend(data)
+        overflow = len(self._buffer) - self._max_bytes
+        if overflow > 0:
+            del self._buffer[:overflow]
+
+    def drain(self) -> bytes:
+        """Return and clear everything buffered since the last drain."""
+        data = bytes(self._buffer)
+        self._buffer.clear()
+        return data
+
+
+@dataclass
+class OutputActivity:
+    """Tracks child->stdout output timing to tell 'work in progress' from 'settled'.
+
+    Plan 00152: while a turn is generating, the child streams output almost
+    continuously; between turns the output falls quiet. Recording the last
+    output timestamp lets the supervisor derive a ``work_idle`` signal so the
+    LOWER red band can wait for the turn to settle before compacting (restoring
+    the pre-Plan-00151 "blocked whilst things were happening" behaviour).
+    Supervisor-injected keystrokes go to the PTY master, never here, so an
+    injection never marks the child "busy".
+    """
+
+    bytes_seen: int = 0
+    last_output_monotonic: float | None = None
+
+    def record(self, data: bytes) -> None:
+        """Record a chunk of child output that was forwarded to stdout."""
+        self.bytes_seen += len(data)
+        self.last_output_monotonic = os.times().elapsed
+
+
+class DecisionLog:
+    """Append-only, timestamped log file for supervisor decisions/observations.
+
+    Every line is timestamped and written immediately (no buffering) so a
+    crash or forced kill of the supervised session never loses prior
+    observations. Write failures are never swallowed -- FAIL FAST so a broken
+    log path is surfaced immediately rather than silently discarding
+    supervisor context.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        """Create (or attach to) a decision log file.
+
+        Args:
+            path: Explicit log file path. When omitted, defaults to
+                ``$CLAUDE_PROJECT_DIR/untracked/supervise/decision.log``
+                (falling back to the current working directory when the
+                environment variable is unset).
+
+        Raises:
+            OSError: If the parent directory cannot be created.
+        """
+        self._path = path if path is not None else self._default_path()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Dedup state for `write_noop` (Plan 00168 Phase 1): the last NOOP-reason
+        # message written, so a gate held unchanged for minutes logs ONCE rather
+        # than flooding the log every ~1-2s idle tick. Any real `write` (an
+        # injection / deferral / reap / lifecycle line) resets it so the next
+        # NOOP re-logs and the file stays a faithful transition record.
+        self._last_noop_message: str | None = None
+
+    @staticmethod
+    def _default_path() -> Path:
+        project_dir = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
+        return project_dir / "untracked" / _LOG_SUBDIRECTORY / _LOG_FILENAME
+
+    @property
+    def path(self) -> Path:
+        """Absolute path to the underlying log file."""
+        return self._path
+
+    def write(self, message: str) -> None:
+        """Append a single timestamped line to the log.
+
+        Args:
+            message: The message to record.
+
+        Raises:
+            OSError: If the file cannot be written (never swallowed).
+        """
+        timestamp = datetime.now(UTC).isoformat()
+        with self._path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} {message}\n")
+        self._cap_if_needed()
+        # A real action line breaks the NOOP-dedup run: the next identical NOOP
+        # reason must re-log (it describes a fresh post-action observation).
+        self._last_noop_message = None
+
+    def write_noop(self, message: str) -> None:
+        """Append a NOOP-reason line, suppressing a CONSECUTIVE identical repeat.
+
+        Plan 00168 Phase 1 observability: the supervisor records WHY each idle
+        tick did nothing (the gate that blocked -- ``sidecar stale`` /
+        ``cooldown active`` / ``not idle`` / ``no sidecar reading`` / ...), so a
+        red-but-not-compacting session is diagnosable from the log alone. The
+        message is low-cardinality (the reason plus a coarse context band, never
+        a per-tick pct), so deduping on the exact message keeps a steady gate to
+        a single line while still logging every gate TRANSITION.
+
+        Args:
+            message: The NOOP-reason line to record if it differs from the last.
+
+        Raises:
+            OSError: If the file cannot be written (never swallowed).
+        """
+        if message == self._last_noop_message:
+            return
+        timestamp = datetime.now(UTC).isoformat()
+        with self._path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} {message}\n")
+        self._cap_if_needed()
+        self._last_noop_message = message
+
+    def _cap_if_needed(self) -> None:
+        """Front-truncate the log to below the byte ceiling, keeping newest lines.
+
+        Best-effort disk-bomb guard (Plan 00181): a capping failure must NEVER
+        crash a supervisor tick or lose the line just written, so IO errors are
+        reported to stderr and swallowed rather than propagated. The successful
+        path drops the oldest bytes and the (now partial) leading line so only
+        the newest ``_DECISION_LOG_RETAIN_BYTES`` of WHOLE lines remain.
+        """
+        try:
+            _front_truncate_file(
+                self._path,
+                max_bytes=_DECISION_LOG_MAX_BYTES,
+                retain_bytes=_DECISION_LOG_RETAIN_BYTES,
+            )
+        except OSError as exc:
+            # FAIL LOUD but not FATAL: surface the cap failure without aborting
+            # the supervision loop (the appended line is already safely on disk).
+            sys.stderr.write(f"[claude-supervise] decision.log cap failed: {exc}\n")
+
+
+# ---------------------------------------------------------------------------
+# Compact decision logic (Plan 00135 Slice 2)
+#
+# The daemon writes an observe-only "context sidecar" JSON per session
+# (handlers/status_line/context_sidecar.py). This supervisor READS the freshest
+# sidecar and runs the Decision H state machine to decide when to inject
+# `/compact` (and, once compaction is under way, `continue`). The decision here
+# is mode-agnostic; the injection layer below turns a decision into either a
+# harmless dry-run marker or the real command.
+# ---------------------------------------------------------------------------
+
+_SIDECAR_SUBDIR = "context-sidecar"
+
+# State-machine policy defaults (seconds / counts). Conservative on purpose.
+_DEFAULT_FRESHNESS_SECONDS = 30.0
+# Plan 00160: the supervisor drives ONE PTY and injects into whatever Agent-View
+# thread is FOREGROUND. Only the foreground thread renders its statusLine, so the
+# freshest sidecar is normally the foreground -- EXCEPT in the brief window right
+# after a thread switch, when the just-backgrounded thread's sidecar is still
+# fresh and could momentarily be the freshest. When a SECOND still-fresh sidecar's
+# ts is within this margin of the freshest, the foreground is AMBIGUOUS and a
+# compaction is deferred (it would risk compacting the wrong thread). Sized at
+# roughly one status refresh interval: a live foreground re-renders every interval
+# so it reliably pulls this far ahead of a non-rendering backgrounded thread,
+# self-resolving the ambiguity within a tick or two.
+_DEFAULT_FOREGROUND_MARGIN_SECONDS = 10.0
+_DEFAULT_COOLDOWN_SECONDS = 300.0
+_DEFAULT_AWAIT_TIMEOUT_SECONDS = 120.0
+_DEFAULT_MAX_INJECTIONS = 20
+# After injecting `/compact`, Claude Code may QUEUE it behind the in-flight turn
+# and not run it until the turn is interrupted (the human normally presses
+# [esc]). If no compaction starts within this window, the supervisor injects an
+# [esc] to flush the queued command — and RE-FIRES every window until the
+# compaction starts or `max_escapes` is reached (Plan 00164 dogfooding fix).
+_DEFAULT_ESCAPE_AFTER_SECONDS = 60.0
+# How long a RESUBMIT waits behind the escape it alternates with, instead of a
+# full `escape_after_seconds`. A blind Enter confirms a modal dialog's
+# highlighted default — measured against a real Claude Code, where Enter on the
+# `/model` picker answered "saved as your default for new sessions" while ESC
+# answered "Kept model as Opus 5". ESC being attempt 1 already clears any dialog
+# that was open when the episode began; this closes the remaining window, where
+# a dialog appears AFTER that escape and is still on screen a full interval
+# later. Must be >= the poll interval or the tick that would fire the resubmit
+# never lands.
+_RESUBMIT_FOLLOW_SECONDS = 2.0
+# Cap on the repeated [esc] flushes for one queued /compact. Plan 00164: the
+# supervisor keeps pressing [esc] ("until it does") but must eventually give up
+# so a genuinely-wedged session returns to MONITOR rather than escaping forever.
+_DEFAULT_MAX_ESCAPES = 5
+# How long a compaction-signal file is treated as "compaction under way".
+# Much longer than the sidecar freshness because a large-context compaction can
+# keep the session busy (streaming output, no status render, no select-timeout
+# poll) for minutes before it goes idle. The signal is written at the START of
+# compaction; if the TTL expires before the first post-compaction idle poll, the
+# resume `continue` is never injected and the session is left idle. 120s was too
+# short and dropped the resume on big conversations (observed live: signal 485s
+# old by the first idle poll). The file is consumed on a successful resume and a
+# fresh compaction overwrites it, so a generous TTL cannot re-fire or wedge a
+# later compaction -- it only bounds how long an unconsumed signal lingers.
+_DEFAULT_COMPACTION_SIGNAL_TTL_SECONDS = 600.0
+
+# Compaction-signal files are written by the daemon's PreCompact handler as
+# ``<session>.compacting`` -- deliberately NOT ``*.json`` so they are never
+# mistaken for a context sidecar by ``load_freshest_sidecar``.
+_COMPACTION_SIGNAL_GLOB = "*.compacting"
+# Plan 00399: the record's ``origin`` (who started the compaction, attributed by
+# the daemon from PreCompact) and the phrase each adds to the resume decision.
+# This is how a human `/compact` the keystroke match cannot see (a Tab-completed
+# `/comp`) is still recognised. An absent or unrecognised origin adds nothing.
+_COMPACTION_ORIGIN_KEY = "origin"
+_COMPACTION_ORIGIN_LABELS: dict[str, str] = {
+    "human": "human /compact",
+    "supervisor": "supervisor /compact",
+    "auto": "auto-compact",
+}
+
+# Goal-intent signal files (Plan 00269) are written by the daemon's
+# goal_injection PostToolUse handler (or `hooks-daemon inject-goal`) as
+# ``<session>.goal-intent`` -- again deliberately NOT ``*.json``. Same TTL
+# reasoning as the compaction signal: plan-execution start is usually an idle
+# moment, but the input-box gate can defer, so the window is generous. The
+# signal is consumed (unlinked) on injection, so a generous TTL cannot
+# re-fire it.
+_GOAL_SIGNAL_GLOB = "*.goal-intent"
+_DEFAULT_GOAL_SIGNAL_TTL_SECONDS = 600.0
+
+# Nothing else deletes per-session sidecars/signals: every session writes its own
+# ``{session}.json`` (and, on compaction, ``{session}.compacting``) into the ONE
+# shared context-sidecar dir, and a closed/backgrounded session's file lingers
+# forever (a live dir was observed holding 17 files, most dead for days). The
+# supervisor reaps files whose mtime is older than this TTL each tick. It is set
+# WELL beyond both the sidecar freshness window and the compaction-signal TTL, so
+# a file this old is definitively from a closed session and can never still be
+# actionable -- reaping it cannot race a live decision.
+_DEFAULT_REAP_TTL_SECONDS = 1800.0
+_CONTEXT_SIDECAR_GLOB = "*.json"
+
+
+# ---------------------------------------------------------------------------
+# Own-session identity (Plan 00166): namespace-broad session-id filtering.
+#
+# Two `ccy` terminals in the SAME repo share ONE context-sidecar dir (a
+# bind-mounted `untracked/`), but each runs in its OWN container / PID
+# namespace. Without a filter, this supervisor reads the freshest sidecar and
+# the first `*.compacting` signal in the shared dir REGARDLESS of which session
+# wrote them -- so a compaction in terminal B makes terminal A's supervisor
+# inject `continue` into A's PTY (the reported cross-injection bug).
+#
+# Fix (Decision 1, option B): a session id reachable in the supervisor's OWN
+# PID namespace belongs to the supervisor's own Claude instance -- a foreign
+# terminal is a separate container and never appears here. So we learn the
+# own-session-id SET by scanning the container's process environs for
+# `CLAUDE_CODE_SESSION_ID`, then act ONLY on sidecars/signals in that set. Fail
+# safe: an empty (not-yet-learned / non-Linux) set means act on NOTHING.
+#
+# Caveat: under a shared PID namespace (e.g. `podman run --pid=host`) the scan
+# could see a sibling terminal's ids. For that deployment give the session its
+# own runtime via CLAUDE_HOOKS_SOCKET_PATH / _PID_PATH / _LOG_PATH.
+# ---------------------------------------------------------------------------
+
+_PROC_ROOT = "/proc"
+_SESSION_ENV_PREFIX = b"CLAUDE_CODE_SESSION_ID="
+
+# Accumulated own-session ids. Union-only: ids are stable per Claude process
+# and only ever come from this process's own namespace, so growth never admits
+# a foreign terminal. Keeps ids learned during active work available on later
+# idle ticks (when no descendant currently exposes the env var).
+_own_session_ids_cache: set[str] = set()
+# Plan 00182: throttle the expensive full-/proc environ scan. Once our session
+# ids are learned they persist in the accumulate-set above, so re-scanning every
+# worker tick (poll interval 2s) was the latency source that could push a tick
+# past the 2s worker read timeout and trigger the stale-reply desync. Re-scan at
+# most once per TTL; an EMPTY cache always forces a scan so discovery is never
+# starved (fail-safe: a supervisor that has not yet found its session must look).
+_OWN_SESSION_SCAN_TTL_SECONDS = 30.0
+_own_session_ids_last_scan: float | None = None
+
+
+def _session_ids_from_environ(environ: bytes) -> set[str]:
+    """Extract ``CLAUDE_CODE_SESSION_ID`` value(s) from a NUL-delimited environ."""
+    found: set[str] = set()
+    for entry in environ.split(b"\x00"):
+        if entry.startswith(_SESSION_ENV_PREFIX):
+            value = entry[len(_SESSION_ENV_PREFIX) :].decode("utf-8", "replace").strip()
+            if value:
+                found.add(value)
+    return found
+
+
+def _read_proc_environ(environ_path: Path) -> bytes:
+    """Read a ``/proc/<pid>/environ`` blob; empty bytes if the process vanished."""
+    try:
+        return environ_path.read_bytes()
+    except OSError:
+        # The process exited between listdir and read, or its environ is
+        # unreadable -- it simply contributes no session id. Not an error.
+        return b""
+
+
+def resolve_own_session_ids(proc_root: Path | None = None) -> frozenset[str]:
+    """Scan this container's process environs for ``CLAUDE_CODE_SESSION_ID``.
+
+    Returns every session id found in the supervisor's OWN PID namespace
+    (namespace-broad identity, Plan 00166). Empty on a host without ``/proc``
+    so the caller fails safe.
+    """
+    root = proc_root if proc_root is not None else Path(_PROC_ROOT)
+    if not root.is_dir():
+        return frozenset()
+    found: set[str] = set()
+    for entry in root.iterdir():
+        if entry.name.isdigit():
+            found |= _session_ids_from_environ(_read_proc_environ(entry / "environ"))
+    return frozenset(found)
+
+
+def cached_own_session_ids(
+    proc_root: Path | None = None, *, now: float | None = None
+) -> frozenset[str]:
+    """Union-accumulate and return the supervisor's own-session-id set.
+
+    Plan 00182: the full /proc environ scan is throttled to
+    ``_OWN_SESSION_SCAN_TTL_SECONDS`` once at least one id is known -- most ticks
+    then return the accumulated set without touching /proc, keeping the worker
+    tick well under its read timeout. An EMPTY cache always re-scans so a
+    supervisor that has not yet discovered its own session is never starved.
+    ``now`` (monotonic seconds) is injectable for tests; production uses the
+    monotonic clock.
+    """
+    global _own_session_ids_last_scan
+    current = time.monotonic() if now is None else now
+    due = (
+        not _own_session_ids_cache
+        or _own_session_ids_last_scan is None
+        or (current - _own_session_ids_last_scan) >= _OWN_SESSION_SCAN_TTL_SECONDS
+    )
+    if due:
+        _own_session_ids_cache.update(resolve_own_session_ids(proc_root))
+        _own_session_ids_last_scan = current
+    return frozenset(_own_session_ids_cache)
+
+
+def _session_in_scope(session_id: object, own_sessions: frozenset[str] | None) -> bool:
+    """True if ``session_id`` should be acted on given the own-session filter.
+
+    ``own_sessions is None`` disables filtering (legacy / unit-test callers).
+    A provided set (even empty) filters: only ids in the set are in scope, so an
+    empty set puts NOTHING in scope -- the fail-safe when identity is unknown.
+    """
+    if own_sessions is None:
+        return True
+    return isinstance(session_id, str) and session_id in own_sessions
+
+
+# NOOP reasons that mean "an injection is pending but gated on the session
+# being safe to type into". `_poll_once` uses these to log a deferral when
+# the gate was the non-empty input box rather than keystroke activity.
+_REASON_BUSY_COMPOSING = "session busy (composing)"
+_REASON_BUSY_AWAIT_RESUME = "compaction detected but session busy -> awaiting idle to resume"
+_INJECTION_GATED_REASONS = frozenset({_REASON_BUSY_COMPOSING, _REASON_BUSY_AWAIT_RESUME})
+# Plan 00160: a would-be compaction is deferred because the foreground thread
+# cannot be told apart from a just-backgrounded one this tick (two still-fresh
+# sidecars within the margin). Self-resolves as the backgrounded sidecar ages out.
+_REASON_FOREGROUND_AMBIGUOUS = "foreground ambiguous (recent thread switch) -> deferring compact"
+# Plan 00152: in the LOWER red band (red but below the compact-urgency midpoint)
+# the supervisor is PATIENT -- it defers /compact until the child output has
+# settled (work_idle), so an in-progress turn is never interrupted. This
+# restores the pre-Plan-00151 "blocked whilst things were happening" behaviour
+# for the red band only; the elevated + critical bands still act promptly.
+_REASON_RED_WORK_IN_PROGRESS = "red (patient band) but work in progress -> deferring until settled"
+_DEFERRED_LOG_PREFIX = "injection deferred: input box not empty"
+# Plan 00168 Phase 1: prefix for the deduped NOOP-reason diagnostic. Every idle
+# tick that decides NOOP records `<prefix>: <reason>[ band]` so a
+# red-but-not-compacting session names its blocking gate in `decision.log`.
+_NOOP_LOG_PREFIX = "noop"
+
+
+# ── Model restore on downgrade: episode tracking (Plan 00278) ───────────────
+# SCOPE, and it is NARROW (owner ruling, 2026-09-04, after a live dogfood):
+# this machinery exists to counteract the AUTOMATED FABLE SECURITY DOWNGRADE
+# and nothing else. A drop that did not start at fable -- opus → sonnet, say --
+# is the human's own business and is ignored outright: no episode, no restore.
+# Do not widen this back to "any ranked drop". That is what it used to be, and
+# it made the supervisor type `/model opus` at a human who had just chosen
+# Sonnet. See `_TOP_FAMILY_RANK` in note_model_reading for the enforcing
+# condition.
+#
+# The supervisor tracks the foreground sidecar's model family per session
+# ONLY to know when to flip a downgraded session back (`/model <family>`,
+# below) -- Plan 00466 N47 (review 2) retired every effort opinion this
+# family used to carry. Effort is settings.json's job alone now: Claude Code
+# applies a configured `modelSettings` entry itself on a request that model
+# serves -- but only while the session's own effort is still unpinned
+# (review 3; see the module docstring and CcySupervisor.md). No supervisor
+# involvement either way.
+#
+# Ascending capability rank; "mythos" shares fable's rank (same underlying
+# model). Matched by token containment on the sidecar's model_id; unknown
+# ids have no rank and never trigger.
+_MODEL_FAMILY_RANKS: dict[str, int] = {
+    "haiku": 0,
+    "sonnet": 1,
+    "opus": 2,
+    "fable": 3,
+    "mythos": 3,
+}
+# "mythos" is an alias: _model_family canonicalises it to "fable".
+_MODEL_FAMILY_CANONICAL: dict[str, str] = {"mythos": "fable"}
+# The single highest capability rank (fable/mythos). Used to distinguish "the
+# drop must START at fable" (the automated security downgrade this family
+# counteracts) from every other family change, which is the human's business.
+_TOP_FAMILY_RANK = max(_MODEL_FAMILY_RANKS.values())
+# ── Model restore after a downgrade (Plan 00278 Task 2b.3) ──────────────────
+# The safety fallback is session-sticky, but flipping back manually works
+# once the flaggable TURN has passed — the classifier flags turns, not
+# sessions' worth of wall-clock. The real gate is therefore the injection
+# choke point itself (idle + empty input box = the flagged turn is over), so
+# the default extra delay is ZERO: restore fires on the first injectable
+# tick after the downgrade (joseph: turn-gated, not time-gated). A positive
+# CCY_MODEL_RESTORE_SECONDS adds an optional extra quiet delay on top;
+# "off" (or any negative value) disables auto-restore entirely.
+_MODEL_COMMAND = "/model"
+_DEFAULT_MODEL_RESTORE_DELAY_SECONDS = 0.0
+_MODEL_RESTORE_DISABLED_SENTINEL = -1.0
+_MODEL_RESTORE_ENV_VAR = "CCY_MODEL_RESTORE_SECONDS"
+# Flip-flop guard: a re-downgrade soon after a restore means the classifier
+# still fires — do not bounce the session between models.
+_MODEL_RESTORE_BACKOFF_SECONDS = 3600.0
+# Per-process lifetime cap on auto-restores.
+_MAX_MODEL_RESTORES = 2
+_DRY_RUN_MODEL_BODY_PREFIX = "would inject /model (dry-run — no real /model sent):"
+
+
+def _parse_model_restore_delay(raw: str) -> float:
+    """Parse the restore-delay override.
+
+    "off" (or any negative number) disables auto-restore; 0 means restore on
+    the first injectable tick after the downgrade (the turn gate alone);
+    a positive value adds that many seconds of extra quiet delay; junk keeps
+    the default.
+    """
+    value = raw.strip().lower()
+    if value == "off":
+        return _MODEL_RESTORE_DISABLED_SENTINEL
+    try:
+        return float(value)
+    except ValueError:
+        return _DEFAULT_MODEL_RESTORE_DELAY_SECONDS
+
+
+def _model_restore_delay_from_env() -> float:
+    """Resolve the effective restore delay (env override or default)."""
+    raw = os.environ.get(_MODEL_RESTORE_ENV_VAR)
+    if raw is None:
+        return _DEFAULT_MODEL_RESTORE_DELAY_SECONDS
+    return _parse_model_restore_delay(raw)
+
+
+# Every ``/model <family>`` injection -- the auto-restore above AND the
+# manual override signal below -- sends this many ADDITIONAL standalone
+# Enter keystrokes after the normal submit. Claude Code's model switch shows
+# a confirmation dialog that the ordinary single-Enter submit does not
+# clear, so without this the switch never completes.
+_DEFAULT_MODEL_CONFIRM_ENTERS = 1
+_MODEL_CONFIRM_ENTERS_ENV_VAR = "CCY_MODEL_CONFIRM_ENTERS"
+
+
+def _parse_model_confirm_enters(raw: str) -> int:
+    """Parse the confirm-Enter count override; junk or negative keeps default."""
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return _DEFAULT_MODEL_CONFIRM_ENTERS
+    return value if value >= 0 else _DEFAULT_MODEL_CONFIRM_ENTERS
+
+
+def _model_confirm_enters_from_env() -> int:
+    """Resolve the effective confirm-Enter count (env override or default)."""
+    raw = os.environ.get(_MODEL_CONFIRM_ENTERS_ENV_VAR)
+    if raw is None:
+        return _DEFAULT_MODEL_CONFIRM_ENTERS
+    return _parse_model_confirm_enters(raw)
+
+
+# /model injections leave NO trace in the chat (unlike /compact and /goal,
+# whose payloads carry visible text), so after a successful silent injection
+# the supervisor flushes a transient status-line banner naming what it did
+# (Plan 00318). Pending audit items are bounded so a stuck flush can never
+# grow the machine state without limit.
+_MAX_AUDIT_ITEMS = 8
+
+
+# ── Flag-cleaning compaction on repeated downgrade (Plan 00281) ──────────────
+# When a downgrade RECURS after a prior auto-restore (a flip-flop the model
+# restore cannot win because the CONTEXT keeps re-tripping the classifier), the
+# supervisor can fire ONE armed /compact instructing Claude to summarise the
+# flaggable material at a HIGH LEVEL, cleaning the context so the next restore
+# sticks. OFF by default: /compact rewrites context, so a project not doing
+# flaggable work never wants it fired automatically.
+_DEFAULT_FLAG_COMPACT_ENABLED = False
+_FLAG_COMPACT_ENV_VAR = "CCY_FLAG_COMPACT"
+_FLAG_COMPACT_TRUE_VALUES = ("1", "true", "yes", "on")
+# At most this many flag-cleaning compactions per worker process, with a
+# backoff between them: /compact is heavy and must never storm.
+_MAX_FLAG_COMPACTIONS = 1
+_FLAG_COMPACT_BACKOFF_SECONDS = 1800.0
+
+
+def _parse_flag_compact_enabled(raw: str) -> bool:
+    """Parse the CCY_FLAG_COMPACT toggle; anything not clearly true is False."""
+    return raw.strip().lower() in _FLAG_COMPACT_TRUE_VALUES
+
+
+def _flag_compact_enabled_from_env() -> bool:
+    """Resolve the effective flag-compact toggle (env override or default off)."""
+    raw = os.environ.get(_FLAG_COMPACT_ENV_VAR)
+    if raw is None:
+        return _DEFAULT_FLAG_COMPACT_ENABLED
+    return _parse_flag_compact_enabled(raw)
+
+
+def _model_family(model_id: str) -> str | None:
+    """Return the canonical model family for ``model_id``, or None if unknown."""
+    lowered = model_id.lower()
+    for token in _MODEL_FAMILY_RANKS:
+        if token in lowered:
+            return _MODEL_FAMILY_CANONICAL.get(token, token)
+    return None
+
+
+def _family_rank(family: str) -> int:
+    """Return the capability rank of a known family (KeyError on unknown)."""
+    return _MODEL_FAMILY_RANKS[family]
+
+
+class Decision(enum.Enum):
+    """What the supervisor WOULD do this evaluation (dry-run logs it)."""
+
+    NOOP = "noop"
+    WOULD_COMPACT = "would-compact"
+    WOULD_CONTINUE = "would-continue"
+    WOULD_ESCAPE = "would-escape"
+    WOULD_RESUBMIT = "would-resubmit"
+    WOULD_GOAL = "would-goal"
+    WOULD_GOAL_CLEAR = "would-goal-clear"
+    WOULD_STANDING_AUTH = "would-standing-auth"
+    WOULD_MODEL = "would-model"
+    WOULD_AUDIT = "would-audit"
+    WOULD_OPERATOR_SIGNAL = "would-operator-signal"
+    WOULD_SESSION_ACTIONS = "would-session-actions"
+    WOULD_CRON_RECONCILE = "would-cron-reconcile"
+    WOULD_PLUGIN_NOTICE = "would-plugin-notice"
+    WOULD_SESSION_NOTICE = "would-session-notice"
+
+
+class SupervisorState(enum.Enum):
+    """Two-state compact-and-resume machine (Decision H)."""
+
+    MONITOR = "monitor"
+    AWAIT_COMPACTING = "await-compacting"
+
+
+@dataclass(frozen=True)
+class SidecarReading:
+    """A parsed snapshot of the daemon-written context sidecar.
+
+    ``compact_urgent`` (Plan 00152) is the midpoint band between red and
+    critical: the supervisor stays PATIENT in the lower red band (waits for the
+    child to settle before compacting) and acts PROMPTLY once the context is
+    compact-urgent (or critical) even while the child is streaming. Defaults
+    False for older sidecars that predate the field.
+    """
+
+    red: bool
+    critical: bool
+    compact_urgent: bool
+    tier: str
+    pct: float
+    session_id: str
+    ts: float
+    seq: int
+    writer_pid: int
+    compacting: bool
+    stale: bool
+    # Plan 00278: model identity, for the model-downgrade `/model` restore.
+    # The default covers sidecars predating the field. The sidecar's effort
+    # level is deliberately not read: the supervisor holds no effort opinion
+    # (Plan 00466 N47).
+    model_id: str = ""
+    # Plan 00399: who started the compaction, from the daemon's record ("" when
+    # no record or an unattributed one). Meaningful only while ``compacting``.
+    compaction_origin: str = ""
+
+
+@dataclass(frozen=True)
+class CompactPolicy:
+    """Tunable guards for the compact state machine."""
+
+    freshness_seconds: float = _DEFAULT_FRESHNESS_SECONDS
+    cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS
+    await_timeout_seconds: float = _DEFAULT_AWAIT_TIMEOUT_SECONDS
+    max_injections: int = _DEFAULT_MAX_INJECTIONS
+    max_escapes: int = _DEFAULT_MAX_ESCAPES
+    compaction_signal_ttl_seconds: float = _DEFAULT_COMPACTION_SIGNAL_TTL_SECONDS
+    escape_after_seconds: float = _DEFAULT_ESCAPE_AFTER_SECONDS
+    reap_ttl_seconds: float = _DEFAULT_REAP_TTL_SECONDS
+    foreground_margin_seconds: float = _DEFAULT_FOREGROUND_MARGIN_SECONDS
+    goal_signal_ttl_seconds: float = _DEFAULT_GOAL_SIGNAL_TTL_SECONDS
+    # Plan 00278 Task 2b.3: EXTRA quiet delay before the /model flip-back on
+    # top of the turn gate (default 0 — the idle/empty-input injection gate
+    # already means the flagged turn is over); negative ("off") disables
+    # auto-restore. Env-resolved for the same host/worker agreement.
+    model_restore_delay_seconds: float = field(default_factory=_model_restore_delay_from_env)
+    # Additional confirming Enters sent after every /model injection (both
+    # auto-restore and the manual switch signal). Env-resolved for the same
+    # host/worker agreement.
+    model_confirm_enters: int = field(default_factory=_model_confirm_enters_from_env)
+    # Plan 00281: opt-in flag-cleaning /compact on a repeated (flip-flop)
+    # downgrade. OFF by default — auto-compaction rewrites context. Env-resolved
+    # for host/worker agreement, like the other Plan 00278/00281 toggles.
+    flag_compact_enabled: bool = field(default_factory=_flag_compact_enabled_from_env)
+
+
+@dataclass(frozen=True)
+class Evaluation:
+    """The outcome of one state-machine evaluation."""
+
+    decision: Decision
+    reason: str
+    # Plan 00398 Phase 3: True ONLY for the abandoned-input-box flush (a
+    # WOULD_RESUBMIT fired because the box has been unchanged past the
+    # stability threshold, not the AWAIT-flush loop's or the own-line
+    # follow-up's WOULD_RESUBMIT). Tells the caller to reset the tracked
+    # `HumanInputLine` model, which the flush's own injected Enter -- written
+    # straight to the PTY master like every other supervisor keystroke --
+    # never touches.
+    abandoned_box_flush: bool = False
+
+
+@dataclass(frozen=True)
+class TickFacts:
+    """The per-tick inputs only the PTY HOST knows (Plan 00164 Phase 4).
+
+    The host tracks these from the forwarded I/O and clock; the policy worker
+    (which owns the state machine and reads the sidecars) is told them each tick.
+    Serialised host→worker as JSON.
+    """
+
+    now_wall: float
+    idle: bool
+    input_line_empty: bool
+    human_compact_submitted: bool
+    work_idle: bool
+    # The human pressed Enter since the last tick. Recomputed by the worker
+    # from ``human_raw_input`` (so no host change is needed to carry it);
+    # False on the in-process path and on legacy hosts. Whatever the box held
+    # was submitted by that keypress, so a pending own line is cleared.
+    human_enter_pressed: bool = False
+    # Plan 00317: raw stdin bytes forwarded since the last tick, base64-encoded
+    # (JSON has no byte-string type). Drained from the host's ``RawInputTap``.
+    # The worker feeds this into its OWN persistent ``HumanInputLine`` and
+    # RECOMPUTES ``human_compact_submitted``/``input_line_empty`` from it,
+    # overriding whatever the host sent above -- that override is what makes typed-
+    # command recognition hot-reloadable (a worker restart alone picks up a
+    # code change). Empty string when nothing was forwarded since last tick,
+    # and on the in-process fallback path (no worker, host's own
+    # ``HumanInputLine`` is authoritative there).
+    human_raw_input: str = ""
+    # The host's authoritative CompactStateMachine state for this tick (Plan
+    # 00164 Phase 4 fix). The worker loads it before deciding so it never runs on
+    # divergent state; None on the in-process path (the machine is already live).
+    machine_state: dict[str, object] | None = None
+    # Per-request correlation id (Plan 00182). The host stamps a monotonically
+    # increasing id on each worker request; the worker echoes it back on the
+    # matching TickOutcome. The host drops any reply whose id does not match the
+    # current request, so a reply left buffered by a timed-out (slow) tick can
+    # never be consumed on a LATER tick and injected out of turn. 0 on the
+    # in-process path (no worker, no correlation needed).
+    tick_id: int = 0
+    # Plan 00398 Phase 2: True when the tracked input box holds content that
+    # has sat UNCHANGED for >= the stability threshold (never "non-empty for
+    # threshold_seconds" -- see `HumanInputLine.is_abandoned`). Computed by the
+    # host from its own long-lived `HumanInputLine`, which never loses history
+    # to a worker restart; the worker does NOT re-derive or AND this the way it
+    # does `input_line_empty` (unlike command recognition, a worker restart
+    # resetting this specific clock would silently re-open the very unbounded
+    # gate this plan exists to close). False on legacy hosts.
+    input_line_abandoned: bool = False
+    # Plan 00470 Task 2.3: seconds the child has produced no output, the proxy
+    # for "no hook traffic" (the daemon has no channel to the supervisor for
+    # it). 0.0 -- never quiet -- on a legacy host and when no output has been
+    # seen, so the cron-expiry watchdog fails closed.
+    output_quiet_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class TickOutcome:
+    """The decision produced by one tick — what the HOST should DO (Phase 4).
+
+    Pure data: the worker (or the in-process fallback) decides; the host injects.
+    ``payload is None`` means NOOP. ``consume_signal_path`` is the compaction
+    signal to delete AFTER a successful resume injection (kept out of the worker
+    so a failed PTY write never loses the resume). Serialised worker→host as JSON.
+    """
+
+    decision_value: str
+    reason: str
+    payload: str | None
+    submit: bool
+    consume_signal_path: str | None
+    deferred_log: str | None
+    # The machine state AFTER this tick (Plan 00164 Phase 4 fix). The host adopts
+    # it as the new authoritative state so the next fallback tick cannot diverge.
+    machine_state: dict[str, object] | None = None
+    # Plan 00168 Phase 1: a deduped NOOP-reason diagnostic (`noop: <reason>[
+    # band]`) the host writes to `decision.log` via `DecisionLog.write_noop`.
+    # Set only for NOOP ticks NOT already covered by `deferred_log`. None on
+    # action ticks. Kept out of the state machine (host-side dedup owns volume).
+    noop_reason_log: str | None = None
+    # Correlation id echoed from the originating TickFacts (Plan 00182). The
+    # worker copies the request's ``tick_id`` onto its reply so the host can
+    # discard a stale reply from a previously timed-out tick. 0 on the
+    # in-process path and on legacy replies without the field.
+    tick_id: int = 0
+    # Additional confirming Enters the host must send after ``payload`` (only
+    # ever non-zero for a ``/model`` injection -- see ``_perform_injection``).
+    # 0 for every other decision and for legacy replies without the field.
+    confirm_enters: int = 0
+    # Plan 00278 continuation: populated only when ``decision_value`` is
+    # WOULD_MODEL, so the HOST can record the AUTO-RESTORE's cap/backoff
+    # bookkeeping (``mark_model_restore``) after a successful injection --
+    # the manual test-trigger switch has its own signal-consumption
+    # lifecycle and does not use these. None/False for every other decision
+    # and for legacy replies without the fields.
+    model_switch_family: str | None = None
+    model_switch_session: str | None = None
+    model_switch_is_auto_restore: bool = False
+    # Plan 00281: True only for the flip-flop flag-cleaning /compact, so the
+    # HOST counts it against the flag-compaction cap/backoff
+    # (``mark_flag_compaction``) on a successful injection. The capacity-based
+    # /compact (Plan 00152) leaves this False — it has its own AWAIT_COMPACTING
+    # lifecycle and must not eat into the flag-compaction budget. False for
+    # every other decision and for legacy replies without the field.
+    is_flag_compact: bool = False
+    # Plan 00299: the raw combined /goal text THIS tick decided to inject
+    # (None for every other decision), so the HOST can record it as the
+    # multi-plan thrash guard (`mark_goal_injection`) on a successful
+    # injection only -- a failed PTY write must not update the guard while
+    # the signal survives for retry.
+    goal_line: str | None = None
+    # Plan 00319 F3: the audit flush's decision.log line, carried SEPARATELY
+    # from `noop_reason_log`/`reason` so a same-tick standing-auth injection
+    # (the only later block that can claim the primary decision) does not
+    # silently erase the record that the flush also happened. None when the
+    # flush's line already reached `noop_reason_log` unclobbered, or when no
+    # flush happened this tick. `_apply_decision` writes it as an ADDITIONAL
+    # decision.log line, never a substitute for the primary one.
+    audit_flush_log: str | None = None
+    # Plan 00398 Phase 3: True ONLY when this tick decided the abandoned-box
+    # flush (`Evaluation.abandoned_box_flush`), so the HOST resets its tracked
+    # `HumanInputLine` (and the WORKER its own) once the Enter is injected --
+    # that injection never passes through `feed`, so without this the model
+    # would show the just-flushed text as non-empty forever. False for every
+    # other decision and for legacy replies without the field.
+    abandoned_box_flushed: bool = False
+    # Plan 00487: what the plugin runtime has to tell the HOST. Failures and
+    # versions are CUMULATIVE for the worker's lifetime and re-sent every tick
+    # (the host's handling is idempotent), so a reply the host discarded as
+    # stale cannot lose a failure. Each failure is `(plugin, kind, hook,
+    # detail)`, closed-set values only. `plugin_log_lines` are the lines
+    # plugins wrote through `api.audit`. `exit_for_restart` is `(plugin,
+    # reason)` when a plugin asked the session to exit for a relaunch.
+    plugin_failures: tuple[tuple[str, str, str, str], ...] = ()
+    plugin_versions: tuple[tuple[str, str], ...] = ()
+    plugin_log_lines: tuple[str, ...] = ()
+    exit_for_restart: tuple[str, str] | None = None
+
+
+def _coerce_float(value: object) -> float:
+    """Best-effort float coercion; non-numeric values become 0.0."""
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _coerce_int(value: object) -> int:
+    """Best-effort int coercion; non-numeric values become 0."""
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+def _default_sidecar_dir() -> Path:
+    """Resolve the daemon's context-sidecar directory from the environment.
+
+    The daemon writes the sidecar to ``daemon_untracked_dir()/context-sidecar``,
+    whose location is INSTALL-MODE-AWARE (see ``ProjectContext``):
+
+    - normal client install: ``{project}/.claude/hooks-daemon/untracked``
+    - self-install (the daemon's own repo): ``{project}/untracked``
+
+    We must resolve the SAME directory or we poll a path the daemon never writes
+    (the v3.34.0 bug: the compact trigger was permanently inert in every normal
+    client install because this hardcoded the self-install layout). Install mode
+    is detected exactly as the daemon does: self-install iff the daemon SOURCE
+    tree ``{project}/src/claude_code_hooks_daemon`` is present at the project
+    root. This is stdlib-only (no daemon import) and stable at startup regardless
+    of whether the sidecar directory exists yet.
+
+    Uses ``$CLAUDE_PROJECT_DIR`` (the project root, exported by ccy in-container),
+    falling back to the current working directory when the variable is unset.
+    """
+    return _daemon_untracked_dir() / _SIDECAR_SUBDIR
+
+
+def _daemon_untracked_dir() -> Path:
+    """Resolve the daemon's untracked runtime dir (install-mode-aware).
+
+    Mirrors ``ProjectContext.daemon_untracked_dir()`` without importing the
+    daemon: self-install iff the daemon SOURCE tree is present at the project
+    root. Used for both the context-sidecar dir and the supervisor status file,
+    so the daemon (which writes/reads via ProjectContext) and the standalone
+    supervisor always agree on one location.
+    """
+    project_dir = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
+    self_install = (project_dir / "src" / "claude_code_hooks_daemon").exists()
+    if self_install:
+        return project_dir / "untracked"
+    return project_dir / ".claude" / "hooks-daemon" / "untracked"
+
+
+_WORKER_ERROR_LOG_NAME = "claude-supervise-worker.err.log"
+# Plan 00319 F4: a red-but-not-recognised session can append a diagnostic line
+# every tick indefinitely, so this log was an unbounded disk time-bomb the same
+# way decision.log was before Plan 00181 -- same shape, same fix. RETAIN < MAX
+# for the same hysteresis reason; a smaller ceiling than decision.log's because
+# this is a secondary diagnostic log, not the primary audit trail.
+_WORKER_ERROR_LOG_MAX_BYTES = 1 * 1024 * 1024
+_WORKER_ERROR_LOG_RETAIN_BYTES = 512 * 1024
+
+
+def worker_error_log_path() -> Path:
+    """Absolute path of the supervisor worker's error log (never the PTY).
+
+    The policy worker runs as a subprocess whose stderr MUST NOT reach the
+    inherited terminal — a per-tick exception would otherwise flood the live
+    Claude session with tracebacks. All worker diagnostics land in this file.
+    """
+    return _daemon_untracked_dir() / _WORKER_ERROR_LOG_NAME
+
+
+def open_worker_error_log() -> TextIO | None:
+    """Open the worker error log for appending; None if it cannot be opened.
+
+    Used as the worker subprocess's ``stderr`` so nothing it emits — including
+    an uncaught interpreter traceback — can reach the inherited PTY. Callers
+    fall back to ``os.devnull`` when this returns None; the worker's stderr is
+    NEVER left inheriting the terminal.
+    """
+    try:
+        path = worker_error_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path.open("a", encoding="utf-8", buffering=1)
+    except OSError:
+        # Cannot open the log — the caller redirects to os.devnull instead. We
+        # return a sentinel (None), never the terminal. This is not swallowing:
+        # the failure changes the caller's redirect target, it does not hide it.
+        return None
+
+
+def append_worker_error(message: str) -> None:
+    """Append a timestamped diagnostic to the worker error log (last resort).
+
+    Best-effort file logging that must itself NEVER raise or write to the PTY —
+    it is the safety net's own logger, so a failure here has nowhere left to go
+    and is intentionally dropped (see error_hiding exclusion).
+
+    Plan 00319 F4: a red-but-not-recognised session can tick indefinitely, each
+    tick potentially appending a diagnostic line, so this log is capped the
+    same way decision.log is (Plan 00181) -- best-effort, after the append that
+    matters has already landed on disk.
+    """
+    stamp = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
+    path = worker_error_log_path()
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{stamp}] {message}\n")
+    except OSError:
+        # Deliberate last-resort drop: the error logger cannot log its own
+        # failure anywhere safe (writing to stderr would flood the PTY, which
+        # is the very bug this safety net exists to prevent).
+        return
+    try:
+        _front_truncate_file(
+            path,
+            max_bytes=_WORKER_ERROR_LOG_MAX_BYTES,
+            retain_bytes=_WORKER_ERROR_LOG_RETAIN_BYTES,
+        )
+    except OSError:
+        # Same last-resort drop as above: the file we'd report a capping
+        # failure to IS this log, and it may be the reason capping just failed.
+        return
+
+
+def _redirect_worker_stderr_to_log() -> None:
+    """Point the worker process's stderr (fd 2 + ``sys.stderr``) at the log file.
+
+    Guarantees the worker can never write to an inherited terminal even if it is
+    launched directly. Best-effort: if the log cannot be opened, stderr is left
+    as the host already configured it (the Popen redirect), never forced onto a
+    tty by this function.
+    """
+    stream = open_worker_error_log()
+    if stream is None:
+        return
+    try:
+        os.dup2(stream.fileno(), sys.stderr.fileno())
+    except (OSError, ValueError) as exc:
+        # fileno() unavailable or dup2 failed: record it, then fall through to
+        # swap the Python-level handle only -- still never a terminal.
+        append_worker_error(f"stderr dup2 failed, using handle swap: {exc}")
+    sys.stderr = stream
+
+
+def _isolate_worker_channels() -> tuple[TextIO, TextIO]:
+    """Give the worker private protocol streams and repoint the standard ones.
+
+    The worker's stdin/stdout are the tick and reply pipes to the PTY host, and
+    plugin code runs in this process. Returns ``(requests, replies)`` over
+    private duplicates of fds 0 and 1, then points fd 0 at ``/dev/null`` and fd
+    1 (plus ``sys.stdin``/``sys.stdout``) at whatever stderr is -- the worker
+    error log once `_redirect_worker_stderr_to_log` ran. Anything plugin code
+    prints, writes to ``sys.stdout`` or writes to fd 1 therefore lands in the
+    log and can never be parsed as a reply or steal a tick. Call it before any
+    plugin is loaded.
+    """
+    sys.stdout.flush()
+    request_fd = os.dup(0)
+    reply_fd = os.dup(1)
+    devnull_fd = os.open(os.devnull, os.O_RDONLY)
+    try:
+        os.dup2(devnull_fd, 0)
+    finally:
+        os.close(devnull_fd)
+    os.dup2(sys.stderr.fileno(), 1)
+    sys.stdin = io.StringIO("")
+    sys.stdout = sys.stderr
+    requests = os.fdopen(request_fd, "r", encoding="utf-8")
+    replies = os.fdopen(reply_fd, "w", encoding="utf-8", buffering=1)
+    return requests, replies
+
+
+def compute_source_hash(path: Path) -> str:
+    """Return a short sha256 hex digest of ``path``'s bytes (staleness key).
+
+    Detects when the on-disk supervisor differs from the running one,
+    independent of whether ``__version__`` was bumped. Not security-sensitive —
+    a content fingerprint only (hence ``usedforsecurity=False``).
+    """
+    digest = hashlib.sha256(path.read_bytes(), usedforsecurity=False)
+    return digest.hexdigest()[:12]
+
+
+def _supervisor_status_path(untracked_dir: Path) -> Path:
+    """Path to the supervisor status file under the shared 'supervise' subdir."""
+    return untracked_dir / _LOG_SUBDIRECTORY / _SUPERVISOR_STATUS_FILENAME
+
+
+def write_supervisor_status(
+    untracked_dir: Path,
+    *,
+    version: str,
+    source_hash: str,
+    pid: int,
+    started_at: float,
+    plugins: Sequence[Mapping[str, str]] | None = None,
+) -> Path | None:
+    """Atomically write the running supervisor's identity for staleness checks.
+
+    Records ``version`` + ``source_hash`` (of the running script) + ``pid`` +
+    ``started_at`` so a SessionStart advisory can compare the on-disk supervisor
+    against the running one. Best-effort: a write failure is reported to stderr
+    and returns None rather than disturbing the supervised session.
+
+    Returns:
+        The status file path on success, or None on failure.
+    """
+    status_path = _supervisor_status_path(untracked_dir)
+    payload: dict[str, object] = {
+        "version": version,
+        "source_hash": source_hash,
+        "pid": pid,
+        "started_at": started_at,
+    }
+    if plugins is not None:
+        # Plan 00487: name/version/state(loaded|failed|disabled)/reason per plugin.
+        # Omitted entirely when no plugin was named, so a consumer that predates
+        # the key sees exactly the payload it always saw.
+        payload["plugins"] = [dict(plugin) for plugin in plugins]
+    try:
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = status_path.parent / f".{_SUPERVISOR_STATUS_FILENAME}.{pid}.tmp"
+        tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+        tmp_path.replace(status_path)
+    except OSError as exc:
+        sys.stderr.write(f"claude-supervise: could not write status file: {exc}\n")
+        return None
+    return status_path
+
+
+def remove_supervisor_status(untracked_dir: Path) -> None:
+    """Remove the supervisor status file if present (idempotent, best-effort).
+
+    Called on exit so a clean shutdown leaves no stale identity behind. Any
+    OSError is reported to stderr, never silently swallowed.
+    """
+    try:
+        _supervisor_status_path(untracked_dir).unlink(missing_ok=True)
+    except OSError as exc:
+        sys.stderr.write(f"claude-supervise: could not remove status file: {exc}\n")
+
+
+# ---------------------------------------------------------------------------
+# Supervisor -> status-line transient message channel (GENERAL, reusable).
+#
+# The supervisor writes a small TTL-bounded JSON message file that the daemon's
+# status-line handler reads and renders, auto-omitting it once expired. The
+# Ctrl+Z "ignored" notice is merely the FIRST consumer; future supervisor
+# events (compact fired, worker restart, arm/disarm, ...) can post through the
+# same channel.
+#
+# THREAD/PROCESS SAFETY (first-class concern — see the top-of-file note): this
+# file is read by the daemon (a SEPARATE process) on every status render and
+# may be written by more than one supervisor thread/process. Every writer here
+# obeys the same rules as `write_supervisor_status`: write to a PRIVATE temp
+# file (named with BOTH pid and thread id so concurrent writers never share a
+# temp path), then `os.replace` (atomic on POSIX) swaps it in — a reader always
+# sees either the old or the new COMPLETE file, never a partial. Last writer
+# wins. In-process rate-limit state is guarded by a `threading.Lock`.
+# ---------------------------------------------------------------------------
+
+_STATUS_MESSAGE_FILENAME = "status-message.json"
+# How long a posted supervisor message stays live. The status line re-renders on
+# Claude Code Status events (~per turn / periodic), NOT on keypress, so the TTL
+# must outlast the gap to the next render for the message to be seen, while
+# staying short enough that a stale notice clears promptly. A few status renders'
+# worth of seconds is the pragmatic middle ground.
+_STATUS_MESSAGE_TTL_SECONDS = 10.0
+# Minimum monotonic gap between writes from one poster, so a key-mash (a burst of
+# Ctrl+Z) rewrites the file at most once per interval instead of thrashing it.
+_STATUS_MESSAGE_MIN_INTERVAL_SECONDS = 1.0
+# Severity levels a posted message can carry. The status-line reader maps
+# "warning" to an orange background (attached to the supervisor's top hat) and
+# treats anything else (including a missing level) as plain info. Kept as named
+# constants — the string values are the on-disk contract shared with the daemon
+# handler (``status_message.py``), so they MUST stay in lockstep.
+_STATUS_LEVEL_INFO = "info"
+_STATUS_LEVEL_WARNING = "warning"
+# Text shown when a Ctrl+Z (SUSP) keystroke/signal is swallowed by the guard.
+_CTRL_Z_NOTICE_TEXT = "⛔ Ctrl+Z ignored — use /exit to quit"
+# Text shown when a Ctrl+\ (QUIT) SIGNAL is swallowed by the guard. Ctrl+\ almost
+# never intentional — a fat-finger next to Enter that would otherwise SIGQUIT
+# (and possibly core-dump) the session.
+_CTRL_BACKSLASH_NOTICE_TEXT = "⛔ Ctrl+\\ ignored — use /exit to quit"
+
+
+def _ctrl_c_notice_text(window_seconds: float) -> str:
+    """Status-line hint shown when a lone Ctrl+C is swallowed (Plan 00312)."""
+    return f"⚠ Ctrl+C intercepted — press Ctrl+C again within {window_seconds:g}s to interrupt"
+
+
+# The signals install_input_signal_guards manages — SIGINT (Ctrl+C) is
+# deliberately EXCLUDED. Kept as one tuple so supervise() can save+restore
+# exactly this set around the forwarding loop (must stay in sync with the
+# signals install_input_signal_guards touches).
+_INPUT_GUARD_SIGNALS = (signal.SIGTSTP, signal.SIGQUIT, signal.SIGTTIN, signal.SIGTTOU)
+
+
+def _status_message_path(untracked_dir: Path) -> Path:
+    """Path to the supervisor->status-line message file (shared 'supervise' dir)."""
+    return untracked_dir / _LOG_SUBDIRECTORY / _STATUS_MESSAGE_FILENAME
+
+
+def _live_warning_present(message_path: Path, *, now: float) -> bool:
+    """Is a WARNING-level message currently on screen and not yet expired?
+
+    Read from the FILE rather than from any in-process state, because the two
+    writers this arbitrates between are in different PROCESSES (Plan 00319 F9):
+    the audit banner is written by ``decide_once`` in the ``--worker``
+    subprocess, every keystroke notice by the PTY host. The message file is the
+    only thing they share.
+
+    Fails OPEN — an absent, unreadable or unparseable file is reported as "no
+    live warning". A message nobody can parse is not one a human is reading, so
+    treating it as live would wedge the channel shut until the TTL of a value we
+    cannot even read elapsed.
+    """
+    try:
+        raw = message_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict) or payload.get("level") != _STATUS_LEVEL_WARNING:
+        return False
+    expires_at = payload.get("expires_at")
+    if not isinstance(expires_at, (int, float)) or isinstance(expires_at, bool):
+        return False
+    return float(expires_at) > now
+
+
+def write_status_message(
+    untracked_dir: Path,
+    *,
+    text: str,
+    expires_at: float,
+    level: str = _STATUS_LEVEL_INFO,
+    countdown: bool = False,
+    now: float | None = None,
+) -> Path | None:
+    """Atomically write a transient supervisor message for the status line.
+
+    THREAD/PROCESS SAFETY: the message file is read by the daemon (a separate
+    process) on every status render and may be written by more than one
+    supervisor thread/process. The write goes to a PRIVATE temp file named with
+    BOTH pid and thread id (``.{name}.{pid}.{tid}.tmp``) so concurrent writers
+    never share a temp path, then ``os.replace`` (atomic on POSIX) swaps it in —
+    a reader therefore always sees either the old or the new COMPLETE file, never
+    a partial one. Last writer wins.
+
+    ``level`` (``_STATUS_LEVEL_INFO`` / ``_STATUS_LEVEL_WARNING``) rides along in
+    the payload so the reader can colour warning-level notices (orange
+    background on the supervisor's top hat) distinctly from plain info.
+
+    ``countdown`` asks the reader to render the seconds remaining until
+    ``expires_at`` alongside the text, so a longer-lived notice visibly
+    announces that it is transient. Opt-in per message: a keystroke hint whose
+    own text already names a window (Ctrl+C's confirm period) would only be
+    muddled by a second number.
+
+    PRECEDENCE (Plan 00319 F9): an ``_STATUS_LEVEL_INFO`` write does NOT replace
+    a WARNING that is still live, and returns None instead. Every keystroke
+    guard (Ctrl+C, Ctrl+Z, Ctrl+\\) posts at WARNING and is time-critical — a
+    Ctrl+C hint names a two-second window — while the only INFO writer is the
+    audit banner, which is a convenience surface whose durable record is
+    decision.log. So the banner yields; nothing else does.
+
+    ``now`` is the wall clock used to judge that liveness, defaulting to
+    ``time.time()``. Callers already holding the tick's clock should pass it,
+    so the decision is made against the same instant as the rest of the tick.
+
+    Best-effort: a write failure is reported to stderr and returns None rather
+    than disturbing the supervised session.
+
+    Returns:
+        The message file path on success, or None on failure or suppression.
+    """
+    message_path = _status_message_path(untracked_dir)
+    if level == _STATUS_LEVEL_INFO and _live_warning_present(
+        message_path, now=time.time() if now is None else now
+    ):
+        return None
+    payload: dict[str, object] = {"text": text, "expires_at": expires_at, "level": level}
+    if countdown:
+        # OMITTED when false, never written as `false`: absent is the reader's
+        # default, so an older daemon (no countdown support) sees exactly the
+        # payload it always saw, and a keystroke hint stays a bare notice.
+        payload["countdown"] = True
+    try:
+        message_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = (
+            message_path.parent
+            / f".{_STATUS_MESSAGE_FILENAME}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+        tmp_path.replace(message_path)
+    except OSError as exc:
+        sys.stderr.write(f"claude-supervise: could not write status message: {exc}\n")
+        return None
+    return message_path
+
+
+class StatusMessagePoster:
+    """Thread-safe, rate-limited writer for transient status-line messages.
+
+    A GENERAL supervisor->status-line channel; the Ctrl+Z guard is merely its
+    first consumer. The rate-limit state (``_last_monotonic``) is shared mutable
+    state that concurrent supervisor threads may touch, so the check-and-update
+    is done under a ``threading.Lock`` — two threads posting at the same instant
+    can never both slip past the interval. The file write itself is atomic (see
+    ``write_status_message``) and is performed OUTSIDE the lock so I/O never
+    serialises other posters' rate-limit checks.
+    """
+
+    def __init__(
+        self,
+        untracked_dir: Path,
+        *,
+        ttl_seconds: float = _STATUS_MESSAGE_TTL_SECONDS,
+        min_interval_seconds: float = _STATUS_MESSAGE_MIN_INTERVAL_SECONDS,
+        wall_clock: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._untracked_dir = untracked_dir
+        self._ttl_seconds = ttl_seconds
+        self._min_interval_seconds = min_interval_seconds
+        self._wall_clock = wall_clock
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._last_monotonic: float | None = None
+
+    def post(
+        self,
+        text: str,
+        *,
+        level: str = _STATUS_LEVEL_INFO,
+        ttl_seconds: float | None = None,
+        countdown: bool = False,
+    ) -> Path | None:
+        """Write ``text`` as the current status message, honouring the rate limit.
+
+        ``level`` selects the severity (``_STATUS_LEVEL_WARNING`` renders on an
+        orange background attached to the supervisor's top hat; the default is
+        plain info). ``ttl_seconds`` overrides this poster's default lifetime
+        for THIS message alone (an audit summary is read, not glanced at, so it
+        needs longer on screen than a keystroke hint), and ``countdown`` asks
+        the reader to show the seconds remaining. Returns the written path, or
+        None when the post is suppressed by the rate limit or the write fails.
+        Thread-safe: the rate-limit check-and-update runs under the lock so
+        concurrent posters cannot both pass within one interval.
+        """
+        now_mono = self._monotonic()
+        ttl = self._ttl_seconds if ttl_seconds is None else ttl_seconds
+        with self._lock:
+            if (
+                self._last_monotonic is not None
+                and now_mono - self._last_monotonic < self._min_interval_seconds
+            ):
+                return None
+            self._last_monotonic = now_mono
+            expires_at = self._wall_clock() + ttl
+        return write_status_message(
+            self._untracked_dir,
+            text=text,
+            expires_at=expires_at,
+            level=level,
+            countdown=countdown,
+        )
+
+
+def install_input_signal_guards(post_notice: Callable[[str], object]) -> None:
+    """Make the supervisor un-suspendable / un-quittable by accidental keys.
+
+    Belt-and-braces to the byte-level ``strip_suspend``: the byte strip only
+    covers Ctrl+Z while the outer terminal is in RAW mode. If a stop/quit SIGNAL
+    is actually delivered — a race in the window before ``tty.setraw`` runs, a
+    non-tty stdin, ``kill -TSTP``/``-QUIT``, or shell job control — the process
+    would still freeze or core-dump. These handlers swallow those signals so the
+    session survives, surfacing a transient notice via ``post_notice`` instead:
+
+    - ``SIGTSTP`` (Ctrl+Z / VSUSP): suspend — swallowed, notice posted.
+    - ``SIGQUIT`` (Ctrl+\\ / VQUIT): quit + possible core dump — swallowed,
+      notice posted. Almost never an intentional keystroke.
+    - ``SIGTTIN`` / ``SIGTTOU``: a backgrounded process touching the tty is
+      stopped by these — ignored so terminal ops never wedge the supervisor.
+
+    ``SIGINT`` (Ctrl+C / VINTR) is DELIBERATELY LEFT ALONE — it is the
+    legitimate, expected interrupt in Claude's TUI; swallowing it would break
+    real usage.
+
+    THREAD SAFETY: ``post_notice`` runs inside a signal handler, which CPython
+    dispatches on the main thread between bytecodes. Pass a lock-free writer
+    (e.g. ``write_status_message`` directly, NOT a ``StatusMessagePoster`` whose
+    ``threading.Lock`` the interrupted main thread might already hold) to avoid
+    a self-deadlock.
+
+    Must be called from the PARENT after ``pty.fork`` so the child ``claude``
+    (already forked with default dispositions) never inherits these handlers.
+    """
+
+    def _swallow_stop(_signum: int, _frame: FrameType | None) -> None:
+        # Suspend swallowed: post the notice and return WITHOUT stopping.
+        post_notice(_CTRL_Z_NOTICE_TEXT)
+
+    def _swallow_quit(_signum: int, _frame: FrameType | None) -> None:
+        # Quit swallowed: post the notice and return WITHOUT exiting/core-dumping.
+        post_notice(_CTRL_BACKSLASH_NOTICE_TEXT)
+
+    signal.signal(signal.SIGTSTP, _swallow_stop)
+    signal.signal(signal.SIGQUIT, _swallow_quit)
+    signal.signal(signal.SIGTTIN, signal.SIG_IGN)
+    signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+
+
+def load_freshest_sidecar(
+    directory: Path,
+    *,
+    now: float,
+    freshness_seconds: float,
+    own_sessions: frozenset[str] | None = None,
+) -> SidecarReading | None:
+    """Load the freshest (max-``ts``) sidecar JSON in ``directory``.
+
+    Returns None when the directory is absent or contains no parseable
+    sidecar. Malformed files are skipped (they may be from an older schema or
+    a foreign writer) rather than aborting the scan -- the freshest VALID
+    reading wins. ``stale`` is set when ``now - ts`` exceeds
+    ``freshness_seconds`` (the daemon has not rendered a status line recently,
+    so the session is idle or gone and must not be acted on).
+
+    Args:
+        directory: The ``context-sidecar`` directory to scan.
+        now: Current epoch time (injected for deterministic tests).
+        freshness_seconds: Age beyond which a reading is marked ``stale``.
+
+    Returns:
+        The freshest valid ``SidecarReading``, or None if none is available.
+    """
+    scanned = _scan_sidecars(directory, own_sessions=own_sessions)
+    if not scanned:
+        return None
+    data, ts = max(scanned, key=lambda pair: pair[1])
+    return _build_sidecar_reading(data, ts, now=now, freshness_seconds=freshness_seconds)
+
+
+def load_foreground_sidecar(
+    directory: Path,
+    *,
+    now: float,
+    freshness_seconds: float,
+    margin_seconds: float = _DEFAULT_FOREGROUND_MARGIN_SECONDS,
+    own_sessions: frozenset[str] | None = None,
+) -> tuple[SidecarReading | None, bool]:
+    """Return ``(freshest_reading, foreground_ambiguous)``.
+
+    ``freshest_reading`` is identical to what ``load_freshest_sidecar`` returns.
+    ``foreground_ambiguous`` is True when a SECOND, still-fresh sidecar's ``ts``
+    is within ``margin_seconds`` of the freshest -- a thread-switch window where
+    the just-backgrounded thread cannot be told apart from the new foreground, so
+    the caller MUST defer a compaction (it would risk compacting the wrong
+    thread). Only NON-stale runner-ups count: under the verified
+    only-the-foreground-renders model a backgrounded thread stops rendering and
+    ages to stale within one freshness window, dropping out of contention -- so
+    ambiguity is transient and self-resolves as the foreground pulls ahead.
+
+    Ambiguity is always False when the freshest reading is stale or absent (there
+    is no live foreground to be ambiguous about; the caller NOOPs on staleness
+    anyway).
+    """
+    scanned = _scan_sidecars(directory, own_sessions=own_sessions)
+    if not scanned:
+        return None, False
+    scanned.sort(key=lambda pair: pair[1], reverse=True)
+    data, ts = scanned[0]
+    reading = _build_sidecar_reading(data, ts, now=now, freshness_seconds=freshness_seconds)
+
+    ambiguous = False
+    if not reading.stale and len(scanned) > 1:
+        runner_ts = scanned[1][1]
+        runner_fresh = (now - runner_ts) <= freshness_seconds
+        if runner_fresh and (ts - runner_ts) < margin_seconds:
+            ambiguous = True
+    return reading, ambiguous
+
+
+def _scan_sidecars(
+    directory: Path, own_sessions: frozenset[str] | None = None
+) -> list[tuple[dict[str, object], float]]:
+    """Parse every ``*.json`` sidecar in ``directory`` into ``(data, ts)`` pairs.
+
+    Single source of truth for the sidecar scan shared by ``load_freshest_sidecar``
+    and ``load_foreground_sidecar``. Unreadable, malformed, or non-object files are
+    skipped (older schema or a foreign writer) rather than aborting the scan.
+
+    ``own_sessions`` (Plan 00166): when provided, sidecars whose ``session_id`` is
+    NOT in the set are skipped, so a foreign terminal's sidecar in the shared dir
+    can never be read as this supervisor's foreground. ``None`` disables the
+    filter (legacy / unit-test callers).
+    """
+    if not directory.is_dir():
+        return []
+    results: list[tuple[dict[str, object], float]] = []
+    for path in directory.glob(_CONTEXT_SIDECAR_GLOB):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if not _session_in_scope(data.get("session_id"), own_sessions):
+            continue
+        results.append((data, _coerce_float(data.get("ts"))))
+    return results
+
+
+def _build_sidecar_reading(
+    data: dict[str, object], ts: float, *, now: float, freshness_seconds: float
+) -> SidecarReading:
+    """Build a ``SidecarReading`` from parsed sidecar ``data`` and its ``ts``."""
+    return SidecarReading(
+        red=bool(data.get("red", False)),
+        critical=bool(data.get("critical", False)),
+        compact_urgent=bool(data.get("compact_urgent", False)),
+        tier=str(data.get("tier", "")),
+        pct=_coerce_float(data.get("pct")),
+        session_id=str(data.get("session_id", "")),
+        ts=ts,
+        seq=_coerce_int(data.get("seq")),
+        writer_pid=_coerce_int(data.get("writer_pid")),
+        compacting=bool(data.get("compacting", False)),
+        stale=(now - ts) > freshness_seconds,
+        model_id=str(data.get("model_id", "")),
+    )
+
+
+def load_compaction_signal(
+    directory: Path,
+    *,
+    now: float,
+    ttl_seconds: float,
+    own_sessions: frozenset[str] | None = None,
+) -> Path | None:
+    """Return the path of a fresh compaction-signal file, or None.
+
+    The daemon's PreCompact handler drops a ``<session>.compacting`` file (JSON
+    ``{"ts": ..., "session_id": ...}``) when a compaction starts -- whether the
+    supervisor triggered it or the human typed ``/compact``. A signal is "fresh"
+    while ``now - ts <= ttl_seconds``; older files are treated as a finished
+    compaction and ignored. The path (not a bool) is returned so the caller can
+    CONSUME the file (unlink it) once it has acted on it, guaranteeing the
+    resume fires exactly once and cannot wedge a later compaction.
+
+    ``own_sessions`` (Plan 00166): when provided, a signal whose ``session_id``
+    is NOT in the set is skipped -- this is what stops terminal A's supervisor
+    resuming off terminal B's compaction in the shared dir. ``None`` disables
+    the filter (legacy / unit-test callers).
+    """
+    if not directory.is_dir():
+        return None
+    for path in directory.glob(_COMPACTION_SIGNAL_GLOB):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if not _session_in_scope(data.get("session_id"), own_sessions):
+            continue
+        ts = _coerce_float(data.get("ts"))
+        if (now - ts) <= ttl_seconds:
+            return path
+    return None
+
+
+def load_compaction_origin(path: Path) -> str:
+    """Return the ``origin`` recorded in a compaction signal, or "" if none.
+
+    Plan 00399. A record from a daemon predating the field, or one that cannot
+    be read, is unattributed -- never a reason to doubt that a compaction is
+    under way, which ``load_compaction_signal`` alone decides.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    origin = data.get(_COMPACTION_ORIGIN_KEY)
+    return origin if isinstance(origin, str) else ""
+
+
+# ---------------------------------------------------------------------------
+# Usage pause (Plan 00479 Task 4.5).
+#
+# The daemon's usage gate pauses a session that crossed its usage ceiling and
+# records it as ``<session>.usage-paused`` (JSON) beside the other signals --
+# deliberately NOT ``*.json``. While a live record exists for an own session the
+# supervisor injects ONE `/compact` (see `_usage_pause_outcome`) and nothing
+# else. This script cannot import the daemon package, so the names below are
+# copies of ``claude_code_hooks_daemon.utils.usage_pause``, pinned to it by
+# tests/unit/supervise/test_usage_pause.py.
+# ---------------------------------------------------------------------------
+
+_USAGE_PAUSE_SUFFIX = ".usage-paused"
+_USAGE_PAUSE_GLOB = f"*{_USAGE_PAUSE_SUFFIX}"
+_USAGE_PAUSE_FIELDS = (
+    "session_id",
+    "paused_at",
+    "resume_at",
+    "window",
+    "used_percentage",
+    "ceiling",
+    "reason",
+)
+_USAGE_PAUSE_WINDOWS = frozenset({"five_hour", "seven_day"})
+# How long past `resume_at` a record still counts: the daemon clears it when the
+# resume cron fires, and this is the backstop for a daemon that never did.
+_USAGE_PAUSE_GRACE_SECONDS = 3600.0
+# The longest a record may pause: resume_at - paused_at. A record asking for more
+# is corrupt or hand-edited and reads as no pause (daemon copy: MAX_PAUSE_SPAN_SECONDS).
+_USAGE_PAUSE_MAX_SPAN_SECONDS = 8 * 86400.0
+_USAGE_PAUSE_TIME_FORMAT = "%Y-%m-%d %H:%M UTC"
+
+
+@dataclass(frozen=True)
+class UsagePauseRecord:
+    """A parsed, validated ``<session>.usage-paused`` record."""
+
+    session_id: str
+    paused_at: float
+    resume_at: float
+    window: str
+    used_percentage: float
+    ceiling: float
+    reason: str
+
+    def is_live(self, now: float) -> bool:
+        """True while ``now`` is within [paused_at, resume_at + grace]."""
+        return self.paused_at <= now <= self.resume_at + _USAGE_PAUSE_GRACE_SECONDS
+
+
+def _usage_pause_number(value: object) -> float | None:
+    """A finite int/float as a float (never a bool, which is an int), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    # NaN and +/-inf both make `number - number` NaN, so only a finite value passes.
+    return number if number - number == 0.0 else None
+
+
+def _parse_usage_pause(data: object) -> UsagePauseRecord | None:
+    """Validate untyped record bytes the way the daemon's writer would; None if bad."""
+    if not isinstance(data, dict):
+        return None
+    session_id, window, reason = (data.get(k) for k in ("session_id", "window", "reason"))
+    paused_at, resume_at, used, ceiling = (
+        _usage_pause_number(data.get(k))
+        for k in ("paused_at", "resume_at", "used_percentage", "ceiling")
+    )
+    if not (isinstance(session_id, str) and session_id.strip()):
+        return None
+    if not (isinstance(window, str) and window in _USAGE_PAUSE_WINDOWS):
+        return None
+    if not (isinstance(reason, str) and reason.strip()):
+        return None
+    if paused_at is None or resume_at is None or used is None or ceiling is None:
+        return None
+    if resume_at <= paused_at or resume_at - paused_at > _USAGE_PAUSE_MAX_SPAN_SECONDS:
+        return None
+    return UsagePauseRecord(session_id, paused_at, resume_at, window, used, ceiling, reason)
+
+
+def load_usage_pause(
+    directory: Path, *, now: float, own_sessions: frozenset[str] | None
+) -> UsagePauseRecord | None:
+    """Return the live usage pause for this supervisor's own session, or None.
+
+    Fails open, like every other signal reader: an unreadable, malformed,
+    future-dated, expired or foreign-session record is no pause, so a broken
+    record can never silence the supervisor. ``own_sessions`` follows the same
+    rule as the other readers (``None`` disables the filter; the empty set puts
+    nothing in scope). When several qualify, the most recently paused wins.
+    """
+    if not directory.is_dir():
+        return None
+    best: UsagePauseRecord | None = None
+    for path in directory.glob(_USAGE_PAUSE_GLOB):
+        try:
+            record = _parse_usage_pause(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+        if record is None or not record.is_live(now):
+            continue
+        if not _session_in_scope(record.session_id, own_sessions):
+            continue
+        if best is None or record.paused_at > best.paused_at:
+            best = record
+    return best
+
+
+# ---------------------------------------------------------------------------
+# Goal-intent signal (Plan 00269) — structural validation gate (Decision 2).
+#
+# The member allowlist ({'/compact', 'continue'}) cannot express per-plan
+# text, so for the goal family ONLY it becomes a SHAPE allowlist: mandatory
+# machine-origin marker prefix, max total length, max logical-line count, and
+# a printable charset with a hard control-byte (newline!) ban. Anything
+# failing the gate is dropped fail-closed and the reason is logged. The
+# compact/continue member allowlist is untouched.
+# ---------------------------------------------------------------------------
+
+# The goal payload's mandatory FIXED HEADER, verified VERBATIM. A mere
+# marker-prefix check would admit any text following the marker — anything
+# able to write the signal file (a bash redirect is enough; no content guard
+# covers it) could then get arbitrary text, including asserted human consent,
+# typed into the chat. The load-bearing clause is the "NOT a human
+# instruction and NOT human authorisation" disclaimer, so the WHOLE header
+# must equal the daemon renderer's fixed header. A lockstep test
+# (tests/unit/supervise/test_goal_signal.py) asserts this string equals
+# goal_injection._HEADER_TEXT so the two sides cannot drift.
+_GOAL_HEADER_TEXT = (
+    "🤖 [ccy-supervisor] automated goal — machine-generated, NOT a human "
+    "instruction and NOT human authorisation for anything."
+)
+# The slash command; the payload is always ``/goal <joined line>`` so the
+# injected message begins ``/goal 🤖 [ccy-supervisor]``.
+_GOAL_COMMAND = "/goal"
+# Fixed separator used to re-join ``rendered_lines`` (identity for the
+# list-of-one the daemon writes today; forward-compatible with a future safe
+# multi-line mechanism).
+_GOAL_SEPARATOR = " — "
+_GOAL_MAX_JOINED_CHARS = 500
+_GOAL_MAX_LOGICAL_LINES = 8
+# Family-specific per-process cap so a signal storm cannot type repeatedly
+# (each signal is also consumed on injection).
+_MAX_GOAL_INJECTIONS = 5
+# The goal cap is a ROLLING budget: at most _MAX_GOAL_INJECTIONS successful
+# injections inside this window. A lifetime cap met the fifth goal of a
+# session that lived for days and then silently ignored every later plan flip.
+_GOAL_CAP_WINDOW_SECONDS = 3600.0
+_DRY_RUN_GOAL_BODY_PREFIX = "would inject /goal (dry-run — no real /goal sent):"
+
+# ---------------------------------------------------------------------------
+# Goal RETRACTION (Plan 00321).
+#
+# Removing the daemon's `.goal-intent` file only stops RE-injection: Claude
+# Code's own `/goal` slot is last-writer-wins and holds the condition until
+# something types a clearing form, so a retired goal otherwise challenges
+# every stop for the rest of the session.
+#
+# The clearing tokens are read out of the shipped Claude Code binary --
+# `new Set(["clear","stop","off","reset","none","cancel"])`, matched
+# case-insensitively. A BARE `/goal` does NOT clear; it prints status. So the
+# literal below must keep its argument.
+#
+# Unlike the goal signal, this one carries NO payload: the file's PRESENCE is
+# the whole message and the command below is a fixed literal with nothing
+# interpolated. That is deliberate -- anything able to write into the sidecar
+# directory can therefore only ever CLEAR a goal, never type text of its
+# choosing, so this channel cannot be turned into an instruction-injection
+# vector the way a payload-carrying one could.
+_GOAL_CLEAR_GLOB = "*.goal-clear"
+_GOAL_CLEAR_COMMAND = "/goal clear"
+_MAX_GOAL_CLEAR_INJECTIONS = 5
+_DRY_RUN_GOAL_CLEAR_BODY = "would inject /goal clear (dry-run — no real /goal clear sent)"
+
+
+def load_goal_clear_signal(
+    directory: Path,
+    *,
+    now: float,
+    ttl_seconds: float = _DEFAULT_GOAL_SIGNAL_TTL_SECONDS,
+    own_sessions: frozenset[str] | None = None,
+) -> Path | None:
+    """Return the path of an in-scope, fresh goal-clear trigger, else None.
+
+    There is no validation gate and no reject reason because there is no
+    payload to validate: the file carries no text this supervisor will ever
+    type. Only two things are checked, and both are scoping rather than
+    content -- the trigger must name one of THIS supervisor's sessions, and it
+    must be fresh.
+
+    A malformed or unreadable file therefore does NOT clear: with no readable
+    ``session_id`` it fails the scope filter, and with no readable ``ts`` it
+    reads as infinitely stale. That is the fail-safe direction. Clearing the
+    goal of a session we cannot identify would retract a condition that may
+    still be owed, and the daemon rewrites this trigger on the next
+    retirement, so a garbled one costs a tick rather than the retraction.
+    """
+    if not directory.is_dir():
+        return None
+    for path in sorted(directory.glob(_GOAL_CLEAR_GLOB)):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if not _session_in_scope(data.get("session_id"), own_sessions):
+            continue
+        if (now - _coerce_float(data.get("ts"))) > ttl_seconds:
+            continue
+        return path
+    return None
+
+
+def _validate_goal_lines(rendered_lines: object) -> tuple[str | None, str | None]:
+    """Validate ``rendered_lines`` from a goal signal; return (joined, error).
+
+    Fail-closed: exactly one of the pair is non-None. The gate checks shape
+    only — it never interprets the text.
+    """
+    if not isinstance(rendered_lines, list) or not rendered_lines:
+        return None, "rendered_lines is not a non-empty list"
+    if len(rendered_lines) > _GOAL_MAX_LOGICAL_LINES:
+        return None, f"more than {_GOAL_MAX_LOGICAL_LINES} logical lines"
+    if not all(isinstance(line, str) for line in rendered_lines):
+        return None, "rendered_lines contains a non-string element"
+    joined = _GOAL_SEPARATOR.join(rendered_lines)
+    # The ENTIRE fixed header must open the payload, verbatim — either alone
+    # (a header-only message) or followed by the separator. A prefix-only
+    # marker check would let a forged signal carry arbitrary text (including
+    # asserted human consent) past the gate.
+    if joined != _GOAL_HEADER_TEXT and not joined.startswith(_GOAL_HEADER_TEXT + _GOAL_SEPARATOR):
+        return None, "payload does not open with the verbatim machine-origin header"
+    if len(joined) > _GOAL_MAX_JOINED_CHARS:
+        return None, f"joined line exceeds {_GOAL_MAX_JOINED_CHARS} chars"
+    for ch in joined:
+        # A newline is a control byte too: under the one-chunk + separate \r
+        # delivery contract it would SUBMIT an unmarked intermediate prompt.
+        if ord(ch) < 0x20 or ord(ch) == 0x7F:
+            return None, "control byte in payload"
+    return joined, None
+
+
+def load_goal_signal(
+    directory: Path,
+    *,
+    now: float,
+    ttl_seconds: float = _DEFAULT_GOAL_SIGNAL_TTL_SECONDS,
+    own_sessions: frozenset[str] | None = None,
+) -> tuple[Path | None, str | None, str | None]:
+    """Return ``(path, joined_line, reject_reason)`` for a goal-intent signal.
+
+    Exactly one of the three shapes comes back: a valid fresh in-scope signal
+    yields ``(path, joined, None)``; an in-scope fresh signal that FAILS the
+    validation gate yields ``(None, None, reason)`` so the caller can log the
+    rejection; no actionable signal at all yields ``(None, None, None)``.
+    Foreign-session and stale signals are skipped silently (foreign files in
+    a shared dir are normal; stale ones age out via the reaper).
+    """
+    if not directory.is_dir():
+        return None, None, None
+    for path in sorted(directory.glob(_GOAL_SIGNAL_GLOB)):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, None, f"unreadable/malformed goal signal {path.name}"
+        if not isinstance(data, dict):
+            return None, None, f"goal signal {path.name} is not a JSON object"
+        if not _session_in_scope(data.get("session_id"), own_sessions):
+            continue
+        if (now - _coerce_float(data.get("ts"))) > ttl_seconds:
+            continue
+        joined, error = _validate_goal_lines(data.get("rendered_lines"))
+        if error is not None:
+            return None, None, f"goal signal {path.name} rejected: {error}"
+        return path, joined, None
+    return None, None, None
+
+
+# ---------------------------------------------------------------------------
+# Standing-authorisation signal (Plan 00283).
+#
+# The daemon's standing_authorisations UserPromptSubmit handler routes a due
+# reinforcement to a ``<session>.standing-auth-intent`` signal (again NOT
+# ``*.json``) when its supervisor channel is enabled and this supervisor is
+# armed+live. We type it as a real user-role line at the same idle choke point
+# as the goal signal, subordinate to every other family. Same security reasoning
+# as the goal header: anything able to WRITE the signal file (a bash redirect is
+# enough) could otherwise get arbitrary text — including a forged human consent —
+# typed into the chat, so the WHOLE header must equal the daemon renderer's fixed
+# header verbatim. A lockstep test asserts this equals
+# standing_authorisations.SUPERVISOR_CHANNEL_HEADER so the two ends cannot drift.
+_STANDING_AUTH_SIGNAL_GLOB = "*.standing-auth-intent"
+_STANDING_AUTH_HEADER_TEXT = (
+    "🤖 [ccy-supervisor] standing authorisations replayed from this project's "
+    "config — machine-generated, NOT a human instruction and NOT fresh human "
+    "authorisation for anything."
+)
+# Re-join separator for rendered_lines (the daemon writes [header, body]).
+_STANDING_AUTH_SEPARATOR = " — "
+_STANDING_AUTH_MAX_JOINED_CHARS = 500
+_STANDING_AUTH_MAX_LOGICAL_LINES = 8
+# Runaway backstop only — the daemon cadence (≤1 signal per reinforcement window)
+# plus consume-on-inject is the real rate limit, so this only ever catches a
+# pathological consume-delete loop. Set high so a long session is never silenced.
+_MAX_STANDING_AUTH_INJECTIONS = 100
+_DRY_RUN_STANDING_AUTH_BODY_PREFIX = (
+    "would inject standing-auth reminder (dry-run — no real message sent):"
+)
+
+
+def _validate_standing_auth_lines(rendered_lines: object) -> tuple[str | None, str | None]:
+    """Validate ``rendered_lines`` from a standing-auth signal; return (joined, error).
+
+    Fail-closed and shape-only, mirroring ``_validate_goal_lines``: the ENTIRE
+    fixed machine-origin header must open the payload verbatim (alone, or followed
+    by the separator), so a forged signal cannot smuggle arbitrary text past the
+    gate. Never interprets the body text.
+    """
+    if not isinstance(rendered_lines, list) or not rendered_lines:
+        return None, "rendered_lines is not a non-empty list"
+    if len(rendered_lines) > _STANDING_AUTH_MAX_LOGICAL_LINES:
+        return None, f"more than {_STANDING_AUTH_MAX_LOGICAL_LINES} logical lines"
+    if not all(isinstance(line, str) for line in rendered_lines):
+        return None, "rendered_lines contains a non-string element"
+    joined = _STANDING_AUTH_SEPARATOR.join(rendered_lines)
+    if joined != _STANDING_AUTH_HEADER_TEXT and not joined.startswith(
+        _STANDING_AUTH_HEADER_TEXT + _STANDING_AUTH_SEPARATOR
+    ):
+        return None, "payload does not open with the verbatim machine-origin header"
+    if len(joined) > _STANDING_AUTH_MAX_JOINED_CHARS:
+        return None, f"joined line exceeds {_STANDING_AUTH_MAX_JOINED_CHARS} chars"
+    for ch in joined:
+        if ord(ch) < 0x20 or ord(ch) == 0x7F:
+            return None, "control byte in payload"
+    return joined, None
+
+
+def load_standing_auth_signal(
+    directory: Path,
+    *,
+    now: float,
+    ttl_seconds: float = _DEFAULT_GOAL_SIGNAL_TTL_SECONDS,
+    own_sessions: frozenset[str] | None = None,
+) -> tuple[Path | None, str | None, str | None]:
+    """Return ``(path, joined_line, reject_reason)`` for a standing-auth signal.
+
+    Same three-shape contract as :func:`load_goal_signal`: a valid fresh in-scope
+    signal yields ``(path, joined, None)``; an in-scope fresh signal that FAILS
+    the gate yields ``(None, None, reason)``; nothing actionable yields
+    ``(None, None, None)``. Foreign-session and stale signals are skipped
+    silently. Reuses the goal TTL default — both are idle-consumed signals with
+    the same generous window.
+    """
+    if not directory.is_dir():
+        return None, None, None
+    for path in sorted(directory.glob(_STANDING_AUTH_SIGNAL_GLOB)):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, None, f"unreadable/malformed standing-auth signal {path.name}"
+        if not isinstance(data, dict):
+            return None, None, f"standing-auth signal {path.name} is not a JSON object"
+        if not _session_in_scope(data.get("session_id"), own_sessions):
+            continue
+        if (now - _coerce_float(data.get("ts"))) > ttl_seconds:
+            continue
+        joined, error = _validate_standing_auth_lines(data.get("rendered_lines"))
+        if error is not None:
+            return None, None, f"standing-auth signal {path.name} rejected: {error}"
+        return path, joined, None
+    return None, None, None
+
+
+# ---------------------------------------------------------------------------
+# Session-actions directive (Plan 00416 Task 2.3).
+#
+# SessionStart output is delivered correctly and simply not acted on: injected
+# context is scenery, not a turn. The daemon tags each session-start message
+# with a computed tier, `Stop` verifies, and in between THIS types one
+# turn-level directive telling the agent to action every ACTION_REQUIRED item.
+# What changes the outcome is the channel, not the wording -- a single typed
+# line got the whole start-up block worked through where the block itself did
+# not.
+#
+# Security shape: the OPERATOR-SIGNAL one, not the goal one. The payload is a
+# positive integer `count` and nothing else, and every word below comes from
+# the fixed template in `_render_session_actions_message`. So unlike the goal
+# and standing-auth families -- which carry daemon-composed text and therefore
+# need a verbatim header check to keep a forged file from typing prose -- this
+# channel has no text to forge. A file carrying extra fields renders exactly
+# the same sentence.
+_SESSION_ACTIONS_SIGNAL_SUFFIX = ".session-actions"
+_SESSION_ACTIONS_SIGNAL_GLOB = f"*{_SESSION_ACTIONS_SIGNAL_SUFFIX}"
+# Pinned to the daemon-side writer's own field name
+# (`claude_code_hooks_daemon.utils.session_actions_signal.FIELD_COUNT`) by
+# `tests/unit/supervise/test_session_actions_signal.py`, since this script
+# cannot import that package.
+_SESSION_ACTIONS_FIELD_COUNT = "count"
+# Reuses the goal TTL: an idle-consumed signal with the same generous window.
+_DEFAULT_SESSION_ACTIONS_TTL_SECONDS = _DEFAULT_GOAL_SIGNAL_TTL_SECONDS
+# Runaway backstop only. The daemon writes at most one signal per session
+# start, and the file is consumed on injection, so this catches nothing but a
+# pathological write/consume loop.
+_MAX_SESSION_ACTIONS_INJECTIONS = 10
+# Carries the SAME invariant provenance marker every other supervisor chat
+# injection does, so skill-scan and the guardrail tests recognise it as
+# supervisor traffic.
+_SESSION_ACTIONS_HEADER = (
+    "🤖 [ccy-supervisor] session-start check — machine-generated, NOT a human "
+    "instruction and NOT human authorisation for anything"
+)
+_DRY_RUN_SESSION_ACTIONS_BODY_PREFIX = (
+    "would inject session-actions directive (dry-run — no real message sent):"
+)
+
+
+# ── Cron-expiry watchdog (Plan 00470 Task 2.3) ──────────────────────────────
+# A session cron dies seven days after creation. The daemon records each one in
+# `cron-records.json` (beside the sidecar dir) and its Stop hook refreshes a job
+# before it expires -- but only while Stop hooks fire. When the session has been
+# quiet for `_CRON_WATCHDOG_QUIET_SECONDS` and EVERY recorded job is already
+# past its expiry, nothing inside the session will notice, so the supervisor
+# types the "CronList and reconcile" prompt the daemon's
+# `persistent_cron_assertor` gives at SessionStart. This script is stdlib-only
+# and cannot import the daemon package, so the names below are copies, pinned to
+# `claude_code_hooks_daemon.utils.cron_records` by
+# tests/unit/supervise/test_cron_expiry_watchdog.py. The file is only READ.
+_CRON_RECORDS_FILENAME = "cron-records.json"
+_CRON_RECORDS_KEY = "records"
+_CRON_FIELD_SESSION_ID = "session_id"
+_CRON_FIELD_CREATED_AT = "created_at"
+_CRON_EXPIRY_SECONDS = 7 * 24 * 60 * 60.0
+# Two hours without child output. PTY quiet is the proxy for "no hook traffic".
+_CRON_WATCHDOG_QUIET_SECONDS = 2 * 60 * 60.0
+# Runaway backstop. Each prompt also waits a full quiet window after the last
+# one, so this only bounds a session that never answers for ever.
+_MAX_CRON_RECONCILE_INJECTIONS = 10
+_CRON_RECONCILE_HEADER = (
+    "🤖 [ccy-supervisor] cron check — machine-generated, NOT a human "
+    "instruction and NOT human authorisation for anything"
+)
+_DRY_RUN_CRON_RECONCILE_BODY_PREFIX = (
+    "would inject cron-reconcile prompt (dry-run — no real message sent):"
+)
+
+
+def _render_cron_reconcile_message() -> str:
+    """The fixed reconcile prompt; nothing read from the record file is interpolated."""
+    return (
+        f"{_CRON_RECONCILE_HEADER}: every cron job recorded for this project is past "
+        "its 7-day expiry and this session has been quiet for hours, so its "
+        "scheduled jobs (recurring jobs auto-expire after 7 days) are probably gone. "
+        "Reconcile them yourself: 1. Run CronList FIRST. 2. Re-create each job the "
+        "project declares that is absent, with CronCreate (recurring: true), using "
+        "its declared schedule and prompt (the persistent-crons list printed at "
+        "session start). 3. If one is already listed, create nothing for it — a "
+        "duplicate fires twice."
+    )
+
+
+def _cron_records_all_expired(
+    directory: Path, *, now: float, own_sessions: frozenset[str] | None
+) -> bool:
+    """True when at least one in-scope record exists and every one is past expiry.
+
+    Fails closed: a missing, unreadable or malformed file, a non-numeric
+    ``created_at`` and a future-dated record (age below zero) are all "not
+    expired", so a broken file can never make the supervisor type anything.
+    """
+    path = directory.parent / _CRON_RECORDS_FILENAME
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    entries = raw.get(_CRON_RECORDS_KEY) if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        return False
+    ages: list[float] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return False
+        if not _session_in_scope(entry.get(_CRON_FIELD_SESSION_ID), own_sessions):
+            continue
+        created_at = entry.get(_CRON_FIELD_CREATED_AT)
+        if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
+            return False
+        ages.append(now - float(created_at))
+    return bool(ages) and all(age >= _CRON_EXPIRY_SECONDS for age in ages)
+
+
+def _render_session_actions_message(count: int) -> str:
+    """Render the fixed, daemon-owned directive for ``count`` must-do items.
+
+    ``count`` is the ONLY value ever interpolated, and only after
+    :func:`load_session_actions_signal` has proven it a positive integer.
+    Every other word is the literal below, so no signal file -- forged,
+    corrupted or merely newer than this script -- can put words of its own
+    choosing into the chat.
+
+    The wording deliberately does NOT restate the items. They are already in
+    this session's start-up output verbatim; repeating them here would be the
+    "say it louder" remedy Plan 00416 rules out, and would also make this
+    channel one that carries content rather than a pointer.
+    """
+    return (
+        f"{_SESSION_ACTIONS_HEADER}: {count} item(s) in this session's start-up "
+        "output are tagged [ACTION_REQUIRED], which is computed from a failing "
+        "verifier rather than declared — something on disk says this session is "
+        "mis-configured. Read them and action every one before other work; "
+        "`hooks-daemon session-actions` re-lists them if they have scrolled out "
+        "of view."
+    )
+
+
+def load_session_actions_signal(
+    directory: Path,
+    *,
+    now: float,
+    ttl_seconds: float = _DEFAULT_SESSION_ACTIONS_TTL_SECONDS,
+    own_sessions: frozenset[str] | None = None,
+) -> tuple[Path | None, str | None, str | None]:
+    """Return ``(path, rendered_message, reject_reason)`` for a directive signal.
+
+    The same three-shape contract as :func:`load_standing_auth_signal`, but
+    like :func:`load_operator_signal` it validates AND RENDERS in one step:
+    the returned message is built entirely by
+    :func:`_render_session_actions_message`, so nothing read from the file is
+    ever used as anything other than a number.
+    """
+    if not directory.is_dir():
+        return None, None, None
+    for path in sorted(directory.glob(_SESSION_ACTIONS_SIGNAL_GLOB)):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, None, f"unreadable/malformed session-actions signal {path.name}"
+        if not isinstance(data, dict):
+            return None, None, f"session-actions signal {path.name} is not a JSON object"
+        if not _session_in_scope(data.get("session_id"), own_sessions):
+            continue
+        if (now - _coerce_float(data.get("ts"))) > ttl_seconds:
+            continue
+        count = data.get(_SESSION_ACTIONS_FIELD_COUNT)
+        # `bool` is an `int` subclass -- excluded explicitly so `"count": true`
+        # is rejected rather than silently coerced to a one-item directive.
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return (
+                None,
+                None,
+                f"session-actions signal {path.name} has a non-positive-integer "
+                f"count {count!r}",
+            )
+        return path, _render_session_actions_message(count), None
+    return None, None, None
+
+
+# ---------------------------------------------------------------------------
+# Manual model-switch signal (test trigger / deliberate override).
+#
+# Mirrors the goal-intent signal: a session-keyed file dropped into the
+# shared context-sidecar dir, consumed at the same idle choke point. Unlike
+# the daemon-written goal signal, this one is written by the supervisor's OWN
+# ``--emit-model-switch`` CLI helper -- there was previously no way to
+# trigger a ``/model`` switch on demand to verify the confirm-Enter fix
+# end-to-end.
+# ---------------------------------------------------------------------------
+
+_MODEL_SWITCH_SIGNAL_SUFFIX = ".model-switch-intent"
+_MODEL_SWITCH_SIGNAL_GLOB = f"*{_MODEL_SWITCH_SIGNAL_SUFFIX}"
+# Same idle-gate reasoning as the goal signal: plan-execution/test-trigger
+# start is usually an idle moment, but the input-box gate can defer, so the
+# window is generous. The signal is consumed on injection, so a generous TTL
+# cannot re-fire it.
+_DEFAULT_MODEL_SWITCH_SIGNAL_TTL_SECONDS = _DEFAULT_GOAL_SIGNAL_TTL_SECONDS
+
+
+def _canonical_model_family(raw: object) -> str | None:
+    """Canonicalise a bare model-family token (e.g. ``mythos`` -> ``fable``).
+
+    Returns None when ``raw`` is not a string or names no known family. Exact
+    membership only -- unlike ``_model_family``'s token-containment scan over
+    a full model id, the model-switch signal always carries a bare family
+    token, never a model id string.
+    """
+    if not isinstance(raw, str):
+        return None
+    lowered = raw.strip().lower()
+    canonical = _MODEL_FAMILY_CANONICAL.get(lowered, lowered)
+    return canonical if canonical in _MODEL_FAMILY_RANKS else None
+
+
+def load_model_switch_signal(
+    directory: Path,
+    *,
+    now: float,
+    ttl_seconds: float = _DEFAULT_MODEL_SWITCH_SIGNAL_TTL_SECONDS,
+    own_sessions: frozenset[str] | None = None,
+) -> tuple[Path | None, str | None, str | None]:
+    """Return ``(path, canonical_family, reject_reason)`` for a switch signal.
+
+    Exactly one of the three shapes comes back: a valid fresh in-scope signal
+    yields ``(path, family, None)``; an in-scope fresh signal that FAILS
+    validation (unknown family, malformed JSON) yields ``(None, None,
+    reason)`` so the caller can log the rejection; no actionable signal at
+    all yields ``(None, None, None)``. Foreign-session and stale signals are
+    skipped silently, mirroring ``load_goal_signal``.
+    """
+    if not directory.is_dir():
+        return None, None, None
+    for path in sorted(directory.glob(_MODEL_SWITCH_SIGNAL_GLOB)):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, None, f"unreadable/malformed model-switch signal {path.name}"
+        if not isinstance(data, dict):
+            return None, None, f"model-switch signal {path.name} is not a JSON object"
+        if not _session_in_scope(data.get("session_id"), own_sessions):
+            continue
+        if (now - _coerce_float(data.get("ts"))) > ttl_seconds:
+            continue
+        raw_family = data.get("family")
+        family = _canonical_model_family(raw_family)
+        if family is None:
+            return (
+                None,
+                None,
+                f"model-switch signal {path.name} names unknown family {raw_family!r}",
+            )
+        return path, family, None
+    return None, None, None
+
+
+def write_model_switch_signal(
+    directory: Path,
+    *,
+    session_id: str,
+    family: str,
+    now: float,
+) -> Path:
+    """Atomically write a manual model-switch signal (the CLI test trigger).
+
+    ``family`` is validated and canonicalised (e.g. ``mythos`` -> ``fable``)
+    the SAME way :func:`load_model_switch_signal` reads it back, so a round
+    trip through this writer always yields a family the reader accepts.
+    Raises ``ValueError`` for an unrecognised family -- fail fast on bad CLI
+    input rather than writing a signal the reader would only reject later.
+
+    Mirrors ``write_status_message``'s atomic-replace pattern: write to a
+    PRIVATE pid-qualified temp file, then ``os.replace`` (``Path.replace``)
+    swaps it in, so a concurrent reader (the supervisor's own tick) always
+    sees either no file or a COMPLETE one. This is a one-shot CLI helper, not
+    a hot-loop writer, so an ``OSError`` propagates to the caller rather than
+    being swallowed here.
+    """
+    canonical = _canonical_model_family(family)
+    if canonical is None:
+        raise ValueError(
+            f"unknown model family {family!r}; expected one of {sorted(_MODEL_FAMILY_RANKS)}"
+        )
+    directory.mkdir(parents=True, exist_ok=True)
+    signal_path = directory / f"{session_id}{_MODEL_SWITCH_SIGNAL_SUFFIX}"
+    payload = {"session_id": session_id, "ts": now, "family": canonical}
+    tmp_path = directory / f".{signal_path.name}.{os.getpid()}.tmp"
+    tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+    tmp_path.replace(signal_path)
+    return signal_path
+
+
+# Plan 00328 Task 2.2: the daemon's `model_downgrade_recorder` publishes one
+# small file per session naming a downgrade CLAUDE CODE ITSELF recorded --
+# both models, both families, the refusal category and its scope. It is the
+# only channel that attributes a family change POSITIVELY to the machine;
+# every other signal available here (a keystroke tap, a model high-water mark,
+# the user settings file) can only infer that a change was not the human's,
+# and a live dogfood showed the supervisor typing `/model` at a human because
+# of it. Same directory and same atomic-write contract as the goal signal.
+_MODEL_DOWNGRADE_SIGNAL_SUFFIX = ".model-downgrade"
+_MODEL_DOWNGRADE_SIGNAL_GLOB = f"*{_MODEL_DOWNGRADE_SIGNAL_SUFFIX}"
+_DOWNGRADE_FIELD_ORIGINAL_FAMILY = "original_family"
+_DOWNGRADE_FIELD_FALLBACK_FAMILY = "fallback_family"
+_DOWNGRADE_FIELD_RECORD_TS = "record_ts"
+_DOWNGRADE_FIELD_RECORD_ID = "record_id"
+
+# Plan 00466 N47 review 4 items 3/4: a record explains a family drop only when
+# the downgrade it records happened within this many seconds of the drop being
+# observed. The recorder republishes one record for the rest of the session,
+# so without a bound an old record attributes a human's much later pick of the
+# same fallback. The status line renders the new model within seconds of the
+# switch and the standalone record lands at most ~90s after the block; five
+# minutes covers both with room for a slow tick, and is far shorter than any
+# gap after which a human's own pick could be mistaken for the machine's.
+_DOWNGRADE_ATTRIBUTION_WINDOW_SECONDS = 300.0
+
+# Plan 00466 N47 review 5 finding 2: a record must also not have been
+# SUPERSEDED -- the supervisor already saw the session back on the top family
+# (fable) at some point after the record's own event time, which means that
+# downgrade was already over before the drop now being judged happened. The
+# skew is slack for status-line render lag between the sidecar showing fable
+# and the record's own transcript timestamp; it is much smaller than the
+# attribution window because it bounds a rendering delay, not a human's
+# reaction time.
+_DOWNGRADE_SUPERSEDE_SKEW_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class DowngradeRecord:
+    """One published automatic-downgrade record, as the supervisor uses it.
+
+    ``record_key`` identifies the transcript record: its ``record_id`` (the
+    entry's uuid, or its line's byte offset), or ``record_ts`` for a signal
+    from a daemon that predates ``record_id``; empty when it has neither.
+    ``event_ts`` is when the downgrade happened (the record's transcript
+    timestamp), or ``None`` when that is missing or unparseable.
+    """
+
+    session_id: str
+    from_family: str
+    to_family: str
+    record_key: str
+    event_ts: float | None
+
+
+def _record_event_epoch(timestamp: str) -> float | None:
+    """A transcript timestamp as epoch seconds, or ``None``; zone-less means UTC.
+
+    Mirrors ``model_fallback_records.event_epoch``, which this standalone
+    script cannot import.
+    """
+    if not timestamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def load_model_downgrade_signal(
+    directory: Path,
+    *,
+    own_sessions: frozenset[str] | None = None,
+) -> DowngradeRecord | None:
+    """Return the in-scope published downgrade record, or ``None``.
+
+    Deliberately NOT time-windowed, unlike the goal and model-switch signals.
+    The record's own ``scope`` is ``session``: the substitution lasts until the
+    session ends, so a signal written an hour ago is still true. Staleness is
+    handled where it belongs -- ``reap_stale_sidecars`` removes the file once
+    the session is long dead. Which DROP a record may explain is bounded by
+    its ``event_ts`` instead, in the state machine.
+
+    Fail-silent per file, mirroring ``load_model_switch_signal``: a malformed
+    or unreadable signal is simply no signal. A family the recorder could not
+    resolve comes back as ``None`` in the payload and is rejected here rather
+    than passed on -- acting on it would aim a restore at nothing.
+
+    The record key identifies the underlying transcript record, not the
+    publish time -- the recorder republishes the SAME record for as long as
+    the session lives, so a caller that wants to tell "the same downgrade,
+    seen again" from "a NEW downgrade" needs this, not the file's own ``ts``.
+    """
+    if not directory.is_dir():
+        return None
+    for path in sorted(directory.glob(_MODEL_DOWNGRADE_SIGNAL_GLOB)):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        if not _session_in_scope(session_id, own_sessions):
+            continue
+        original = _canonical_model_family(data.get(_DOWNGRADE_FIELD_ORIGINAL_FAMILY))
+        fallback = _canonical_model_family(data.get(_DOWNGRADE_FIELD_FALLBACK_FAMILY))
+        if original is None or fallback is None:
+            continue
+        record_ts = data.get(_DOWNGRADE_FIELD_RECORD_TS)
+        if not isinstance(record_ts, str):
+            record_ts = ""
+        record_id = data.get(_DOWNGRADE_FIELD_RECORD_ID)
+        if not isinstance(record_id, str):
+            record_id = ""
+        return DowngradeRecord(
+            session_id=session_id,
+            from_family=original,
+            to_family=fallback,
+            record_key=record_id or record_ts,
+            event_ts=_record_event_epoch(record_ts),
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Operator signal (Plan 00417): reboot/shutdown warnings from OUTSIDE the
+# container, written by `hooks-daemon signal` (mirroring `--emit-model-switch`
+# and `inject-goal`). The SECURITY SHAPE is different from every signal above
+# on purpose: this is the one channel reachable from the HOST, not from
+# inside a session, so it is built closed rather than merely shape-checked --
+# a fixed set of `kind`s and, for the two that need one, a bare positive
+# integer (`minutes`). There is no free-text field and no reason field
+# anywhere in the schema, so a forged or corrupted signal file can, at
+# absolute worst, cause one of three PRE-WRITTEN sentences below to appear
+# early, late, or not at all -- never arbitrary text. `load_operator_signal`
+# validates AND renders in one step (unlike `load_goal_signal`, which only
+# validates shape and leaves the text itself alone): the payload's only use
+# anywhere in `_render_operator_message` is a number inside a literal
+# template, and `kind` is used only to SELECT which literal to return, never
+# interpolated into it.
+# ---------------------------------------------------------------------------
+
+_OPERATOR_SIGNAL_SUFFIX = ".operator-signal"
+_OPERATOR_SIGNAL_GLOB = f"*{_OPERATOR_SIGNAL_SUFFIX}"
+# Reuses the reaper's own generous window rather than the shorter goal-signal
+# TTL: a reboot warning must still be deliverable after a session stays busy
+# for a while, and a signal that outlived this TTL is about to be reaped
+# anyway, so there is no point setting a shorter one.
+_DEFAULT_OPERATOR_SIGNAL_TTL_SECONDS = _DEFAULT_REAP_TTL_SECONDS
+
+# The closed set of kinds -- pinned to the daemon-side writer's own copies
+# (`claude_code_hooks_daemon.utils.operator_signal`) by
+# `tests/unit/supervise/test_operator_signal.py`, since this script cannot
+# import that package.
+_OPERATOR_KIND_REBOOT_WARNING = "reboot-warning"
+_OPERATOR_KIND_SHUTDOWN_WARNING = "shutdown-warning"
+_OPERATOR_KIND_REBOOT_CANCELLED = "reboot-cancelled"
+_OPERATOR_KINDS_WITH_MINUTES = frozenset(
+    {_OPERATOR_KIND_REBOOT_WARNING, _OPERATOR_KIND_SHUTDOWN_WARNING}
+)
+_OPERATOR_KINDS = _OPERATOR_KINDS_WITH_MINUTES | {_OPERATOR_KIND_REBOOT_CANCELLED}
+
+# Carries the SAME invariant provenance marker every other supervisor chat
+# injection does (see the RULESET note above `_AUDIT_BANNER_GLYPH`), so
+# skill-scan and the guardrail tests recognise it as supervisor traffic.
+_OPERATOR_HEADER = (
+    "🤖 [ccy-supervisor] operator signal — machine-generated, NOT a human instruction"
+)
+_DRY_RUN_OPERATOR_BODY_PREFIX = (
+    "would inject operator-signal warning (dry-run — no real message sent):"
+)
+# Status-line display window for a `reboot-cancelled` notice, which carries
+# no minutes and so has no real deadline to count down to -- a short, fixed,
+# non-countdown TTL like the other one-off keystroke notices.
+_OPERATOR_CANCEL_NOTICE_TTL_SECONDS = 30.0
+
+
+def _render_operator_message(kind: str, minutes: int | None) -> str:
+    """Render the fixed, daemon-owned sentence for one operator-signal kind.
+
+    The ONLY value ever interpolated is ``minutes``, and only after
+    :func:`load_operator_signal` has already proven it a positive integer --
+    every other word comes from the literal templates below. ``kind`` itself
+    is never interpolated into the returned text, only used to SELECT a
+    branch, so even a forged ``kind`` string could never appear verbatim in
+    what the agent reads.
+    """
+    if kind == _OPERATOR_KIND_REBOOT_WARNING:
+        return (
+            f"{_OPERATOR_HEADER}: the host machine will reboot in {minutes} minute(s). "
+            "Commit and push any uncommitted work, journal state, finish the current "
+            "step, and start nothing new -- a session restore will follow."
+        )
+    if kind == _OPERATOR_KIND_SHUTDOWN_WARNING:
+        return (
+            f"{_OPERATOR_HEADER}: the host machine will shut down in {minutes} minute(s) "
+            "and NO session restore will follow. Commit and push any uncommitted work, "
+            "journal state, finish the current step, start nothing new, and leave a "
+            "handoff entry for whoever picks this up."
+        )
+    if kind == _OPERATOR_KIND_REBOOT_CANCELLED:
+        return (
+            f"{_OPERATOR_HEADER}: the previously warned reboot has been cancelled -- "
+            "resume normal work."
+        )
+    raise ValueError(f"unknown operator signal kind {kind!r}")  # pragma: no cover -- unreachable;
+    # load_operator_signal already refuses any kind outside _OPERATOR_KINDS
+    # before this function is ever called.
+
+
+def load_operator_signal(
+    directory: Path,
+    *,
+    now: float,
+    ttl_seconds: float = _DEFAULT_OPERATOR_SIGNAL_TTL_SECONDS,
+    own_sessions: frozenset[str] | None = None,
+) -> tuple[Path | None, str | None, float | None, str | None]:
+    """Return ``(path, rendered_message, deadline_wall, reject_reason)``.
+
+    A four-shape contract, widened by one field from :func:`load_goal_signal`:
+    a valid fresh in-scope signal yields ``(path, message, deadline, None)``;
+    an in-scope fresh signal that FAILS validation (unknown kind, a
+    non-positive-integer ``minutes``) yields ``(None, None, None, reason)``;
+    no actionable signal at all yields ``(None, None, None, None)``.
+    Foreign-session and stale signals are skipped silently.
+
+    Unlike ``load_goal_signal`` -- which validates the goal payload's SHAPE
+    only and leaves the text itself alone -- this validates AND RENDERS in
+    one step: the returned ``message`` is built entirely by
+    :func:`_render_operator_message` from fixed templates, so nothing read
+    from the file is ever used as anything other than a number or a branch
+    selector.
+
+    ``deadline_wall`` is the absolute wall-clock instant (epoch seconds,
+    the signal's own ``ts`` field plus ``minutes`` * 60) a status-line
+    countdown should count down to, or ``None`` for a kind that carries no
+    minutes (``reboot-cancelled``). It is computed from the signal's ts,
+    once, here -- recomputing "now + minutes" on every tick would push the
+    deadline forward by however long that tick took, so the countdown would
+    never converge on the real deadline.
+    """
+    if not directory.is_dir():
+        return None, None, None, None
+    for path in sorted(directory.glob(_OPERATOR_SIGNAL_GLOB)):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, None, None, f"unreadable/malformed operator signal {path.name}"
+        if not isinstance(data, dict):
+            return None, None, None, f"operator signal {path.name} is not a JSON object"
+        if not _session_in_scope(data.get("session_id"), own_sessions):
+            continue
+        ts = _coerce_float(data.get("ts"))
+        if (now - ts) > ttl_seconds:
+            continue
+        kind = data.get("kind")
+        if kind not in _OPERATOR_KINDS:
+            return None, None, None, f"operator signal {path.name} names unknown kind {kind!r}"
+        minutes: int | None = None
+        if kind in _OPERATOR_KINDS_WITH_MINUTES:
+            raw_minutes = data.get("minutes")
+            # `bool` is an `int` subclass -- excluded explicitly so
+            # `"minutes": true` is rejected rather than silently coerced to 1.
+            if (
+                isinstance(raw_minutes, bool)
+                or not isinstance(raw_minutes, int)
+                or raw_minutes <= 0
+            ):
+                return (
+                    None,
+                    None,
+                    None,
+                    f"operator signal {path.name} has a non-positive-integer minutes "
+                    f"{raw_minutes!r}",
+                )
+            minutes = raw_minutes
+        deadline = ts + minutes * 60.0 if minutes is not None else None
+        return path, _render_operator_message(kind, minutes), deadline, None
+    return None, None, None, None
+
+
+def reap_stale_sidecars(
+    directory: Path,
+    *,
+    now: float,
+    ttl_seconds: float = _DEFAULT_REAP_TTL_SECONDS,
+    log: DecisionLog | None = None,
+) -> list[Path]:
+    """Delete dead context-sidecar / compaction-signal files older than the TTL.
+
+    Reaps ``*.json`` sidecars, ``*.compacting`` signals, ``*.goal-intent``
+    signals, ``*.goal-clear`` triggers, ``*.standing-auth-intent`` signals,
+    ``*.model-switch-intent`` signals, ``*.model-downgrade``
+    signals, ``*.operator-signal`` signals and ``*.session-actions``
+    directives whose FILE MTIME is older than
+    ``ttl_seconds``. Mtime (not the JSON ``ts``) is used so a
+    malformed, truncated, or foreign file is reaped uniformly without a parse --
+    a dead file is a dead file. The single newest-mtime ``*.json`` is ALWAYS
+    spared, so the supervisor's current reading source is never removed even when
+    every session is dead (a bounded residue of one file). Because ``ttl_seconds``
+    is far larger than the freshness and compaction-signal windows, a file this
+    old can never still be actionable, so reaping cannot race a live decision.
+
+    Atomic-write temp files (``.{stem}.{pid}.tmp``) and any non-sidecar file (the
+    supervisor's own ``decision.log``) are never matched by the globs and so are
+    left untouched. Unlink races (the file vanished since it was stat'd) and stat
+    failures are tolerated -- reaping is best-effort hygiene, never fatal; a real
+    unlink error is logged, never silently swallowed.
+    """
+    if not directory.is_dir():
+        return []
+
+    entries: list[tuple[Path, float]] = []
+    for path in (
+        list(directory.glob(_CONTEXT_SIDECAR_GLOB))
+        + list(directory.glob(_COMPACTION_SIGNAL_GLOB))
+        + list(directory.glob(_GOAL_SIGNAL_GLOB))
+        + list(directory.glob(_GOAL_CLEAR_GLOB))
+        + list(directory.glob(_STANDING_AUTH_SIGNAL_GLOB))
+        + list(directory.glob(_MODEL_SWITCH_SIGNAL_GLOB))
+        + list(directory.glob(_MODEL_DOWNGRADE_SIGNAL_GLOB))
+        + list(directory.glob(_OPERATOR_SIGNAL_GLOB))
+        + list(directory.glob(_SESSION_ACTIONS_SIGNAL_GLOB))
+    ):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            # Vanished or unreadable between glob and stat -- nothing to reap.
+            continue
+        entries.append((path, mtime))
+
+    # Spare the freshest sidecar (the supervisor's current reading source) so it
+    # is never reaped, even if every session is dead and it too is past the TTL.
+    newest_json: Path | None = None
+    newest_mtime = float("-inf")
+    for path, mtime in entries:
+        if path.suffix == ".json" and mtime > newest_mtime:
+            newest_mtime = mtime
+            newest_json = path
+
+    reaped: list[Path] = []
+    for path, mtime in entries:
+        if path == newest_json:
+            continue
+        if (now - mtime) <= ttl_seconds:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            if log is not None:
+                log.write(f"warning: could not reap stale file {path}: {exc}")
+            continue
+        reaped.append(path)
+
+    if reaped and log is not None:
+        log.write(f"reaped {len(reaped)} stale sidecar/signal file(s)")
+    return reaped
+
+
+# ---------------------------------------------------------------------------
+# Plugin API (Plan 00487)
+#
+# A project names plugins EXPLICITLY, with a repeatable
+# ``--plugin <name>=<worker.py>`` flag before ``--``. Nothing is found by
+# scanning. A plugin file is stdlib-only, vetted (regular file, owned by this
+# uid or root, neither it nor its directory group/world-writable) and never
+# imported by the PTY HOST: the host only vets the file and keeps a registry
+# (`PluginHost`); the ``--worker`` subprocess imports the files the host passed
+# on (`PluginRuntime`). Plugin code runs ONLY in that worker: when the worker
+# is silent or down the host's in-process fallback runs the built-in families
+# alone, and plugins resume when a worker answers again.
+#
+# A worker half is ``create_worker_half(api)`` returning an object with
+# ``on_start()`` and ``on_idle(tick)``. ``on_idle`` runs ONLY at the end of the
+# `decide_once` cascade, after every built-in family, when the same gates hold
+# as for those families plus ``can_inject`` and no own line pending.
+#
+# A plugin can never block the supervisor or the session. Every hook call runs
+# on a thread with a short budget well inside the host's worker read timeout,
+# and every failure takes ONE path: detect (exception, overrun, wedge, bad
+# result, load failure), disable for the rest of the supervisor process (the
+# host passes ``--disable-plugin`` on every worker (re)start), recover (an
+# overrun or wedge restarts the worker without the plugin), and tell the
+# session through the built-in plugin-notice family, which is rendered from
+# FIXED templates only -- a validated name plus closed-set values, never
+# plugin text or exception text.
+# ---------------------------------------------------------------------------
+
+_PLUGIN_API_MAJOR = 1
+_PLUGIN_API_VERSION = (_PLUGIN_API_MAJOR, 0)
+_PLUGIN_FLAG = "--plugin"
+_DISABLE_PLUGIN_FLAG = "--disable-plugin"
+_PLUGIN_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+_PLUGIN_SPEC_SEPARATOR = "="
+_PLUGIN_UNNAMED = "(unnamed)"
+_PLUGIN_MODULE_PREFIX = "_ccy_plugin_"
+_PLUGIN_API_ATTRIBUTE = "PLUGIN_API"
+_PLUGIN_FACTORY_NAME = "create_worker_half"
+_PLUGIN_STATE_DIR_MODE = 0o700
+_PLUGIN_UNSAFE_MODE_BITS = stat.S_IWGRP | stat.S_IWOTH
+_ROOT_UID = 0
+
+# Where the supervisor keeps state that must outlive a container restart: under
+# the project's own `.claude/ccy/` (the directory this script is deployed in,
+# gitignored by that directory's `.gitignore`). Plugin state dirs live under
+# `plugins/<name>/`; the exit-for-restart request lives at the top level.
+_CCY_STATE_SUBDIRECTORY = "state"
+_CCY_STATE_DIR_ENV = "CCY_SUPERVISOR_STATE_DIR"
+_PLUGIN_STATE_SUBDIRECTORY = "plugins"
+
+# Hook time budgets. A tick's reply is awaited for `_WORKER_READ_TIMEOUT_SECONDS`
+# (2.0s), so the whole plugin share of a tick stays at half of that and a single
+# hook gets less still. Plugins past the tick budget are simply not asked this
+# tick (not a failure).
+_PLUGIN_HOOK_BUDGET_SECONDS = 0.5
+_PLUGIN_TICK_BUDGET_SECONDS = 1.0
+_PLUGIN_LOAD_BUDGET_SECONDS = 1.0
+# A marker older than a hook's budget plus this grace means the worker is stuck
+# INSIDE that hook (a budgeted thread could not return it), not merely slow.
+_PLUGIN_WEDGE_GRACE_SECONDS = 0.25
+
+_PLUGIN_TEXT_MAX_CHARS = 200
+_PLUGIN_VERSION_MAX_CHARS = 64
+_PLUGIN_REASON_MAX_CHARS = 120
+_PLUGIN_AUDIT_MAX_PENDING = 20
+_PLUGIN_STATUS_TTL_DEFAULT_SECONDS = 10.0
+_PLUGIN_STATUS_TTL_MIN_SECONDS = 1.0
+_PLUGIN_STATUS_TTL_MAX_SECONDS = 60.0
+_PLUGIN_MARKER_PREFIX = "plugin-in-hook"
+
+# Reasons a plugin was refused at load: a CLOSED set, because they reach
+# `supervisor-status.json` and a notice is rendered only from closed values.
+_LOAD_REASON_BAD_SPEC = "bad-spec"
+_LOAD_REASON_BAD_NAME = "bad-name"
+_LOAD_REASON_NOT_ABSOLUTE = "not-absolute"
+_LOAD_REASON_NOT_A_FILE = "not-a-file"
+_LOAD_REASON_OWNER = "wrong-owner"
+_LOAD_REASON_WRITABLE = "group-or-world-writable"
+_LOAD_REASON_DUPLICATE = "duplicate-name"
+_LOAD_REASON_API = "api-mismatch"
+_LOAD_REASON_IMPORT = "import-error"
+_LOAD_REASON_NO_FACTORY = "no-factory"
+_LOAD_REASON_FACTORY = "factory-error"
+_LOAD_REASON_BAD_HALF = "bad-half"
+_LOAD_REASON_STATE_DIR = "state-dir"
+_LOAD_REASON_TIMEOUT = "timeout"
+_LOAD_REASON_UNSPECIFIED = "unspecified"
+_PLUGIN_LOAD_REASONS = frozenset(
+    {
+        _LOAD_REASON_BAD_SPEC,
+        _LOAD_REASON_BAD_NAME,
+        _LOAD_REASON_NOT_ABSOLUTE,
+        _LOAD_REASON_NOT_A_FILE,
+        _LOAD_REASON_OWNER,
+        _LOAD_REASON_WRITABLE,
+        _LOAD_REASON_DUPLICATE,
+        _LOAD_REASON_API,
+        _LOAD_REASON_IMPORT,
+        _LOAD_REASON_NO_FACTORY,
+        _LOAD_REASON_FACTORY,
+        _LOAD_REASON_BAD_HALF,
+        _LOAD_REASON_STATE_DIR,
+        _LOAD_REASON_TIMEOUT,
+        _LOAD_REASON_UNSPECIFIED,
+    }
+)
+
+# The closed sets a failure is described with.
+_PLUGIN_HOOK_LOAD = "load"
+_PLUGIN_HOOK_ON_START = "on_start"
+_PLUGIN_HOOK_ON_IDLE = "on_idle"
+_PLUGIN_HOOKS = frozenset({_PLUGIN_HOOK_LOAD, _PLUGIN_HOOK_ON_START, _PLUGIN_HOOK_ON_IDLE})
+_PLUGIN_KIND_LOAD = "load"
+_PLUGIN_KIND_EXCEPTION = "exception"
+_PLUGIN_KIND_OVERRUN = "overrun"
+_PLUGIN_KIND_WEDGE = "wedge"
+_PLUGIN_KIND_BAD_RESULT = "bad-result"
+# The plugin kept asking to end the session and the session kept not ending
+# (`RestartCoordinator` gave up on it `_RESTART_MAX_ABANDONED` times).
+_PLUGIN_KIND_EXIT_STUCK = "exit-stuck"
+# The HOST's own plugin handling failed unexpectedly (`PluginContainment`), so
+# every plugin is switched off rather than left running unsupervised.
+_PLUGIN_KIND_HOST_FAULT = "host-fault"
+_PLUGIN_KINDS = frozenset(
+    {
+        _PLUGIN_KIND_LOAD,
+        _PLUGIN_KIND_EXCEPTION,
+        _PLUGIN_KIND_OVERRUN,
+        _PLUGIN_KIND_WEDGE,
+        _PLUGIN_KIND_BAD_RESULT,
+        _PLUGIN_KIND_EXIT_STUCK,
+        _PLUGIN_KIND_HOST_FAULT,
+    }
+)
+# A failure of these kinds leaves a thread (or the whole worker) possibly still
+# running plugin code, so the host recovers by restarting the worker.
+_PLUGIN_KINDS_NEEDING_WORKER_RESTART = frozenset(
+    {_PLUGIN_KIND_OVERRUN, _PLUGIN_KIND_WEDGE, _PLUGIN_KIND_EXIT_STUCK, _PLUGIN_KIND_HOST_FAULT}
+)
+
+_PLUGIN_STATE_LOADED = "loaded"
+_PLUGIN_STATE_FAILED = "failed"
+_PLUGIN_STATE_DISABLED = "disabled"
+_DISABLED_BY_FLAG_REASON = f"disabled by {_DISABLE_PLUGIN_FLAG}"
+
+_BUDGET_OK = "ok"
+_BUDGET_EXCEPTION = "exception"
+_BUDGET_OVERRUN = "overrun"
+
+
+class PluginLoadError(Exception):
+    """A plugin was refused at load; ``reason`` is a member of ``_PLUGIN_LOAD_REASONS``.
+
+    ``name`` is set only once the plugin's name has been validated, because a
+    notice may name only a validated name.
+    """
+
+    def __init__(self, reason: str, name: str | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.name = name
+
+
+@dataclass(frozen=True)
+class PluginSpec:
+    """A parsed ``--plugin <name>=<path>`` flag value."""
+
+    name: str
+    path: Path
+
+
+@dataclass(frozen=True)
+class PluginFailure:
+    """One plugin failure, described ONLY by validated or closed-set values.
+
+    ``kind`` is a member of ``_PLUGIN_KINDS``, ``hook`` of ``_PLUGIN_HOOKS``
+    and ``detail`` (load failures only) of ``_PLUGIN_LOAD_REASONS``. Never
+    exception text, never plugin text.
+    """
+
+    plugin: str
+    kind: str
+    hook: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class IdleTick:
+    """What a worker half's ``on_idle`` is told."""
+
+    now: float
+    session_id: str | None
+
+
+@dataclass(frozen=True)
+class ExitForRestart:
+    """An ``on_idle`` result: end the session at this idle point and exit for a relaunch.
+
+    The host types ``/exit``, and once the child has exited, writes the restart
+    request file and exits with `EXIT_STATUS_RESTART_REQUESTED` so the launcher
+    can relaunch with ``--resume <id>``. ``reason`` is short, logged only and
+    never typed into the chat.
+    """
+
+    reason: str
+
+
+NOTIFY_RESTART_SOON = "restart-soon"
+NOTIFY_DEADLINE_REACHED = "deadline-reached"
+_NOTIFY_KINDS = frozenset({NOTIFY_RESTART_SOON, NOTIFY_DEADLINE_REACHED})
+_NOTIFY_MINUTES_MIN = 1
+_NOTIFY_MINUTES_MAX = 240
+
+
+@dataclass(frozen=True)
+class Notify:
+    """An ``on_idle`` result: ask the supervisor to tell the session something.
+
+    ``kind`` is `NOTIFY_RESTART_SOON` (``minutes`` is then required, an int from
+    1 to `_NOTIFY_MINUTES_MAX`) or `NOTIFY_DEADLINE_REACHED` (no ``minutes``).
+    The plugin supplies NO text: the supervisor renders the line from its own
+    fixed template, marks it as machine-generated, types it at an idle point
+    and rate-limits it per kind.
+    """
+
+    kind: str
+    minutes: int | None = None
+
+
+@dataclass(frozen=True)
+class PluginNotification:
+    """A validated `Notify` together with the plugin that returned it."""
+
+    plugin: str
+    kind: str
+    minutes: int | None
+
+
+@dataclass(frozen=True)
+class PluginExitRequest:
+    """A validated `ExitForRestart` together with the plugin that returned it."""
+
+    plugin: str
+    reason: str
+
+
+# What `on_idle` may return is judged INSIDE the hook's time budget (on the
+# budgeted thread), because reading a plugin-controlled value -- an attribute
+# access, a property, a ``__str__`` -- can run plugin code or hang.
+_BAD_IDLE_RESULT = object()
+
+
+def _validated_idle_result(value: object) -> object:
+    """None, a cleaned `ExitForRestart`, a validated `Notify`, or `_BAD_IDLE_RESULT`.
+
+    The reason must be a plain ``str`` (not a subclass, whose ``__str__`` could
+    run plugin code later); it is cleaned and bounded here.
+    """
+    if value is None:
+        return None
+    if isinstance(value, ExitForRestart):
+        reason = value.reason
+        if type(reason) is not str:
+            return _BAD_IDLE_RESULT
+        return ExitForRestart(_clean_text(reason, _PLUGIN_REASON_MAX_CHARS))
+    if isinstance(value, Notify):
+        kind, minutes = value.kind, value.minutes
+        if type(kind) is not str or kind not in _NOTIFY_KINDS:
+            return _BAD_IDLE_RESULT
+        if kind == NOTIFY_RESTART_SOON:
+            if (
+                type(minutes) is not int
+                or not _NOTIFY_MINUTES_MIN <= minutes <= _NOTIFY_MINUTES_MAX
+            ):
+                return _BAD_IDLE_RESULT
+        elif minutes is not None:
+            return _BAD_IDLE_RESULT
+        return Notify(kind, minutes)
+    return _BAD_IDLE_RESULT
+
+
+def _clean_text(value: object, limit: int) -> str:
+    """One printable line of at most ``limit`` characters from any value.
+
+    Plugin-supplied text only ever reaches a log or the status line, never the
+    chat, but control characters (escape sequences, newlines) are still removed
+    so a plugin cannot forge log lines or terminal output.
+    """
+    printable = "".join(ch if ch.isprintable() else " " for ch in str(value))
+    return " ".join(printable.split())[:limit]
+
+
+def parse_plugin_spec(raw: str) -> PluginSpec:
+    """Parse ``<name>=<absolute path>``; raise `PluginLoadError` naming the closed reason."""
+    name, separator, path_text = raw.partition(_PLUGIN_SPEC_SEPARATOR)
+    if not separator or not path_text:
+        raise PluginLoadError(_LOAD_REASON_BAD_SPEC)
+    if _PLUGIN_NAME_PATTERN.fullmatch(name) is None:
+        raise PluginLoadError(_LOAD_REASON_BAD_NAME)
+    path = Path(path_text)
+    if not path.is_absolute():
+        raise PluginLoadError(_LOAD_REASON_NOT_ABSOLUTE, name=name)
+    return PluginSpec(name=name, path=path)
+
+
+def _default_plugin_uids() -> frozenset[int]:
+    """The owners a plugin file may have: this supervisor's uid, or root."""
+    return frozenset({os.getuid(), _ROOT_UID})
+
+
+def check_plugin_file(path: Path, *, allowed_uids: Collection[int] | None = None) -> str | None:
+    """Vet a plugin file WITHOUT importing it; return a closed refusal reason or None.
+
+    It must be a regular file (a symlink is refused: the vetted bytes must be
+    the ones imported), and both it and its directory must be owned by an
+    allowed uid and not group- or world-writable. The same check runs again in
+    the worker immediately before the import.
+    """
+    uids = allowed_uids if allowed_uids is not None else _default_plugin_uids()
+    try:
+        file_info = path.lstat()
+        directory_info = path.parent.stat()
+    except OSError:
+        return _LOAD_REASON_NOT_A_FILE
+    if not stat.S_ISREG(file_info.st_mode):
+        return _LOAD_REASON_NOT_A_FILE
+    for info in (file_info, directory_info):
+        if info.st_uid not in uids:
+            return _LOAD_REASON_OWNER
+        if info.st_mode & _PLUGIN_UNSAFE_MODE_BITS:
+            return _LOAD_REASON_WRITABLE
+    return None
+
+
+def _ccy_state_dir() -> Path:
+    """The persistent supervisor state directory (`.claude/ccy/state/`).
+
+    ``CCY_SUPERVISOR_STATE_DIR`` overrides it, for a launcher that keeps this
+    state elsewhere on the persistent mount (and for tests).
+    """
+    override = os.environ.get(_CCY_STATE_DIR_ENV)
+    return Path(override) if override else _SELF_PATH.parent / _CCY_STATE_SUBDIRECTORY
+
+
+def _plugin_state_root() -> Path:
+    """Parent of every plugin's private `state_dir`."""
+    return _ccy_state_dir() / _PLUGIN_STATE_SUBDIRECTORY
+
+
+def _plugin_marker_path(untracked_dir: Path, supervisor_pid: int) -> Path:
+    """The atomic "a hook is running" marker for the supervisor with ``supervisor_pid``."""
+    return untracked_dir / _LOG_SUBDIRECTORY / f"{_PLUGIN_MARKER_PREFIX}.{supervisor_pid}.json"
+
+
+def _failure_reason(failure: PluginFailure) -> str:
+    """The status-file reason string for a failure (closed values only)."""
+    if failure.kind == _PLUGIN_KIND_LOAD:
+        detail = failure.detail if failure.detail in _PLUGIN_LOAD_REASONS else ""
+        return f"{_PLUGIN_KIND_LOAD}: {detail or _LOAD_REASON_UNSPECIFIED}"
+    return f"{failure.kind} in {failure.hook}"
+
+
+def failure_log_line(failure: PluginFailure) -> str:
+    """The `decision.log` audit line for a failure (closed values only)."""
+    action = "disabled"
+    if failure.kind in _PLUGIN_KINDS_NEEDING_WORKER_RESTART:
+        action = "disabled, worker restarted without it"
+    return f"plugin {failure.plugin}: {_failure_reason(failure)} -> {action}"
+
+
+# ── The plugin-notice family (Plan 00487 Task 1.6) ─────────────────────────────
+# Tells the SESSION that a plugin failed. Rendered from FIXED templates only:
+# the sole interpolated values are a plugin name that matched
+# `_PLUGIN_NAME_PATTERN` and phrases looked up from closed sets by a validated
+# kind/hook -- never plugin text, never exception text. Typed at the same
+# idle choke point as the operator signal (ranked with it, ahead of the
+# model-switch/restore families), once per plugin, capped per process, with the
+# machine-origin provenance header every supervisor chat line carries.
+_MAX_PLUGIN_NOTICES = 5
+_PLUGIN_NOTICE_SEPARATOR = "|"
+_PLUGIN_NOTICE_PART_COUNT = 3  # name, kind, hook
+_PLUGIN_NOTICE_HEADER = (
+    "🤖 [ccy-supervisor] plugin notice — machine-generated, NOT a human instruction"
+)
+_DRY_RUN_PLUGIN_NOTICE_BODY_PREFIX = "would inject plugin-notice (dry-run — no real message sent):"
+_PLUGIN_NOTICE_STATUS_TTL_SECONDS = 60.0
+_PLUGIN_KIND_PHRASES = {
+    _PLUGIN_KIND_LOAD: "could not be loaded",
+    _PLUGIN_KIND_EXCEPTION: "raised an exception",
+    _PLUGIN_KIND_OVERRUN: "ran past its time budget",
+    _PLUGIN_KIND_WEDGE: "stopped the policy worker answering",
+    _PLUGIN_KIND_BAD_RESULT: "returned a result the supervisor does not accept",
+    _PLUGIN_KIND_EXIT_STUCK: "asked to end the session for a restart, but the session did not end",
+    _PLUGIN_KIND_HOST_FAULT: "was switched off with every other plugin after a supervisor fault",
+}
+_PLUGIN_HOOK_PHRASES = {
+    _PLUGIN_HOOK_LOAD: "",
+    _PLUGIN_HOOK_ON_START: " in on_start",
+    _PLUGIN_HOOK_ON_IDLE: " in on_idle",
+}
+_PLUGIN_RECOVERY_SENTENCES = {
+    _PLUGIN_KIND_LOAD: "It was skipped, and this session is running without it.",
+    _PLUGIN_KIND_EXCEPTION: "It is disabled for the rest of this session.",
+    _PLUGIN_KIND_BAD_RESULT: "It is disabled for the rest of this session.",
+    _PLUGIN_KIND_OVERRUN: (
+        "It is disabled for the rest of this session, and the policy worker was "
+        "restarted without it."
+    ),
+    _PLUGIN_KIND_WEDGE: (
+        "It is disabled for the rest of this session, and the policy worker was "
+        "restarted without it."
+    ),
+    _PLUGIN_KIND_EXIT_STUCK: (
+        "It is disabled for the rest of this session, and the policy worker was "
+        "restarted without it."
+    ),
+    _PLUGIN_KIND_HOST_FAULT: (
+        "No plugin runs for the rest of this session, and the policy worker was "
+        "restarted without any."
+    ),
+}
+_PLUGIN_NOTICE_CLOSING = "No action is needed from you."
+
+
+def parse_plugin_notice_item(item: str) -> tuple[str, str, str] | None:
+    """Validate a queued `name|kind|hook` notice; None unless every part is legal."""
+    parts = item.split(_PLUGIN_NOTICE_SEPARATOR)
+    if len(parts) != _PLUGIN_NOTICE_PART_COUNT:
+        return None
+    name, kind, hook = parts
+    if (
+        _PLUGIN_NAME_PATTERN.fullmatch(name) is None
+        or kind not in _PLUGIN_KINDS
+        or hook not in _PLUGIN_HOOKS
+    ):
+        return None
+    return name, kind, hook
+
+
+def render_plugin_notice(name: str, kind: str, hook: str) -> str:
+    """The fixed sentence telling the session that plugin ``name`` failed.
+
+    ``name``, ``kind`` and ``hook`` must already be validated
+    (`parse_plugin_notice_item`); they select or fill literal templates and
+    nothing else reaches the text.
+    """
+    return (
+        f"{_PLUGIN_NOTICE_HEADER}: plugin `{name}` {_PLUGIN_KIND_PHRASES[kind]}"
+        f"{_PLUGIN_HOOK_PHRASES[hook]}. {_PLUGIN_RECOVERY_SENTENCES[kind]} "
+        f"{_PLUGIN_NOTICE_CLOSING}"
+    )
+
+
+def report_plugin_failure(
+    machine: CompactStateMachine, failure: PluginFailure, *, status_dir: Path, now: float
+) -> bool:
+    """Owe the session a notice for ``failure`` and warn on the status line.
+
+    Idempotent per plugin: True only the first time (the notice is armed and the
+    WARNING posted), so a worker that re-reports every failure on every tick
+    costs nothing.
+    """
+    if not machine.arm_plugin_notice(failure.plugin, failure.kind, failure.hook):
+        return False
+    write_status_message(
+        status_dir,
+        text=(
+            f"⚠ ccy plugin {failure.plugin} {_PLUGIN_KIND_PHRASES[failure.kind]} " "and is disabled"
+        ),
+        expires_at=now + _PLUGIN_NOTICE_STATUS_TTL_SECONDS,
+        level=_STATUS_LEVEL_WARNING,
+        now=now,
+    )
+    return True
+
+
+# -- The session-notice family (Plan 00487 Task 1.3c) -------------------------
+# Three FIXED sentences the supervisor can type: a plugin may request the first
+# two with `Notify`, and the supervisor itself owns the third (typed once after
+# a restart it performed). The text comes from the templates below and nothing
+# else: the only interpolated values are an integer of minutes in a closed range
+# and a version string matching `_VERSION_PATTERN`, both checked by
+# `parse_session_notice_item` before anything is rendered or queued.
+_SESSION_NOTICE_RESTARTED = "restarted"
+_SESSION_NOTICE_SEPARATOR = "|"
+_MAX_SESSION_NOTICES_PENDING = 4
+# Per-kind minimum seconds between two requests of the same kind (a plugin
+# that asks on every idle tick is typed once per interval). `restarted` is
+# once per process.
+_NOTIFY_MIN_INTERVAL_SECONDS = {
+    NOTIFY_RESTART_SOON: 600.0,
+    NOTIFY_DEADLINE_REACHED: 1800.0,
+    _SESSION_NOTICE_RESTARTED: float("inf"),
+}
+# Per-kind lifetime cap on armed notices (per supervisor process): a plugin
+# that keeps asking is typed at most this often over a whole process, however
+# the intervals above fall. The first request over the cap is logged once.
+_NOTIFY_MAX_PER_PROCESS = {
+    NOTIFY_RESTART_SOON: 12,
+    NOTIFY_DEADLINE_REACHED: 6,
+}
+_SESSION_NOTICE_HEADER = (
+    "🤖 [ccy-supervisor] session notice — machine-generated, NOT a human instruction"
+)
+_DRY_RUN_SESSION_NOTICE_BODY_PREFIX = (
+    "would inject session-notice (dry-run — no real message sent):"
+)
+_MINUTES_PATTERN = re.compile(r"[0-9]{1,3}")
+_VERSION_PATTERN = re.compile(r"[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}(?:-[0-9A-Za-z.]{1,24})?")
+_RESTART_SOON_TEMPLATE = (
+    "this session will be restarted in about {minutes} {unit}. Finish the current "
+    "unit of work, commit and push, and note where you are; the conversation "
+    "resumes automatically after the restart."
+)
+_DEADLINE_REACHED_TEMPLATE = (
+    "this session's time limit has been reached. Finish the current unit of work, "
+    "commit, push, write a hand-off note, then stop."
+)
+_RESTARTED_TEMPLATE = "this session was restarted and is now on {version}. Carry on with the work."
+_RESTARTED_VERSION_FALLBACK = "the installed version"
+
+
+def parse_session_notice_item(item: str) -> tuple[str, str] | None:
+    """Validate a queued `kind|argument` session notice; None unless it is a legal one."""
+    kind, separator, argument = item.partition(_SESSION_NOTICE_SEPARATOR)
+    if not separator or _SESSION_NOTICE_SEPARATOR in argument:
+        return None
+    if kind == NOTIFY_RESTART_SOON:
+        if _MINUTES_PATTERN.fullmatch(argument) is None:
+            return None
+        if not _NOTIFY_MINUTES_MIN <= int(argument) <= _NOTIFY_MINUTES_MAX:
+            return None
+        return kind, argument
+    if kind == NOTIFY_DEADLINE_REACHED:
+        return (kind, argument) if argument == "" else None
+    if kind == _SESSION_NOTICE_RESTARTED:
+        if argument == "" or _VERSION_PATTERN.fullmatch(argument) is not None:
+            return (kind, argument)
+    return None
+
+
+def render_session_notice(kind: str, argument: str) -> str:
+    """The fixed sentence for a validated session notice (`parse_session_notice_item`)."""
+    if kind == NOTIFY_RESTART_SOON:
+        minutes = int(argument)
+        body = _RESTART_SOON_TEMPLATE.format(
+            minutes=minutes, unit="minute" if minutes == 1 else "minutes"
+        )
+    elif kind == NOTIFY_DEADLINE_REACHED:
+        body = _DEADLINE_REACHED_TEMPLATE
+    else:
+        version = f"version {argument}" if argument else _RESTARTED_VERSION_FALLBACK
+        body = _RESTARTED_TEMPLATE.format(version=version)
+    return f"{_SESSION_NOTICE_HEADER}: {body}"
+
+
+@dataclass(frozen=True)
+class _BudgetedResult:
+    status: str
+    value: object = None
+    traceback_text: str = ""
+    error: BaseException | None = None
+
+
+def _run_budgeted(fn: Callable[[], object], budget_seconds: float) -> _BudgetedResult:
+    """Run ``fn`` on a daemon thread and wait at most ``budget_seconds`` for it.
+
+    A thread cannot be killed, so an overrun thread is abandoned (it may
+    still be running); the caller's recovery is to restart the whole worker.
+    """
+    box: list[_BudgetedResult] = []
+
+    def _target() -> None:
+        try:
+            value = fn()
+        except BaseException as error:
+            # Deliberately broad: a plugin may raise anything, SystemExit
+            # included, and none of it may reach the supervisor.
+            box.append(_BudgetedResult(_BUDGET_EXCEPTION, None, traceback.format_exc(), error))
+        else:
+            box.append(_BudgetedResult(_BUDGET_OK, value))
+
+    thread = threading.Thread(target=_target, name="ccy-plugin-hook", daemon=True)
+    thread.start()
+    thread.join(budget_seconds)
+    if thread.is_alive():
+        return _BudgetedResult(_BUDGET_OVERRUN)
+    if not box:
+        return _BudgetedResult(_BUDGET_EXCEPTION, None, "plugin hook thread ended with no result")
+    return box[0]
+
+
+def _ask_idle(half: WorkerHalf, tick: IdleTick) -> object:
+    """Call ``half.on_idle(tick)`` and validate what it returned (runs on the budgeted thread)."""
+    return _validated_idle_result(half.on_idle(tick))
+
+
+class WorkerHalf(Protocol):
+    """The shape a plugin's `create_worker_half(api)` must return."""
+
+    name: str
+    version: str
+
+    def on_start(self) -> None:
+        """Called once when the runtime starts (a worker hot reload starts it again)."""
+
+    def on_idle(self, tick: IdleTick) -> ExitForRestart | Notify | None:
+        """Called at the end of the idle cascade; may ask for an exit-for-restart or a notice."""
+
+
+class PluginApi:
+    """What a worker half's factory is handed.
+
+    ``api_version`` is ``(major, minor)``; ``state_dir`` is a per-plugin 0700
+    directory that survives a container restart; ``session_id()`` is the
+    supervisor's own session id, or None when it is not exactly one;
+    ``status`` posts a transient status-line message; ``audit`` writes a
+    `decision.log` line. ``ExitForRestart`` and ``Notify`` (with the kinds
+    ``RESTART_SOON`` and ``DEADLINE_REACHED``) build the results `on_idle`
+    may return.
+    """
+
+    ExitForRestart: ClassVar[type[ExitForRestart]] = ExitForRestart
+    Notify: ClassVar[type[Notify]] = Notify
+    RESTART_SOON: ClassVar[str] = NOTIFY_RESTART_SOON
+    DEADLINE_REACHED: ClassVar[str] = NOTIFY_DEADLINE_REACHED
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        state_dir: Path,
+        session_ids: Callable[[], frozenset[str]],
+        status_sink: Callable[[str, str, str, float], object],
+        audit_sink: Callable[[str, str], object],
+    ) -> None:
+        self.api_version = _PLUGIN_API_VERSION
+        self.state_dir = state_dir
+        self._name = name
+        self._session_ids = session_ids
+        self._status_sink = status_sink
+        self._audit_sink = audit_sink
+
+    def session_id(self) -> str | None:
+        """The one own session id, or None when there are none or several."""
+        ids = self._session_ids()
+        return next(iter(ids)) if len(ids) == 1 else None
+
+    def status(
+        self,
+        text: str,
+        level: str = _STATUS_LEVEL_INFO,
+        ttl: float = _PLUGIN_STATUS_TTL_DEFAULT_SECONDS,
+    ) -> None:
+        """Post ``text`` to the status line for about ``ttl`` seconds."""
+        self._status_sink(self._name, text, level, ttl)
+
+    def audit(self, message: str) -> None:
+        """Write ``message`` as one `decision.log` line."""
+        self._audit_sink(self._name, message)
+
+
+class PluginRuntime:
+    """The worker-side plugin runner: loads worker halves and calls their hooks.
+
+    Plugins are asked in the order they were named. Every call is budgeted
+    (`_run_budgeted`); any failure disables that plugin for the rest of the
+    process and is recorded in `failures`, which the caller reports on EVERY
+    tick (the report is idempotent) so a lost reply cannot lose a failure.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_root: Path,
+        status_dir: Path,
+        marker_path: Path,
+        session_ids: Callable[[], frozenset[str]] = cached_own_session_ids,
+        allowed_uids: Collection[int] | None = None,
+        hook_budget_seconds: float = _PLUGIN_HOOK_BUDGET_SECONDS,
+        tick_budget_seconds: float = _PLUGIN_TICK_BUDGET_SECONDS,
+        load_budget_seconds: float = _PLUGIN_LOAD_BUDGET_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
+        status_sink: Callable[[str, str, str, float], object] | None = None,
+    ) -> None:
+        self._state_root = state_root
+        self._status_dir = status_dir
+        self._marker_path = marker_path
+        self._session_ids = session_ids
+        self._allowed_uids = allowed_uids
+        self._hook_budget = hook_budget_seconds
+        self._tick_budget = tick_budget_seconds
+        self._load_budget = load_budget_seconds
+        self._monotonic = monotonic
+        self._wall_clock = wall_clock
+        self._halves: dict[str, WorkerHalf] = {}
+        self._versions: dict[str, str] = {}
+        self._disabled: set[str] = set()
+        self._failures: list[PluginFailure] = []
+        self._notifications: list[PluginNotification] = []
+        self._audit_lines: list[str] = []
+        # In-memory only (never sent to the host): the traceback behind each
+        # failure, for `PluginTestHarness` to show a plugin author.
+        self._tracebacks: dict[str, str] = {}
+        # Where `api.status` goes: the status-line message file, unless a test
+        # harness substitutes a recorder.
+        self._status_sink = status_sink if status_sink is not None else self._post_status
+        self._lock = threading.Lock()
+
+    @property
+    def state_root(self) -> Path:
+        """Parent of every plugin's private `state_dir`."""
+        return self._state_root
+
+    @property
+    def loaded(self) -> list[tuple[str, str]]:
+        """``(name, version)`` of every plugin still enabled, in flag order."""
+        return [(name, self._versions[name]) for name in self._halves if name not in self._disabled]
+
+    @property
+    def failures(self) -> tuple[PluginFailure, ...]:
+        """Every failure this runtime has recorded (cumulative)."""
+        return tuple(self._failures)
+
+    @property
+    def notifications(self) -> tuple[PluginNotification, ...]:
+        """The `Notify` results of the latest `run_idle` only (reset by each run)."""
+        return tuple(self._notifications)
+
+    def half(self, name: str) -> WorkerHalf:
+        """The loaded worker half called ``name`` (test and harness access)."""
+        return self._halves[name]
+
+    def traceback_for(self, name: str) -> str:
+        """The traceback behind ``name``'s failure, or "" (kept in memory, for a test harness)."""
+        return self._tracebacks.get(name, "")
+
+    def disable(self, name: str) -> None:
+        """Stop calling ``name`` (the host disabled it for a failure it detected)."""
+        self._disabled.add(name)
+
+    def take_audit_lines(self) -> tuple[str, ...]:
+        """The `decision.log` lines plugins wrote since the last call."""
+        with self._lock:
+            lines, self._audit_lines = tuple(self._audit_lines), []
+        return lines
+
+    # -- loading ---------------------------------------------------------
+
+    def load(self, specs: Sequence[tuple[str, Path]], disabled: Collection[str]) -> None:
+        """Import and instantiate each named plugin, in order; a failure skips only it."""
+        self._disabled.update(disabled)
+        for name, path in specs:
+            if name in self._disabled:
+                continue
+            try:
+                self._load_one(name, path)
+            except PluginLoadError as error:
+                self._fail(name, _PLUGIN_KIND_LOAD, _PLUGIN_HOOK_LOAD, detail=error.reason)
+
+    def _load_one(self, name: str, path: Path) -> None:
+        refusal = check_plugin_file(path, allowed_uids=self._allowed_uids)
+        if refusal is not None:
+            raise PluginLoadError(refusal)
+        state_dir = self._make_state_dir(name)
+        api = PluginApi(
+            name=name,
+            state_dir=state_dir,
+            session_ids=self._session_ids,
+            status_sink=self._status_sink,
+            audit_sink=self._record_audit,
+        )
+        self._write_marker(name, _PLUGIN_HOOK_LOAD)
+        try:
+            result = _run_budgeted(lambda: self._import_half(name, path, api), self._load_budget)
+        finally:
+            self._clear_marker()
+        if result.status == _BUDGET_OVERRUN:
+            raise PluginLoadError(_LOAD_REASON_TIMEOUT)
+        if result.status != _BUDGET_OK:
+            self._tracebacks[name] = result.traceback_text
+        if isinstance(result.error, PluginLoadError):
+            raise PluginLoadError(result.error.reason)
+        if result.status != _BUDGET_OK:
+            append_worker_error(f"plugin {name} failed to load:\n{result.traceback_text}")
+            raise PluginLoadError(_LOAD_REASON_IMPORT)
+        half = cast("WorkerHalf", result.value)
+        self._halves[name] = half
+        self._versions[name] = _clean_text(getattr(half, "version", ""), _PLUGIN_VERSION_MAX_CHARS)
+
+    def _make_state_dir(self, name: str) -> Path:
+        state_dir = self._state_root / name
+        try:
+            state_dir.mkdir(mode=_PLUGIN_STATE_DIR_MODE, parents=True, exist_ok=True)
+            state_dir.chmod(_PLUGIN_STATE_DIR_MODE)
+        except OSError as error:
+            raise PluginLoadError(_LOAD_REASON_STATE_DIR) from error
+        return state_dir
+
+    @staticmethod
+    def _import_half(name: str, path: Path, api: PluginApi) -> object:
+        """Import ``path`` and build its worker half; raise `PluginLoadError` on any refusal."""
+        module_name = f"{_PLUGIN_MODULE_PREFIX}{name}"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise PluginLoadError(_LOAD_REASON_IMPORT)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException as error:
+            # A plugin's import can raise anything; none of it escapes the loader.
+            sys.modules.pop(module_name, None)
+            raise PluginLoadError(_LOAD_REASON_IMPORT) from error
+        declared = getattr(module, _PLUGIN_API_ATTRIBUTE, None)
+        if type(declared) is not int or declared != _PLUGIN_API_MAJOR:
+            raise PluginLoadError(_LOAD_REASON_API)
+        factory = getattr(module, _PLUGIN_FACTORY_NAME, None)
+        if not callable(factory):
+            raise PluginLoadError(_LOAD_REASON_NO_FACTORY)
+        try:
+            half = factory(api)
+        except Exception as error:
+            raise PluginLoadError(_LOAD_REASON_FACTORY) from error
+        if (
+            getattr(half, "name", None) != name
+            or not isinstance(getattr(half, "version", None), str)
+            or not callable(getattr(half, "on_start", None))
+            or not callable(getattr(half, "on_idle", None))
+        ):
+            raise PluginLoadError(_LOAD_REASON_BAD_HALF)
+        return half
+
+    # -- hooks -----------------------------------------------------------
+
+    def start(self) -> None:
+        """Call every enabled half's ``on_start`` once, in flag order."""
+        for name, half in list(self._halves.items()):
+            if name not in self._disabled:
+                self._call(name, _PLUGIN_HOOK_ON_START, half.on_start, self._hook_budget)
+
+    def run_idle(self, now: float) -> PluginExitRequest | None:
+        """Ask each enabled plugin ``on_idle`` in flag order; the first exit request wins.
+
+        A `Notify` result is collected (see `notifications`) and the next plugin
+        is still asked.
+        """
+        deadline = self._monotonic() + self._tick_budget
+        self._notifications = []
+        ids = self._session_ids()
+        tick = IdleTick(now=now, session_id=next(iter(ids)) if len(ids) == 1 else None)
+        for name, half in list(self._halves.items()):
+            if name in self._disabled:
+                continue
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                break
+            outcome = self._call(
+                name,
+                _PLUGIN_HOOK_ON_IDLE,
+                functools.partial(_ask_idle, half, tick),
+                min(self._hook_budget, remaining),
+            )
+            if outcome is None or outcome.value is None:
+                continue
+            if isinstance(outcome.value, ExitForRestart):
+                return PluginExitRequest(plugin=name, reason=outcome.value.reason)
+            if isinstance(outcome.value, Notify):
+                self._notifications.append(
+                    PluginNotification(name, outcome.value.kind, outcome.value.minutes)
+                )
+                continue
+            self._fail(name, _PLUGIN_KIND_BAD_RESULT, _PLUGIN_HOOK_ON_IDLE)
+        return None
+
+    def _call(
+        self, name: str, hook: str, fn: Callable[[], object], budget: float
+    ) -> _BudgetedResult | None:
+        """Run one hook under its budget; record a failure and return None if it failed."""
+        self._write_marker(name, hook)
+        try:
+            result = _run_budgeted(fn, budget)
+        finally:
+            self._clear_marker()
+        if result.status == _BUDGET_OK:
+            return result
+        if result.status == _BUDGET_OVERRUN:
+            self._fail(name, _PLUGIN_KIND_OVERRUN, hook)
+        else:
+            append_worker_error(f"plugin {name} {hook} raised:\n{result.traceback_text}")
+            self._tracebacks[name] = result.traceback_text
+            self._fail(name, _PLUGIN_KIND_EXCEPTION, hook)
+        return None
+
+    def _fail(self, name: str, kind: str, hook: str, *, detail: str = "") -> None:
+        if name in self._disabled and any(f.plugin == name for f in self._failures):
+            return
+        self._disabled.add(name)
+        self._failures.append(PluginFailure(name, kind, hook, detail))
+
+    # -- the in-hook marker ------------------------------------------------
+
+    def _write_marker(self, name: str, hook: str) -> None:
+        payload = {"plugin": name, "hook": hook, "started_at": self._wall_clock()}
+        try:
+            self._marker_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._marker_path.with_name(f".{self._marker_path.name}.{os.getpid()}.tmp")
+            tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+            tmp_path.replace(self._marker_path)
+        except OSError as error:
+            append_worker_error(f"could not write plugin in-hook marker: {error}")
+
+    def _clear_marker(self) -> None:
+        try:
+            self._marker_path.unlink(missing_ok=True)
+        except OSError as error:
+            append_worker_error(f"could not clear plugin in-hook marker: {error}")
+
+    # -- sinks handed to the api ------------------------------------------
+
+    def _post_status(self, name: str, text: str, level: str, ttl: float) -> None:
+        shown_level = (
+            level if level in (_STATUS_LEVEL_INFO, _STATUS_LEVEL_WARNING) else _STATUS_LEVEL_INFO
+        )
+        bounded_ttl = min(
+            max(_coerce_float(ttl), _PLUGIN_STATUS_TTL_MIN_SECONDS), _PLUGIN_STATUS_TTL_MAX_SECONDS
+        )
+        write_status_message(
+            self._status_dir,
+            text=f"[{name}] {_clean_text(text, _PLUGIN_TEXT_MAX_CHARS)}",
+            expires_at=self._wall_clock() + bounded_ttl,
+            level=shown_level,
+        )
+
+    def _record_audit(self, name: str, message: str) -> None:
+        line = f"plugin {name}: {_clean_text(message, _PLUGIN_TEXT_MAX_CHARS)}"
+        with self._lock:
+            self._audit_lines.append(line)
+            del self._audit_lines[:-_PLUGIN_AUDIT_MAX_PENDING]
+
+
+class PluginHarnessError(Exception):
+    """A plugin failed (or was misused) under `PluginTestHarness`."""
+
+
+_HARNESS_SESSION_ID = "harness-session"
+
+
+class PluginTestHarness:
+    """Unit-test a plugin's worker half without a live session (Plan 00487).
+
+    Loads the half through the REAL loader -- the same vetting, API-major check
+    and budgeted hook calls the supervisor uses -- with no worker process, no
+    PTY and nothing written outside ``work_dir``. Where the supervisor disables
+    a failing plugin and carries on, the harness RAISES `PluginHarnessError`
+    with the traceback, because a test wants the failure.
+
+    ``session_ids`` is what the plugin's ``api.session_id()`` sees (exactly one
+    id yields that id; none or several yield None). ``api.status`` calls are
+    recorded in `status_messages` as ``(text, level, ttl)`` instead of being
+    written to the status line.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        plugin_path: Path,
+        *,
+        work_dir: Path,
+        session_ids: Collection[str] = (_HARNESS_SESSION_ID,),
+        allowed_uids: Collection[int] | None = None,
+    ) -> None:
+        self.status_messages: list[tuple[str, str, float]] = []
+        self._name = name
+        self._plugin_path = plugin_path
+        self._audit: list[str] = []
+        self._started = False
+        self._runtime = PluginRuntime(
+            state_root=work_dir / "state",
+            status_dir=work_dir / "untracked",
+            marker_path=work_dir / "in-hook.json",
+            session_ids=lambda: frozenset(session_ids),
+            allowed_uids=allowed_uids if allowed_uids is not None else _default_plugin_uids(),
+            status_sink=self._record_status,
+        )
+
+    @property
+    def half(self) -> WorkerHalf:
+        """The loaded worker half (after `start`)."""
+        return self._runtime.half(self._name)
+
+    @property
+    def state_dir(self) -> Path:
+        """The plugin's private 0700 state directory."""
+        return self._runtime.state_root / self._name
+
+    @property
+    def notifications(self) -> tuple[PluginNotification, ...]:
+        """The `Notify` results the latest `idle` collected."""
+        return self._runtime.notifications
+
+    def audit_lines(self) -> tuple[str, ...]:
+        """Every `decision.log` line the plugin wrote through ``api.audit`` so far."""
+        self._audit.extend(self._runtime.take_audit_lines())
+        return tuple(self._audit)
+
+    def start(self) -> None:
+        """Load the half and run ``on_start``; raise on any failure."""
+        self._runtime.load([(self._name, self._plugin_path)], frozenset())
+        self._raise_on_failure()
+        self._runtime.start()
+        self._raise_on_failure()
+        self._started = True
+
+    def idle(self, now: float | None = None) -> PluginExitRequest | None:
+        """Ask the plugin ``on_idle`` once; return its exit request, if any; raise on failure."""
+        if not self._started:
+            raise PluginHarnessError("call start() before idle()")
+        request = self._runtime.run_idle(time.time() if now is None else now)
+        self._raise_on_failure()
+        return request
+
+    def _record_status(self, _name: str, text: str, level: str, ttl: float) -> None:
+        self.status_messages.append((text, level, ttl))
+
+    def _raise_on_failure(self) -> None:
+        failures = self._runtime.failures
+        if failures:
+            failure = failures[0]
+            raise PluginHarnessError(
+                f"plugin {failure.plugin} failed: {_failure_reason(failure)}\n"
+                f"{self._runtime.traceback_for(failure.plugin)}"
+            )
+
+
+@dataclass
+class _PluginEntry:
+    """One configured plugin as the HOST sees it (never imported here)."""
+
+    name: str
+    path: Path | None
+    version: str = ""
+    state: str = _PLUGIN_STATE_LOADED
+    reason: str = ""
+
+
+class PluginHost:
+    """The PTY host's registry of configured plugins -- it never imports one.
+
+    Vets each ``--plugin`` file, builds the argv a worker is started with
+    (the loadable plugins plus the disabled set, re-read on EVERY worker
+    start so a hot reload cannot bring a disabled plugin back), records
+    failures reported by the worker or detected here, and keeps the plugin
+    list in `supervisor-status.json` current.
+    """
+
+    def __init__(
+        self,
+        raw_specs: Sequence[str],
+        *,
+        write_status: Callable[[list[dict[str, str]]], object] | None = None,
+        allowed_uids: Collection[int] | None = None,
+        status_dir: Path | None = None,
+        marker_path: Path | None = None,
+        disabled: Collection[str] = (),
+    ) -> None:
+        self._write_status = write_status
+        self._allowed_uids = allowed_uids
+        self._all_off = False
+        self._status_dir = status_dir
+        self._marker_path = marker_path
+        self._entries: list[_PluginEntry] = []
+        self._by_name: dict[str, _PluginEntry] = {}
+        self._startup_failures: list[PluginFailure] = []
+        for raw in raw_specs:
+            try:
+                self._add(raw)
+            except Exception as error:
+                # A bug while vetting one flag skips that plugin, never the session.
+                append_worker_error(f"could not vet --plugin {raw!r}: {error!r}")
+                name = raw.partition(_PLUGIN_SPEC_SEPARATOR)[0]
+                if _PLUGIN_NAME_PATTERN.fullmatch(name) is None or name in self._by_name:
+                    self._refuse(_PLUGIN_UNNAMED, None, _LOAD_REASON_UNSPECIFIED, notify=None)
+                else:
+                    self._refuse(name, None, _LOAD_REASON_UNSPECIFIED, notify=name)
+        # A plugin the command line itself names in `--disable-plugin` starts off.
+        for name in disabled:
+            entry = self._by_name.get(name)
+            if entry is not None and entry.state == _PLUGIN_STATE_LOADED:
+                entry.state = _PLUGIN_STATE_DISABLED
+                entry.reason = _DISABLED_BY_FLAG_REASON
+        if self._entries:
+            self._publish()
+
+    def _add(self, raw: str) -> None:
+        try:
+            spec = parse_plugin_spec(raw)
+        except PluginLoadError as error:
+            self._refuse(error.name or _PLUGIN_UNNAMED, None, error.reason, notify=error.name)
+            return
+        if spec.name in self._by_name:
+            self._refuse(
+                spec.name, spec.path, _LOAD_REASON_DUPLICATE, notify=spec.name, register=False
+            )
+            return
+        refusal = check_plugin_file(spec.path, allowed_uids=self._allowed_uids)
+        if refusal is not None:
+            self._refuse(spec.name, spec.path, refusal, notify=spec.name)
+            return
+        entry = _PluginEntry(name=spec.name, path=spec.path)
+        self._entries.append(entry)
+        self._by_name[spec.name] = entry
+
+    def _refuse(
+        self,
+        name: str,
+        path: Path | None,
+        reason: str,
+        *,
+        notify: str | None,
+        register: bool = True,
+    ) -> None:
+        failure = PluginFailure(name, _PLUGIN_KIND_LOAD, _PLUGIN_HOOK_LOAD, reason)
+        entry = _PluginEntry(
+            name=name,
+            path=path,
+            state=_PLUGIN_STATE_FAILED,
+            reason=_failure_reason(failure),
+        )
+        self._entries.append(entry)
+        if register and notify is not None:
+            self._by_name[name] = entry
+        if notify is not None:
+            self._startup_failures.append(failure)
+
+    def take_startup_failures(self) -> list[PluginFailure]:
+        """Load refusals found while vetting the flags (once), for the notice family."""
+        failures, self._startup_failures = self._startup_failures, []
+        return failures
+
+    def worker_argv(self) -> list[str]:
+        """The plugin flags for a worker start: loadable plugins, then the disabled set.
+
+        Empty once `disable_all` has run: that worker is started with no plugin flags.
+        """
+        argv: list[str] = []
+        if self._all_off:
+            return argv
+        for entry in self._entries:
+            if entry.state != _PLUGIN_STATE_FAILED and entry.path is not None:
+                argv += [_PLUGIN_FLAG, f"{entry.name}{_PLUGIN_SPEC_SEPARATOR}{entry.path}"]
+        for entry in self._entries:
+            if entry.state == _PLUGIN_STATE_DISABLED:
+                argv += [_DISABLE_PLUGIN_FLAG, entry.name]
+        return argv
+
+    def disabled_names(self) -> frozenset[str]:
+        """Every plugin that must stay off for the rest of this supervisor process."""
+        return frozenset(
+            e.name
+            for e in self._entries
+            if e.state in (_PLUGIN_STATE_DISABLED, _PLUGIN_STATE_FAILED)
+        )
+
+    def status_entries(self) -> list[dict[str, str]]:
+        """The plugin list as written to `supervisor-status.json`."""
+        return [
+            {"name": e.name, "version": e.version, "state": e.state, "reason": e.reason}
+            for e in self._entries
+        ]
+
+    def record_loaded(self, name: str, version: str) -> None:
+        """The worker confirmed ``name`` loaded at ``version``."""
+        entry = self._by_name.get(name)
+        if entry is None or entry.state != _PLUGIN_STATE_LOADED or entry.version == version:
+            return
+        entry.version = _clean_text(version, _PLUGIN_VERSION_MAX_CHARS)
+        self._publish()
+
+    def record_failure(self, name: str, kind: str, hook: str, detail: str = "") -> bool:
+        """Disable ``name`` for a failure; True only the first time (idempotent)."""
+        entry = self._by_name.get(name)
+        if entry is None or entry.state != _PLUGIN_STATE_LOADED:
+            return False
+        entry.state = _PLUGIN_STATE_FAILED if kind == _PLUGIN_KIND_LOAD else _PLUGIN_STATE_DISABLED
+        entry.reason = _failure_reason(PluginFailure(name, kind, hook, detail))
+        self._publish()
+        return True
+
+    def disable_all(self) -> list[str]:
+        """Switch every plugin off for good; the names of those still loaded until now.
+
+        Sets the all-off latch FIRST, so even a failure part-way through leaves
+        every later worker start with no plugin flags.
+        """
+        self._all_off = True
+        newly_disabled: list[str] = []
+        for entry in self._entries:
+            if entry.state == _PLUGIN_STATE_LOADED:
+                entry.state = _PLUGIN_STATE_DISABLED
+                entry.reason = _failure_reason(
+                    PluginFailure(entry.name, _PLUGIN_KIND_HOST_FAULT, _PLUGIN_HOOK_ON_IDLE)
+                )
+                newly_disabled.append(entry.name)
+        if newly_disabled:
+            self._publish()
+        return newly_disabled
+
+    def _resolved_status_dir(self) -> Path:
+        return self._status_dir if self._status_dir is not None else _daemon_untracked_dir()
+
+    def _resolved_marker_path(self) -> Path:
+        if self._marker_path is not None:
+            return self._marker_path
+        return _plugin_marker_path(self._resolved_status_dir(), os.getpid())
+
+    def detect_wedge(self, now_wall: float) -> PluginFailure | None:
+        """Name the plugin a silent worker is stuck inside, from its in-hook marker.
+
+        The worker writes the marker atomically before each hook call and clears
+        it after, so a marker that has outlived the hook's budget (plus a
+        grace) means the worker is stuck INSIDE that hook -- a budgeted thread
+        could not return it. A fresh marker is a slow hook, not a wedge, and
+        anything outside the closed sets blames nobody.
+        """
+        try:
+            payload = json.loads(self._resolved_marker_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        name, hook, started_at = (
+            payload.get("plugin"),
+            payload.get("hook"),
+            payload.get("started_at"),
+        )
+        if (
+            not isinstance(name, str)
+            or not isinstance(hook, str)
+            or hook not in _PLUGIN_HOOKS
+            or isinstance(started_at, bool)
+            or not isinstance(started_at, (int, float))
+        ):
+            return None
+        entry = self._by_name.get(name)
+        if entry is None or entry.state != _PLUGIN_STATE_LOADED:
+            return None
+        budget = (
+            _PLUGIN_LOAD_BUDGET_SECONDS
+            if hook == _PLUGIN_HOOK_LOAD
+            else _PLUGIN_HOOK_BUDGET_SECONDS
+        )
+        if now_wall - started_at < budget + _PLUGIN_WEDGE_GRACE_SECONDS:
+            return None
+        return PluginFailure(name, _PLUGIN_KIND_WEDGE, hook)
+
+    def clear_marker(self) -> None:
+        """Forget the in-hook marker (the worker that wrote it has been replaced)."""
+        try:
+            self._resolved_marker_path().unlink(missing_ok=True)
+        except OSError as error:
+            append_worker_error(f"could not clear plugin in-hook marker: {error}")
+
+    def _publish(self) -> None:
+        if self._write_status is not None:
+            self._write_status(self.status_entries())
+
+
+def _parse_worker_plugin_flags(argv: Sequence[str]) -> tuple[list[str], frozenset[str]]:
+    """The ``--plugin`` specs and ``--disable-plugin`` names on a ``--worker`` argv."""
+    parser = argparse.ArgumentParser(add_help=False)
+    _add_plugin_arguments(parser)
+    known, _unknown = parser.parse_known_args(list(argv))
+    return list(known.plugin), frozenset(known.disable_plugin)
+
+
+def _add_plugin_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register the plugin flags shared by the host and the worker command lines."""
+    parser.add_argument(
+        _PLUGIN_FLAG,
+        dest="plugin",
+        action="append",
+        default=[],
+        help="Load a plugin: <name>=<absolute path of its worker half>. Repeatable; "
+        "plugins are asked in the order given.",
+    )
+    parser.add_argument(
+        _DISABLE_PLUGIN_FLAG,
+        dest="disable_plugin",
+        action="append",
+        default=[],
+        help="Keep a plugin off. Passed by the host on every worker (re)start.",
+    )
+
+
+class CompactStateMachine:
+    """Decision H compact-and-resume machine (pure; injects nothing).
+
+    Compaction detection (any state): when a compaction is under way
+    (``reading.compacting`` -- set from the daemon's PreCompact signal, whether
+    the supervisor triggered it OR the human typed ``/compact`` manually),
+    decide WOULD_CONTINUE exactly once per episode to resume the post-compact
+    session. A latch prevents re-firing while the compaction persists and
+    resets when it ends. ``continue`` is harmless, so this fires even in
+    dry-run.
+
+    MONITOR: when the sidecar is fresh + red AND the session is idle AND the
+    cap allows it, decide WOULD_COMPACT and move to AWAIT_COMPACTING. Plan 00152
+    splits "red or worse" into graduated bands: in the LOWER red band
+    (``reading.red`` but NOT ``reading.compact_urgent``) the machine is PATIENT
+    -- it defers the compaction while ``work_idle`` is False so an in-progress
+    turn is never interrupted (restoring the pre-Plan-00151 behaviour). In the
+    ELEVATED band (``reading.compact_urgent``) and at CRITICAL it compacts
+    PROMPTLY even while the child streams. The post-compact cooldown gates a
+    non-critical repeat, but CRITICAL context (``reading.critical``) bypasses it
+    so a dangerously-high context compacts on the very next idle tick (Plan
+    00151). A detected HUMAN ``/compact`` (``human_compact_submitted``) instead
+    moves to AWAIT_COMPACTING WITHOUT injecting, so the supervisor never stacks a
+    duplicate compaction.
+
+    AWAIT_COMPACTING: wait for a compaction to start (handled above). The machine
+    NEVER re-injects a second ``/compact`` here -- a queued one only needs
+    flushing. If none starts within ``escape_after_seconds``, decide WOULD_ESCAPE
+    so the supervisor injects ``[esc]`` to flush the ``/compact`` that Claude Code
+    queued behind the in-flight turn, and it REPEATS that at each
+    ``escape_after_seconds`` interval ("fire escape until it does") for ANY band
+    -- superseding Plan 00152's critical-only gate, because a stalled queued
+    ``/compact`` must be flushable or the monitor loops re-injecting it (the 4x
+    dogfooding bug, Plan 00164). ESC is gated on ``idle`` and never fires for a
+    human-originated await (the human owns their own flush). After ``max_escapes``
+    ESCs with no compaction, OR after the longer ``await_timeout_seconds``, give
+    up and return to MONITOR so a missed transition cannot wedge the machine.
+    """
+
+    def __init__(self, policy: CompactPolicy) -> None:
+        self._policy = policy
+        self.state = SupervisorState.MONITOR
+        self._injections = 0
+        self._last_action_ts: float | None = None
+        self._compaction_handled = False
+        # Plan 00398 Phase 3: one-shot per-episode latch -- True once the
+        # abandoned-box flush has fired for the box's CURRENT abandoned spell,
+        # so a box the flush's Enter failed to clear gets exactly one attempt,
+        # never a resubmit loop. Reset (in `_evaluate_monitor`) the moment the
+        # box stops reading abandoned, whatever the reason.
+        self._abandoned_box_handled = False
+        # ESC-flush bookkeeping for the current AWAIT_COMPACTING episode: how many
+        # [esc] we have already injected to flush the queued /compact. Capped at
+        # policy.max_escapes, then we give up and return to MONITOR (Plan 00164).
+        self._escapes_sent = 0
+        # True when the current AWAIT was entered by a HUMAN /compact (not the
+        # supervisor's own inject) -- suppresses the supervisor ESC flush.
+        self._await_is_human = False
+        # Plan 00183: dry-run fires ONCE per session, once only. A dry-run marker
+        # is a no-op on the environment (no real /compact), so context stays red
+        # and the machine would re-decide to act every episode -- flooding the
+        # session with fake prompts. This latch is set on the first dry-run
+        # injection and suppresses every one thereafter for the process lifetime.
+        self._dry_run_fired = False
+        # Plan 00269: family-specific cap counter for goal injections. Goal
+        # signals are consumed on injection, so this only ever matters under a
+        # signal storm; per-process lifetime, never reset.
+        self._goal_injections = 0
+        # Wall-clock timestamps of successful goal injections, pruned to the
+        # rolling cap window on read (`goal_injections_within`).
+        self._goal_injection_ts: list[float] = []
+        # The supervisor's own most recent submitted line, while it is still
+        # unconfirmed: its text, the time it was typed (or last followed up),
+        # and how many follow-up Enters have been pressed for it.
+        self._own_line_text: str | None = None
+        self._own_line_ts: float | None = None
+        self._own_line_resubmits = 0
+        # Plan 00299: the exact combined /goal text last SUCCESSFULLY
+        # injected (None until the first injection). Compared verbatim (not
+        # hashed -- the text is already length-capped) against the next
+        # tick's candidate to suppress a re-type of an identical combined
+        # goal caused by an unrelated ledgered plan's status flip.
+        self._last_goal_text: str | None = None
+        # Plan 00321: `/goal clear` retractions fired this process. Same
+        # runaway backstop shape as the injection cap above.
+        self._goal_clear_injections = 0
+        # Plan 00283: standing-authorisation reinforcement injections this process
+        # has fired. Runaway backstop only (see _MAX_STANDING_AUTH_INJECTIONS).
+        self._standing_auth_injections = 0
+        # Plan 00416: session-actions directives typed this process. Runaway
+        # backstop only (see _MAX_SESSION_ACTIONS_INJECTIONS) -- the daemon
+        # writes at most one signal per session start, consumed on injection.
+        self._session_actions_injections = 0
+        # Plan 00470 Task 2.3: cron-reconcile prompts typed this process, and
+        # when the last one went (see _MAX_CRON_RECONCILE_INJECTIONS).
+        self._cron_reconcile_injections = 0
+        self._cron_reconcile_last_ts: float | None = None
+        # Plan 00278: the last observed (session, family) pair and an open
+        # downgrade episode ("session:family"), which gate the /model
+        # auto-restore and the flag-cleaning /compact.
+        self._last_model_session: str | None = None
+        self._last_model_family: str | None = None
+        self._downgrade_episode: str | None = None
+        # Plan 00278 Task 2b.3: model-restore bookkeeping — the family the
+        # downgrade came FROM, when the episode opened, the per-process
+        # restore count, and the last restore ts (flip-flop backoff).
+        self._downgrade_from_family: str | None = None
+        self._downgrade_started_ts: float | None = None
+        self._model_restores = 0
+        self._model_restore_last_ts: float | None = None
+        # Plan 00281: flag-cleaning /compact bookkeeping — per-process count
+        # (round-tripped) and last-fire ts (process-local backoff).
+        self._flag_compactions = 0
+        self._flag_compact_last_ts: float | None = None
+        # Plan 00479 Task 4.5: the `paused_at` of the usage pause whose single
+        # /compact has been decided (None while no pause has been compacted).
+        # Round-tripped, so a worker restart cannot type a second one.
+        self._pause_compacted_for: float | None = None
+        # Audit items owed to the chat: one entry per silent injection
+        # (/model) since the last flush. Flushed as ONE visible bot-prefixed
+        # message on the next injectable tick; bounded FIFO.
+        self._audit_pending: list[str] = []
+        # Plan 00487: plugin failures owed to the chat, as `name|kind|hook`
+        # items, and the names already told (pending or typed) -- one notice
+        # per plugin, capped per process. Round-tripped like the audit backlog.
+        self._plugin_notices_pending: list[str] = []
+        self._plugin_noticed: list[str] = []
+        self._session_notices_pending: list[str] = []
+        self._session_notice_last: dict[str, float] = {}
+        # Lifetime count of armed notices per kind, and the kinds whose cap has
+        # already been logged (the cap is logged once, not on every request).
+        self._session_notice_counts: dict[str, int] = {}
+        self._session_notice_cap_logged: list[str] = []
+        # Plan 00328: an injected `/model <family>` whose landing has not been
+        # observed yet (`session:family` + when), and the families a restore
+        # has been PROVEN unable to reach. A PTY write succeeding is not the
+        # model changing: on an allowance-exhausted account the switch returns
+        # 429 and the session stays put. One failure is enough -- the reason
+        # is unknowable from here, and retrying a family that did not come
+        # back is what turned a rate limit into a `/compact`.
+        self._restore_awaiting: str | None = None
+        self._restore_awaiting_ts: float | None = None
+        self._unavailable_families: list[str] = []
+        # Plan 00328 Task 2.2: `session:from:to:record_key` of a downgrade
+        # CLAUDE CODE RECORDED, read from the daemon's `.model-downgrade`
+        # signal. Nothing else opens a downgrade episode -- see
+        # `note_machine_downgrade`. Its event time (Plan 00466 N47 review 4)
+        # is the record's own timestamp, or when this machine first saw a
+        # record that has none; only a drop observed within
+        # `_DOWNGRADE_ATTRIBUTION_WINDOW_SECONDS` of it is attributed.
+        self._attributed_downgrade: str | None = None
+        self._attributed_downgrade_event_ts: float | None = None
+        # Plan 00466 N47 review 5 finding 2: the session and wall time of the
+        # most recently observed TOP-family (fable) reading. Updated on every
+        # reading that shows fable, not just on the transition into it --
+        # `_downgrade_is_attributed` uses the latest one to refuse a record
+        # the supervisor has already watched the session recover past.
+        self._last_top_family_seen_session: str | None = None
+        self._last_top_family_seen_ts: float | None = None
+        # Plan 00466 N47: the record key backing the CURRENTLY open episode
+        # (None when none is open), and the key of the most recently CLOSED
+        # episode -- once a record's episode has been opened and later closed
+        # by an observed recovery, that SAME record (the recorder republishes
+        # it for the rest of the session) must never reopen a fresh episode;
+        # only a genuinely NEW record can.
+        self._downgrade_episode_record_id: str | None = None
+        self._spent_downgrade_record_id: str | None = None
+        # Consume-once note for a ranked drop that arrived with no such
+        # record, so a disabled/failing recorder is diagnosable from
+        # decision.log rather than looking like "no downgrade ever happened".
+        self._unattributed_downgrade_note: str | None = None
+        # Plan 00466 N47 review 3 item C: `session:from_family:to_family` of a
+        # ranked drop judged unattributed because its record had not been
+        # published YET (the reading renders before `model_downgrade_recorder`
+        # writes the signal), and when that drop was observed. Held only
+        # while the session stays on that fallback (`note_model_reading`
+        # clears it otherwise); a record that arrives meanwhile and explains
+        # the drop attributes it retroactively -- see `settle_pending_drop`.
+        self._pending_unattributed_drop: str | None = None
+        self._pending_unattributed_drop_ts: float | None = None
+        # Consume-once note for a drop attributed retroactively (review 4
+        # finding 8): the decision log's previous word on that drop was
+        # "unattributed -- no restore", so the restore needs saying why.
+        self._retro_attribution_note: str | None = None
+
+    def mark_model_restore(
+        self,
+        now_wall: float | None = None,
+        *,
+        family: str | None = None,
+        session: str | None = None,
+    ) -> None:
+        """Count a fired auto-restore /model flip-back for cap/backoff purposes.
+
+        Called by the HOST only after a SUCCESSFUL AUTO-RESTORE injection
+        (Plan 00278 Task 2b.3) -- never for the manual test-trigger switch,
+        which has its own signal-consumption lifecycle and must not eat into
+        this cap/backoff budget. The timestamp starts the flip-flop backoff
+        (see ``model_restore_due``). Effort is not this method's concern at
+        all (Plan 00466 N47 review 2): settings.json's own ``modelSettings``
+        is what Claude Code applies on the switch.
+
+        "SUCCESSFUL" here means the PTY WRITE succeeded, which is NOT the same
+        as the model changing (Plan 00328). ``family``/``session`` record what
+        the injection asked for so the next reading can be checked against it
+        -- see ``note_model_reading``.
+        """
+        self._model_restores += 1
+        self._model_restore_last_ts = time.time() if now_wall is None else now_wall
+        if family and session:
+            self._restore_awaiting = f"{session}:{family}"
+            self._restore_awaiting_ts = self._model_restore_last_ts
+
+    def model_restore_due(self, now_wall: float) -> str | None:
+        """Return the family to restore to when the flip-back is due, else None.
+
+        Due means: auto-restore enabled (delay >= 0; negative/"off"
+        disables), a downgrade episode is open, any EXTRA quiet delay has
+        elapsed since it opened (default 0 — the injection choke point's
+        idle + empty-input gate already guarantees the flagged TURN is over,
+        which is the real recovery condition), the lifetime cap is not
+        reached, and no restore fired within the flip-flop backoff window.
+        """
+        delay = self._policy.model_restore_delay_seconds
+        if (
+            delay < 0
+            or self._downgrade_episode is None
+            or self._downgrade_from_family is None
+            or self._downgrade_started_ts is None
+        ):
+            return None
+        if now_wall - self._downgrade_started_ts < delay:
+            return None
+        if self._downgrade_from_family in self._unavailable_families:
+            # Plan 00328: already proven unreachable this process. Retrying
+            # types a command at the human that cannot work, and on an
+            # allowance-exhausted account surfaces an API error in their
+            # session.
+            return None
+        if self._model_restores >= _MAX_MODEL_RESTORES:
+            return None
+        if (
+            self._model_restore_last_ts is not None
+            and now_wall - self._model_restore_last_ts < _MODEL_RESTORE_BACKOFF_SECONDS
+        ):
+            return None
+        return self._downgrade_from_family
+
+    def mark_flag_compaction(self, now_wall: float | None = None) -> None:
+        """Count a fired flag-cleaning /compact for cap/backoff purposes.
+
+        Called by the HOST only after a SUCCESSFUL injection (Plan 00281); a
+        failed PTY write keeps the budget so a later tick can retry. The
+        timestamp starts the flip-flop backoff (see ``flag_compact_due``).
+        """
+        self._flag_compactions += 1
+        self._flag_compact_last_ts = time.time() if now_wall is None else now_wall
+
+    def flag_compact_due(self, now_wall: float) -> bool:
+        """True when a flag-cleaning /compact should fire on this tick (Plan 00281).
+
+        Fires only on a FLIP-FLOP: the feature is enabled, a downgrade episode
+        is open, AND at least one model auto-restore has already happened this
+        process — so a prior restore was undone by the classifier re-firing and
+        restoring the model alone cannot win. Capped per process and backed
+        off, because /compact rewrites context and must never storm.
+        """
+        if not self._policy.flag_compact_enabled:
+            return False
+        if self._downgrade_episode is None or self._model_restores < 1:
+            return False
+        if self._downgrade_from_family in self._unavailable_families:
+            # Plan 00328: a flip-flop means a restore LANDED and the
+            # classifier then re-fired. An episode still open because the
+            # restore never took is a different fact, and compacting over it
+            # rewrites the human's context to fix something a `/compact`
+            # cannot reach.
+            return False
+        if self._flag_compactions >= _MAX_FLAG_COMPACTIONS:
+            return False
+        if (
+            self._flag_compact_last_ts is not None
+            and now_wall - self._flag_compact_last_ts < _FLAG_COMPACT_BACKOFF_SECONDS
+        ):
+            return False
+        return True
+
+    @property
+    def audit_pending(self) -> tuple[str, ...]:
+        """Audit items owed to the chat since the last flush (may be empty)."""
+        return tuple(self._audit_pending)
+
+    def arm_audit(self, item: str) -> None:
+        """Queue one silent-injection audit item for the next banner flush.
+
+        Called at DECISION time by the armed (non-dry-run) ``/model``
+        branch in ``decide_once`` — worker-side, so the whole
+        audit loop deploys via worker hot-reload with no host restart (an
+        older host's merge-by-key ``import_state`` never clobbers the
+        worker's backlog; it merely doesn't carry it). Bounded FIFO: the
+        oldest item is dropped once ``_MAX_AUDIT_ITEMS`` is reached, because
+        an unflushable audit backlog must never grow the machine state
+        without limit.
+        """
+        if not item:
+            return
+        self._audit_pending.append(item)
+        if len(self._audit_pending) > _MAX_AUDIT_ITEMS:
+            del self._audit_pending[0]
+
+    @property
+    def plugin_notices_pending(self) -> tuple[str, ...]:
+        """Plugin-failure notices owed to the chat, oldest first (`name|kind|hook`)."""
+        return tuple(self._plugin_notices_pending)
+
+    def next_plugin_notice(self) -> tuple[str, str, str] | None:
+        """The oldest owed plugin notice as validated `(name, kind, hook)`, or None."""
+        while self._plugin_notices_pending:
+            parsed = parse_plugin_notice_item(self._plugin_notices_pending[0])
+            if parsed is not None:
+                return parsed
+            del self._plugin_notices_pending[0]
+        return None
+
+    def arm_plugin_notice(self, name: str, kind: str, hook: str) -> bool:
+        """Owe the chat one notice for a plugin failure; True only when newly armed.
+
+        One notice per plugin (a repeated report of the same failure is a
+        no-op), capped at `_MAX_PLUGIN_NOTICES` per process, and only for a
+        validated name and closed-set kind/hook.
+        """
+        item = f"{name}{_PLUGIN_NOTICE_SEPARATOR}{kind}{_PLUGIN_NOTICE_SEPARATOR}{hook}"
+        if parse_plugin_notice_item(item) is None or name in self._plugin_noticed:
+            return False
+        if len(self._plugin_noticed) >= _MAX_PLUGIN_NOTICES:
+            return False
+        self._plugin_noticed.append(name)
+        self._plugin_notices_pending.append(item)
+        return True
+
+    @property
+    def session_notices_pending(self) -> tuple[str, ...]:
+        """Session notices owed to the chat, oldest first (`kind|argument`)."""
+        return tuple(self._session_notices_pending)
+
+    def next_session_notice(self) -> tuple[str, str] | None:
+        """The oldest owed session notice as a validated `(kind, argument)`, or None."""
+        while self._session_notices_pending:
+            parsed = parse_session_notice_item(self._session_notices_pending[0])
+            if parsed is not None:
+                return parsed
+            del self._session_notices_pending[0]
+        return None
+
+    def arm_session_notice(self, kind: str, argument: str, *, now_wall: float) -> bool:
+        """Owe the chat one session notice; True only when newly armed.
+
+        Refused for anything `parse_session_notice_item` rejects, within the
+        kind's minimum interval of its previous arming, or when the queue is full.
+        """
+        item = f"{kind}{_SESSION_NOTICE_SEPARATOR}{argument}"
+        if parse_session_notice_item(item) is None:
+            return False
+        last = self._session_notice_last.get(kind)
+        if last is not None and now_wall - last < _NOTIFY_MIN_INTERVAL_SECONDS[kind]:
+            return False
+        cap = _NOTIFY_MAX_PER_PROCESS.get(kind)
+        count = self._session_notice_counts.get(kind, 0)
+        if cap is not None and count >= cap:
+            if kind not in self._session_notice_cap_logged:
+                self._session_notice_cap_logged.append(kind)
+                append_worker_error(
+                    f"session notice {kind} reached its per-process cap of {cap}; "
+                    "further requests of that kind are dropped"
+                )
+            return False
+        if len(self._session_notices_pending) >= _MAX_SESSION_NOTICES_PENDING:
+            return False
+        self._session_notices_pending.append(item)
+        self._session_notice_last[kind] = now_wall
+        self._session_notice_counts[kind] = count + 1
+        return True
+
+    def mark_session_notice_injection(self) -> None:
+        """The oldest owed session notice was typed: stop owing it (success-only, host-side)."""
+        if self._session_notices_pending:
+            del self._session_notices_pending[0]
+
+    def mark_plugin_notice_injection(self) -> None:
+        """The oldest owed notice was typed: stop owing it (success-only, host-side)."""
+        if self._plugin_notices_pending:
+            del self._plugin_notices_pending[0]
+
+    def mark_audit_injection(self) -> None:
+        """Clear the audit backlog once the banner for it has been posted.
+
+        Called by ``decide_once`` at DECISION time (Plan 00318): the flush is
+        a file write, not a PTY write, so there is no host-side success to
+        wait for. A failed banner write therefore drops that notice rather
+        than retrying it -- decision.log keeps the durable record either way.
+        """
+        self._audit_pending = []
+
+    @property
+    def last_model_session(self) -> str | None:
+        """The most recently observed foreground session id, or None (Plan 00278)."""
+        return self._last_model_session
+
+    def note_machine_downgrade(self, record: DowngradeRecord, *, now_wall: float) -> None:
+        """Record a downgrade CLAUDE CODE attributed to itself (Plan 00328).
+
+        Fed from ``load_model_downgrade_signal``, which reads what the daemon's
+        ``model_downgrade_recorder`` copied out of the session transcript. This
+        is the ONLY evidence that opens a downgrade episode: the auto-restore's
+        whole remit is the automated fable security downgrade, so requiring the
+        platform's own record of it means a human model change can never be
+        mistaken for one -- it emits no such record.
+
+        Idempotent. The recorder republishes the same fact for as long as the
+        session lives, and re-noting it must not disturb an episode already
+        open (or reopen one the human has since closed by switching models
+        themselves). Nothing is opened here: ``note_model_reading`` attributes
+        a drop as it is observed, and ``settle_pending_drop`` one observed
+        before this record was published.
+
+        A record without a timestamp keeps the moment it was FIRST seen as its
+        event time, so republishing it every tick never makes it look fresh.
+        """
+        attributed = (
+            f"{record.session_id}:{record.from_family}:{record.to_family}:{record.record_key}"
+        )
+        if record.event_ts is not None:
+            self._attributed_downgrade_event_ts = record.event_ts
+        elif (
+            attributed != self._attributed_downgrade or self._attributed_downgrade_event_ts is None
+        ):
+            self._attributed_downgrade_event_ts = now_wall
+        self._attributed_downgrade = attributed
+
+    def _downgrade_is_attributed(
+        self, session: str, from_family: str, to_family: str, *, observed_wall: float
+    ) -> bool:
+        """True when the platform recorded THIS session making THIS drop, freshly.
+
+        Four conditions, each closing a way the supervisor came to type
+        `/model fable` at a human who had chosen otherwise:
+
+        - the record names this session, from-family and to-family;
+        - its key is not one this machine already SPENT opening (and later
+          closing, by observing the family recover) an episode for -- the
+          recorder republishes the same record for the rest of the session,
+          so a manual switch back to the fallback would otherwise re-match it
+          (Plan 00466 N47 review 2 finding 4);
+        - the downgrade it records happened within
+          ``_DOWNGRADE_ATTRIBUTION_WINDOW_SECONDS`` of ``observed_wall``, when
+          the drop was seen -- an old record says nothing about a drop now,
+          including one whose episode never opened and so was never spent
+          (review 4 findings 3 and 4);
+        - the session has not been seen back on the top family (fable) SINCE
+          the record's own event time (review 5 finding 2) -- a record's key
+          can be one an empty-key record never spends, or one a later
+          unrelated record from a byte-offset collision happens to match, so
+          a downgrade already superseded by an observed recovery must not be
+          replayed onto a fresh drop that merely shares the same
+          from/to/session shape.
+
+        An empty key is never spent (spending it would refuse every later
+        keyless record); for such a record the window and the supersede check
+        are the only bounds.
+        """
+        recorded = self._attributed_downgrade
+        event_ts = self._attributed_downgrade_event_ts
+        if recorded is None or event_ts is None:
+            return False
+        parts = recorded.split(":", 3)
+        if len(parts) != 4:
+            return False
+        rec_session, rec_from, rec_to, rec_key = parts
+        if rec_session != session or rec_from != from_family or rec_to != to_family:
+            return False
+        if rec_key and rec_key == self._spent_downgrade_record_id:
+            return False
+        if abs(observed_wall - event_ts) > _DOWNGRADE_ATTRIBUTION_WINDOW_SECONDS:
+            return False
+        if (
+            self._last_top_family_seen_session == session
+            and self._last_top_family_seen_ts is not None
+            and self._last_top_family_seen_ts > event_ts + _DOWNGRADE_SUPERSEDE_SKEW_SECONDS
+        ):
+            return False
+        return True
+
+    def _open_downgrade_episode(
+        self, *, session: str, from_family: str, to_family: str, now_wall: float
+    ) -> None:
+        """Open an episode backed by the current record, whose key it will spend."""
+        recorded = self._attributed_downgrade
+        self._downgrade_from_family = from_family
+        self._downgrade_started_ts = now_wall
+        self._downgrade_episode_record_id = None if recorded is None else recorded.split(":", 3)[-1]
+        self._downgrade_episode = f"{session}:{to_family}"
+
+    def settle_pending_drop(self, *, now_wall: float) -> None:
+        """Attribute a drop retroactively once its record arrives (review 3 item C).
+
+        Runs every tick AFTER both ``note_machine_downgrade`` and
+        ``note_model_reading``. A downgrade whose READING rendered before its
+        RECORD was published is judged unattributed on that tick and latched;
+        ``family_changed`` never re-fires without another change, so this is
+        the only place it can still be attributed.
+
+        After the reading, not before: the record and the human's next pick
+        can land between the same two ticks, and only this tick's reading says
+        whether the session is still on the fallback. The latch exists only
+        while it is (``note_model_reading`` drops it otherwise), so session and
+        family need no second check here. The attribution itself is the same
+        judgement a drop gets when it is observed -- ``_downgrade_is_attributed``
+        -- applied at the moment the drop was observed, so a record of some
+        LATER downgrade cannot claim it (review 4 finding 3).
+        """
+        pending = self._pending_unattributed_drop
+        observed = self._pending_unattributed_drop_ts
+        if pending is None or observed is None or self._downgrade_episode is not None:
+            return
+        parts = pending.split(":", 2)
+        if len(parts) != 3:
+            return
+        session, from_family, to_family = parts
+        if not self._downgrade_is_attributed(
+            session, from_family, to_family, observed_wall=observed
+        ):
+            return
+        self._open_downgrade_episode(
+            session=session, from_family=from_family, to_family=to_family, now_wall=now_wall
+        )
+        self._pending_unattributed_drop = None
+        self._pending_unattributed_drop_ts = None
+        self._retro_attribution_note = (
+            f"downgrade {from_family} -> {to_family} attributed retroactively "
+            "(its model_downgrade_recorder record arrived after the reading) — restore armed"
+        )
+
+    def take_retro_attribution_note(self) -> str | None:
+        """Return, once, the note that a drop was attributed retroactively."""
+        note = self._retro_attribution_note
+        self._retro_attribution_note = None
+        return note
+
+    def take_unattributed_downgrade_note(self) -> str | None:
+        """Return, once, a note about a drop that arrived with no attribution.
+
+        Edge-triggered and consume-once, mirroring ``take_manual_model_note``.
+        Without it, a `model_downgrade_recorder` that is disabled or failing
+        looks exactly like a session that was never downgraded -- the restore
+        simply stops happening and nothing anywhere says why.
+        """
+        note = self._unattributed_downgrade_note
+        self._unattributed_downgrade_note = None
+        return note
+
+    def _settle_awaited_restore(self, *, family: str, session: str, reading_ts: float) -> None:
+        """Decide whether an injected restore actually LANDED (Plan 00328).
+
+        The first reading rendered AFTER the injection is the verdict, and it
+        needs no theory about why: the family is either on screen or it is
+        not. A miss marks the family unreachable, which stops both the retry
+        and the flip-flop `/compact` that read the still-open episode as a
+        classifier re-fire.
+
+        Readings older than the injection are ignored: the sidecar only
+        refreshes on a status render, so a stale one says nothing yet.
+        """
+        awaiting = self._restore_awaiting
+        if awaiting is None or self._restore_awaiting_ts is None:
+            return
+        awaited_session, _, awaited_family = awaiting.partition(":")
+        if session != awaited_session or reading_ts <= self._restore_awaiting_ts:
+            return
+        self._restore_awaiting = None
+        self._restore_awaiting_ts = None
+        if family == awaited_family:
+            return
+        if awaited_family not in self._unavailable_families:
+            self._unavailable_families.append(awaited_family)
+
+    def note_model_reading(self, reading: SidecarReading, *, now_wall: float) -> None:
+        """Track the foreground model; open/close the downgrade-restore episode.
+
+        Plan 00466 N47 review 2: the supervisor injects NO effort of any
+        kind (BLOCKER 1 -- every ``/effort <level>`` it typed was persisted
+        by Claude Code into the user settings.json, which is precisely the
+        fight the owner's SSoT requirement rules out). This method now does
+        exactly what the ``/model`` auto-restore needs and nothing about
+        effort: track the foreground (session, family), and open/close the
+        downgrade episode that gates ``model_restore_due``/``flag_compact_due``.
+
+        Unknown families and session-less synthetic readings are ignored
+        entirely.
+        """
+        family = _model_family(reading.model_id)
+        session = reading.session_id
+        if not session or family is None:
+            return
+        prev_session = self._last_model_session
+        prev_family = self._last_model_family
+        self._last_model_session = session
+        self._last_model_family = family
+        if (
+            _family_rank(family) == _TOP_FAMILY_RANK
+            and prev_session == session
+            and prev_family is not None
+        ):
+            # Excludes the very first reading this process has ever seen for
+            # the session: that one IS the origin of whatever drop follows
+            # it, not a later confirmation that supersedes an older record
+            # (review 5 finding 2's own window test -- a record dated up to
+            # `_DOWNGRADE_ATTRIBUTION_WINDOW_SECONDS` before this exact
+            # origin sighting must still attribute).
+            self._last_top_family_seen_session = session
+            self._last_top_family_seen_ts = reading.ts
+        self._settle_awaited_restore(family=family, session=session, reading_ts=reading.ts)
+        if self._pending_unattributed_drop is not None:
+            p_session, _, p_rest = self._pending_unattributed_drop.partition(":")
+            p_to = p_rest.rpartition(":")[2]
+            if session != p_session or family != p_to:
+                # Plan 00466 N47 review 3 item C: the session has left the
+                # fallback family (recovered another way, or switched again)
+                # without the record ever arriving -- the window this latch
+                # existed to bridge has closed, so drop it rather than let a
+                # later record retroactively open a stale episode.
+                self._pending_unattributed_drop = None
+                self._pending_unattributed_drop_ts = None
+        if self._downgrade_episode is not None:
+            ep_session, _, ep_family = self._downgrade_episode.partition(":")
+            if session != ep_session or family != ep_family:
+                # Plan 00466 N47 review 5 finding 1: ANY foreground change away
+                # from the fallback family closes the episode, not only a
+                # rise. A rank check alone left an open episode surviving a
+                # human's move to a LOWER family still (opus fallback, human
+                # picks Sonnet) -- the episode held through the flip-flop
+                # backoff and `/model fable` was later typed over that pick.
+                # Every reading that reaches here already had its own chance
+                # to be the supervisor's own awaited restore landing
+                # (`_settle_awaited_restore`, above); anything else observed
+                # on the fallback session is the human's business, exactly
+                # the same ruling that scopes the episode to a drop FROM
+                # fable in the first place (see the comment above this
+                # method).
+                #
+                # Plan 00466 N47 review 2 finding 4: the episode is closing --
+                # spend this episode's record key so the SAME still-published
+                # attribution record can never reopen a fresh episode later
+                # on a manual switch back to the fallback family. An EMPTY
+                # key (a record with neither id nor timestamp) is never
+                # spent, or every later keyless downgrade in the session
+                # would compare equal to it and be refused.
+                if self._downgrade_episode_record_id:
+                    self._spent_downgrade_record_id = self._downgrade_episode_record_id
+                self._downgrade_episode = None
+                self._downgrade_episode_record_id = None
+                self._downgrade_from_family = None
+                self._downgrade_started_ts = None
+        family_changed = (
+            prev_session == session and prev_family is not None and family != prev_family
+        )
+        if (
+            family_changed
+            # SCOPE (owner ruling, 2026-09-04, after a live dogfood): this
+            # family counteracts the automated fable SECURITY downgrade and
+            # NOTHING ELSE. The drop must therefore START at fable -- an
+            # opus -> sonnet move is the human's business, not ours, and
+            # treating it as an episode is how the supervisor came to type
+            # `/model opus` at a human who had just picked Sonnet. Keyed on
+            # the ORIGIN, not the destination, so a fallback to something
+            # other than opus is still covered.
+            and prev_family is not None
+            and _family_rank(prev_family) == _TOP_FAMILY_RANK
+            and _family_rank(family) < _family_rank(prev_family)
+        ):
+            # ATTRIBUTION (Plan 00328): the shape above is necessary but not
+            # sufficient. A human choosing opus from the picker produces it
+            # exactly, and acting on the shape alone is how the supervisor came
+            # to type `/model fable` at a human who had just chosen otherwise.
+            # Claude Code records its OWN downgrades; require that record --
+            # fresh, and not one whose episode already ran its course
+            # (`_downgrade_is_attributed`).
+            if not self._downgrade_is_attributed(
+                session, prev_family, family, observed_wall=now_wall
+            ):
+                # Plan 00466 N47 review 3 item C: latch it. The record may
+                # simply not have been PUBLISHED yet (the reading renders
+                # before the daemon's PostToolUse recorder writes the
+                # signal) -- if it arrives while the session is still
+                # sitting on this exact fallback, `settle_pending_drop`
+                # attributes it retroactively and opens the episode there.
+                self._pending_unattributed_drop = f"{session}:{prev_family}:{family}"
+                self._pending_unattributed_drop_ts = now_wall
+                if self._unattributed_downgrade_note is None:
+                    self._unattributed_downgrade_note = (
+                        f"downgrade {prev_family} -> {family} is unattributed "
+                        "(no fresh, unspent model_downgrade_recorder record) — no restore"
+                    )
+            else:
+                self._pending_unattributed_drop = None
+                self._pending_unattributed_drop_ts = None
+                # An episode is always None here (Plan 00466 N47 review 5
+                # finding 4): reaching this branch requires `prev_family` to
+                # be the top family (fable), and an open episode's fallback
+                # family can never BE fable -- any reading of fable would
+                # already have closed it, above, before this point. Remember
+                # where we fell FROM and when, for the delayed /model
+                # flip-back (Task 2b.3), and which record backs it so a later
+                # recovery can spend it.
+                self._open_downgrade_episode(
+                    session=session,
+                    from_family=prev_family,
+                    to_family=family,
+                    now_wall=now_wall,
+                )
+
+    @property
+    def goal_injections(self) -> int:
+        """How many goal injections this process has fired (Plan 00269)."""
+        return self._goal_injections
+
+    def mark_goal_injection(
+        self, goal_line: str | None = None, *, now_wall: float | None = None
+    ) -> None:
+        """Count one goal injection against the rolling family cap (Plan 00269).
+
+        ``goal_line`` (Plan 00299) records the injected text as the thrash
+        guard for the NEXT tick's candidate; omitted/None leaves the guard
+        unchanged (legacy callers, and tests exercising the cap alone).
+        ``now_wall`` stamps the injection for the rolling window; a legacy
+        host that omits it is stamped with the wall clock.
+        """
+        self._goal_injections += 1
+        self._goal_injection_ts.append(time.time() if now_wall is None else now_wall)
+        if goal_line is not None:
+            self._last_goal_text = goal_line
+
+    def goal_injections_within(self, window_seconds: float, now_wall: float) -> int:
+        """How many goal injections fired in the last ``window_seconds``."""
+        return sum(1 for ts in self._goal_injection_ts if now_wall - ts < window_seconds)
+
+    @property
+    def own_line_pending(self) -> bool:
+        """True while a line the supervisor typed is still unconfirmed."""
+        return self._own_line_text is not None
+
+    @property
+    def own_line_text(self) -> str | None:
+        """The unconfirmed own line's text, or None."""
+        return self._own_line_text
+
+    @property
+    def own_line_resubmits(self) -> int:
+        """How many follow-up Enters the pending own line has had."""
+        return self._own_line_resubmits
+
+    def mark_own_line_typed(self, payload: str, now_wall: float) -> None:
+        """Remember a just-submitted own line as unconfirmed box content.
+
+        A raw keypress (ESC, a bare Enter) is not a line and is never
+        remembered; only text that was pasted and submitted is.
+        """
+        if not payload.strip() or payload in (_RESUBMIT_PAYLOAD, _ESC_PAYLOAD):
+            return
+        self._own_line_text = payload
+        self._own_line_ts = now_wall
+        self._own_line_resubmits = 0
+
+    def mark_own_line_resubmit(self, now_wall: float) -> None:
+        """Record one follow-up Enter and restart the interval."""
+        self._own_line_resubmits += 1
+        self._own_line_ts = now_wall
+
+    def own_line_resubmit_due(self, now_wall: float) -> bool:
+        """True when the pending own line has aged past the follow-up interval."""
+        if self._own_line_ts is None:
+            return False
+        return now_wall - self._own_line_ts >= _OWN_LINE_RESUBMIT_SECONDS
+
+    def clear_own_line(self) -> None:
+        """Forget the pending own line (it went, or the budget is spent)."""
+        self._own_line_text = None
+        self._own_line_ts = None
+        self._own_line_resubmits = 0
+
+    @property
+    def last_goal_text(self) -> str | None:
+        """The combined /goal text last successfully injected (Plan 00299)."""
+        return self._last_goal_text
+
+    @property
+    def goal_clear_injections(self) -> int:
+        """How many goal RETRACTIONS this process has fired (Plan 00321)."""
+        return self._goal_clear_injections
+
+    def mark_goal_clear_injection(self) -> None:
+        """Count one `/goal clear` and forget the thrash guard (Plan 00321).
+
+        Resetting ``_last_goal_text`` is the load-bearing half. The guard
+        suppresses a candidate identical to the last injected text, so
+        without this a plan that goes In Progress -> Complete -> In Progress
+        again would have its second, legitimate goal silently swallowed as a
+        duplicate -- of a condition that is no longer set.
+        """
+        self._goal_clear_injections += 1
+        self._last_goal_text = None
+
+    @property
+    def standing_auth_injections(self) -> int:
+        """How many standing-auth reinforcements this process has fired (Plan 00283)."""
+        return self._standing_auth_injections
+
+    def mark_standing_auth_injection(self) -> None:
+        """Count one standing-auth reinforcement against the runaway backstop (Plan 00283)."""
+        self._standing_auth_injections += 1
+
+    @property
+    def session_actions_injections(self) -> int:
+        """How many session-actions directives this process has typed (Plan 00416)."""
+        return self._session_actions_injections
+
+    def mark_session_actions_injection(self) -> None:
+        """Count one session-actions directive against the runaway backstop (Plan 00416)."""
+        self._session_actions_injections += 1
+
+    @property
+    def cron_reconcile_injections(self) -> int:
+        """How many cron-reconcile prompts this process has typed (Plan 00470)."""
+        return self._cron_reconcile_injections
+
+    @property
+    def cron_reconcile_last_ts(self) -> float | None:
+        """Wall time of the last cron-reconcile prompt, or None if none yet."""
+        return self._cron_reconcile_last_ts
+
+    def mark_cron_reconcile_injection(self, now_wall: float) -> None:
+        """Count one cron-reconcile prompt and remember when it went (Plan 00470)."""
+        self._cron_reconcile_injections += 1
+        self._cron_reconcile_last_ts = now_wall
+
+    @property
+    def pause_compacted_for(self) -> float | None:
+        """The ``paused_at`` of the usage pause already compacted, or None (Plan 00479)."""
+        return self._pause_compacted_for
+
+    def mark_pause_compacted(self, paused_at: float) -> None:
+        """Latch the single /compact of the usage pause recorded at ``paused_at``."""
+        self._pause_compacted_for = paused_at
+
+    def clear_pause_compacted(self) -> None:
+        """Forget the latch: the pause is over, so the next one compacts afresh."""
+        self._pause_compacted_for = None
+
+    def drop_await_for_usage_pause(self) -> bool:
+        """Leave AWAIT_COMPACTING while a usage pause holds; True if it was left.
+
+        A paused session is evaluated by no band, so nothing else would end the
+        wait, and a wait that later resolved would type `continue`.
+        """
+        if self.state is not SupervisorState.AWAIT_COMPACTING:
+            return False
+        self._enter_monitor()
+        return True
+
+    @property
+    def dry_run_fired(self) -> bool:
+        """True once a dry-run marker has been injected this session (Plan 00183)."""
+        return self._dry_run_fired
+
+    def mark_dry_run_fired(self) -> None:
+        """Latch the dry-run once-only fuse for the process lifetime (Plan 00183)."""
+        self._dry_run_fired = True
+
+    def export_state(self) -> dict[str, object]:
+        """Serialise the mutable per-episode state (Plan 00164 Phase 4 fix).
+
+        The HOST holds the single authoritative machine; it ships this state to
+        the policy worker each tick and adopts the worker's returned state, so the
+        worker and the in-process fallback can never diverge (which previously let
+        a worker stall inject a duplicate ``/compact``). Excludes ``_policy``,
+        which is fixed configuration reconstructed on both sides.
+        """
+        return {
+            "state": self.state.value,
+            "injections": self._injections,
+            "last_action_ts": self._last_action_ts,
+            "compaction_handled": self._compaction_handled,
+            "escapes_sent": self._escapes_sent,
+            "await_is_human": self._await_is_human,
+            "dry_run_fired": self._dry_run_fired,
+            "goal_injections": self._goal_injections,
+            "goal_injection_ts": list(self._goal_injection_ts),
+            "own_line_text": self._own_line_text,
+            "own_line_ts": self._own_line_ts,
+            "own_line_resubmits": self._own_line_resubmits,
+            "goal_clear_injections": self._goal_clear_injections,
+            "last_goal_text": self._last_goal_text,
+            "standing_auth_injections": self._standing_auth_injections,
+            "session_actions_injections": self._session_actions_injections,
+            "cron_reconcile_injections": self._cron_reconcile_injections,
+            "cron_reconcile_last_ts": self._cron_reconcile_last_ts,
+            "last_model_session": self._last_model_session,
+            "last_model_family": self._last_model_family,
+            "downgrade_episode": self._downgrade_episode,
+            "downgrade_from_family": self._downgrade_from_family,
+            "downgrade_started_ts": self._downgrade_started_ts,
+            "model_restores": self._model_restores,
+            "model_restore_last_ts": self._model_restore_last_ts,
+            "flag_compactions": self._flag_compactions,
+            "pause_compacted_for": self._pause_compacted_for,
+            "audit_pending": list(self._audit_pending),
+            "plugin_notices_pending": list(self._plugin_notices_pending),
+            "plugin_noticed": list(self._plugin_noticed),
+            "session_notices_pending": list(self._session_notices_pending),
+            "session_notice_last": dict(self._session_notice_last),
+            "session_notice_counts": dict(self._session_notice_counts),
+            "session_notice_cap_logged": list(self._session_notice_cap_logged),
+            "restore_awaiting": self._restore_awaiting,
+            "restore_awaiting_ts": self._restore_awaiting_ts,
+            "unavailable_families": list(self._unavailable_families),
+            "attributed_downgrade": self._attributed_downgrade,
+            "attributed_downgrade_event_ts": self._attributed_downgrade_event_ts,
+            "downgrade_episode_record_id": self._downgrade_episode_record_id,
+            "spent_downgrade_record_id": self._spent_downgrade_record_id,
+            "unattributed_downgrade_note": self._unattributed_downgrade_note,
+            "pending_unattributed_drop": self._pending_unattributed_drop,
+            "pending_unattributed_drop_ts": self._pending_unattributed_drop_ts,
+            "retro_attribution_note": self._retro_attribution_note,
+            "last_top_family_seen_session": self._last_top_family_seen_session,
+            "last_top_family_seen_ts": self._last_top_family_seen_ts,
+        }
+
+    def import_state(self, state: dict[str, object]) -> None:
+        """Overwrite the mutable state from an :meth:`export_state` payload.
+
+        Missing keys keep the current value so an older/newer peer stays safe.
+        """
+        if "state" in state:
+            self.state = SupervisorState(str(state["state"]))
+        if "injections" in state:
+            self._injections = _coerce_int(state["injections"])
+        if "last_action_ts" in state:
+            raw = state["last_action_ts"]
+            self._last_action_ts = None if raw is None else _coerce_float(raw)
+        if "compaction_handled" in state:
+            self._compaction_handled = bool(state["compaction_handled"])
+        if "escapes_sent" in state:
+            self._escapes_sent = _coerce_int(state["escapes_sent"])
+        if "await_is_human" in state:
+            self._await_is_human = bool(state["await_is_human"])
+        if "dry_run_fired" in state:
+            self._dry_run_fired = bool(state["dry_run_fired"])
+        if "goal_injections" in state:
+            self._goal_injections = _coerce_int(state["goal_injections"])
+        if "goal_injection_ts" in state:
+            raw = state["goal_injection_ts"]
+            self._goal_injection_ts = (
+                [_coerce_float(item) for item in raw] if isinstance(raw, list) else []
+            )
+        if "own_line_text" in state:
+            raw = state["own_line_text"]
+            text = None if raw is None else str(raw)
+            # Plan 00466 N47 review 3 finding 5: a legacy payload from BEFORE
+            # this fix can still carry an unconfirmed "/effort <level>" own
+            # line. This machine no longer types `/effort` at all and must
+            # not press Enter to CONFIRM one that is already sitting in the
+            # box from an older injection -- that would still complete the
+            # exact settings.json write this whole redesign exists to stop.
+            if text is not None and text.lstrip().startswith("/effort"):
+                text = None
+            self._own_line_text = text
+        if "own_line_ts" in state:
+            raw = state["own_line_ts"]
+            self._own_line_ts = None if raw is None else _coerce_float(raw)
+        if "own_line_resubmits" in state:
+            self._own_line_resubmits = _coerce_int(state["own_line_resubmits"])
+        if "goal_clear_injections" in state:
+            self._goal_clear_injections = _coerce_int(state["goal_clear_injections"])
+        if "last_goal_text" in state:
+            raw = state["last_goal_text"]
+            self._last_goal_text = None if raw is None else str(raw)
+        if "standing_auth_injections" in state:
+            self._standing_auth_injections = _coerce_int(state["standing_auth_injections"])
+        if "session_actions_injections" in state:
+            self._session_actions_injections = _coerce_int(state["session_actions_injections"])
+        if "cron_reconcile_injections" in state:
+            self._cron_reconcile_injections = _coerce_int(state["cron_reconcile_injections"])
+        if "cron_reconcile_last_ts" in state:
+            raw_ts = state["cron_reconcile_last_ts"]
+            self._cron_reconcile_last_ts = (
+                float(raw_ts)
+                if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool)
+                else None
+            )
+        if "last_model_session" in state:
+            raw = state["last_model_session"]
+            self._last_model_session = None if raw is None else str(raw)
+        if "last_model_family" in state:
+            raw = state["last_model_family"]
+            self._last_model_family = None if raw is None else str(raw)
+        if "downgrade_episode" in state:
+            raw = state["downgrade_episode"]
+            self._downgrade_episode = None if raw is None else str(raw)
+        if "downgrade_from_family" in state:
+            raw = state["downgrade_from_family"]
+            self._downgrade_from_family = None if raw is None else str(raw)
+        if "downgrade_started_ts" in state:
+            raw = state["downgrade_started_ts"]
+            self._downgrade_started_ts = None if raw is None else _coerce_float(raw)
+        if "model_restores" in state:
+            self._model_restores = _coerce_int(state["model_restores"])
+        if "model_restore_last_ts" in state:
+            raw = state["model_restore_last_ts"]
+            self._model_restore_last_ts = None if raw is None else _coerce_float(raw)
+        if "flag_compactions" in state:
+            self._flag_compactions = _coerce_int(state["flag_compactions"])
+        if "pause_compacted_for" in state:
+            raw = state["pause_compacted_for"]
+            self._pause_compacted_for = None if raw is None else _coerce_float(raw)
+        if "audit_pending" in state:
+            raw_items = state["audit_pending"]
+            if isinstance(raw_items, list):
+                self._audit_pending = [str(item) for item in raw_items[:_MAX_AUDIT_ITEMS]]
+        if "plugin_notices_pending" in state:
+            raw_notices = state["plugin_notices_pending"]
+            if isinstance(raw_notices, list):
+                self._plugin_notices_pending = [
+                    item
+                    for item in raw_notices
+                    if isinstance(item, str) and parse_plugin_notice_item(item) is not None
+                ][:_MAX_PLUGIN_NOTICES]
+        if "plugin_noticed" in state:
+            raw_names = state["plugin_noticed"]
+            if isinstance(raw_names, list):
+                self._plugin_noticed = [name for name in raw_names if isinstance(name, str)][
+                    :_MAX_PLUGIN_NOTICES
+                ]
+        if "session_notices_pending" in state:
+            raw_session_notices = state["session_notices_pending"]
+            if isinstance(raw_session_notices, list):
+                self._session_notices_pending = [
+                    item
+                    for item in raw_session_notices
+                    if isinstance(item, str) and parse_session_notice_item(item) is not None
+                ][:_MAX_SESSION_NOTICES_PENDING]
+        if "session_notice_last" in state:
+            raw_last = state["session_notice_last"]
+            if isinstance(raw_last, dict):
+                self._session_notice_last = {
+                    kind: float(stamp)
+                    for kind, stamp in raw_last.items()
+                    if kind in _NOTIFY_MIN_INTERVAL_SECONDS
+                    and isinstance(stamp, (int, float))
+                    and not isinstance(stamp, bool)
+                }
+        if "session_notice_counts" in state:
+            raw_counts = state["session_notice_counts"]
+            if isinstance(raw_counts, dict):
+                self._session_notice_counts = {
+                    kind: int(count)
+                    for kind, count in raw_counts.items()
+                    if kind in _NOTIFY_MAX_PER_PROCESS
+                    and isinstance(count, int)
+                    and not isinstance(count, bool)
+                }
+        if "session_notice_cap_logged" in state:
+            raw_logged = state["session_notice_cap_logged"]
+            if isinstance(raw_logged, list):
+                self._session_notice_cap_logged = [
+                    kind for kind in raw_logged if kind in _NOTIFY_MAX_PER_PROCESS
+                ]
+        if "restore_awaiting" in state:
+            raw = state["restore_awaiting"]
+            self._restore_awaiting = None if raw is None else str(raw)
+        if "restore_awaiting_ts" in state:
+            raw = state["restore_awaiting_ts"]
+            self._restore_awaiting_ts = None if raw is None else _coerce_float(raw)
+        if "unavailable_families" in state:
+            raw = state["unavailable_families"]
+            self._unavailable_families = (
+                [str(item) for item in raw] if isinstance(raw, list) else []
+            )
+        if "attributed_downgrade" in state:
+            raw = state["attributed_downgrade"]
+            self._attributed_downgrade = None if raw is None else str(raw)
+        if "attributed_downgrade_event_ts" in state:
+            raw = state["attributed_downgrade_event_ts"]
+            self._attributed_downgrade_event_ts = None if raw is None else _coerce_float(raw)
+        # A worker from before record ids exported these keys as `*_record_ts`
+        # (the record's timestamp was its key then); read those when the new
+        # key is absent so a hot reload keeps the episode and the spent record.
+        episode_key = (
+            "downgrade_episode_record_id"
+            if "downgrade_episode_record_id" in state
+            else "downgrade_episode_record_ts"
+        )
+        if episode_key in state:
+            raw = state[episode_key]
+            self._downgrade_episode_record_id = None if raw is None else str(raw)
+        spent_key = (
+            "spent_downgrade_record_id"
+            if "spent_downgrade_record_id" in state
+            else "spent_downgrade_record_ts"
+        )
+        if spent_key in state:
+            raw = state[spent_key]
+            self._spent_downgrade_record_id = None if raw is None else str(raw)
+        if "unattributed_downgrade_note" in state:
+            raw = state["unattributed_downgrade_note"]
+            self._unattributed_downgrade_note = None if raw is None else str(raw)
+        if "pending_unattributed_drop" in state:
+            raw = state["pending_unattributed_drop"]
+            self._pending_unattributed_drop = None if raw is None else str(raw)
+        if "pending_unattributed_drop_ts" in state:
+            raw = state["pending_unattributed_drop_ts"]
+            self._pending_unattributed_drop_ts = None if raw is None else _coerce_float(raw)
+        if "retro_attribution_note" in state:
+            raw = state["retro_attribution_note"]
+            self._retro_attribution_note = None if raw is None else str(raw)
+        if "last_top_family_seen_session" in state:
+            raw = state["last_top_family_seen_session"]
+            self._last_top_family_seen_session = None if raw is None else str(raw)
+        if "last_top_family_seen_ts" in state:
+            raw = state["last_top_family_seen_ts"]
+            self._last_top_family_seen_ts = None if raw is None else _coerce_float(raw)
+        # Plan 00466 N47 review 3: an episode already open when this state was
+        # exported by an OLDER worker (pre-dating the episode's record key, or
+        # a legacy payload with the key stripped) imports with no key to spend
+        # on close, so the MAJOR 4 bug would recur once for that one episode.
+        # Backfill it from `attributed_downgrade` when it still names this
+        # exact open episode's session and fallback family.
+        if self._downgrade_episode is not None and self._downgrade_episode_record_id is None:
+            ep_session, _, ep_family = self._downgrade_episode.partition(":")
+            recorded = self._attributed_downgrade
+            if recorded is not None:
+                parts = recorded.split(":", 3)
+                if len(parts) == 4 and parts[0] == ep_session and parts[2] == ep_family:
+                    self._downgrade_episode_record_id = parts[3]
+
+    def evaluate(
+        self,
+        reading: SidecarReading | None,
+        *,
+        idle: bool,
+        now: float,
+        human_compact_submitted: bool = False,
+        work_idle: bool = True,
+        foreground_ambiguous: bool = False,
+        input_line_abandoned: bool = False,
+    ) -> Evaluation:
+        """Advance the machine one step and return what it WOULD do.
+
+        ``foreground_ambiguous`` (Plan 00160) is True when the freshest sidecar
+        cannot be confidently attributed to the FOREGROUND thread this tick (a
+        recent Agent-View thread switch left two still-fresh sidecars). It gates
+        ONLY the compact path -- a would-be `/compact` is deferred so it never
+        targets the wrong thread -- and never affects resume/AWAIT.
+
+        ``human_compact_submitted`` is an edge signal: the human just submitted a
+        ``/compact``. The machine then enters AWAIT_COMPACTING WITHOUT injecting,
+        so the supervisor never stacks a second ``/compact`` on top of the
+        human's (Claude Code aborts the duplicate). It still resumes afterwards
+        via the normal compaction-signal path.
+
+        ``work_idle`` (Plan 00152) is True when the child has produced no output
+        recently (the turn has settled). It only gates the LOWER red band: an
+        elevated-band or critical reading compacts regardless of ``work_idle``.
+
+        ``idle`` is a SEPARATE, unconditional gate checked ahead of the
+        ``work_idle``/band split above and applies to EVERY band including
+        critical (Plan 00398): it is False on a human keystroke or a non-empty
+        input box, and a compaction never fires while it is False, however
+        urgent the reading. Do not read the ``work_idle`` sentence above as
+        "critical always compacts" -- it describes only the band split that
+        follows ``idle``, not a bypass of ``idle`` itself.
+
+        ``input_line_abandoned`` (Plan 00398 Phase 3) is True when the box
+        ``idle`` is False for has held UNCHANGED content past the stability
+        threshold -- a human mid-sentence, not one who has walked away. While
+        it holds, a red-or-worse reading fires ONE flush (submit the pending
+        text via the existing resubmit/Enter path, `Decision.WOULD_RESUBMIT`)
+        instead of deferring forever, then compacts normally once the box
+        reads empty again.
+        """
+        compacting = reading is not None and reading.compacting
+        if compacting:
+            if self._compaction_handled:
+                # Already resumed this episode; sit tight until compaction ends.
+                return Evaluation(Decision.NOOP, "compaction in progress (already resumed)")
+            if not idle or not work_idle:
+                # Never type `continue` into a busy TUI -- it would be lost or
+                # corrupt in-flight input. TWO ways the TUI is busy:
+                #   * not idle      -- a human keystroke / non-empty input box.
+                #   * not work_idle -- the child is still STREAMING (Plan 00152).
+                # The second is the critical one for AUTOMATED compaction: the
+                # `.compacting` signal is written at compaction START and the
+                # human types nothing, so `idle` stays True the whole time. Only
+                # `work_idle` tells us the compaction summary has stopped
+                # streaming and we are back at the real post-compaction prompt.
+                # Gating on it stops the resume from firing mid-compaction and
+                # being dropped (the "compact injected, continue lost" bug). Do
+                # NOT latch: retry each poll so the resume still fires once the
+                # session settles.
+                return Evaluation(Decision.NOOP, _REASON_BUSY_AWAIT_RESUME)
+            self._compaction_handled = True
+            self._last_action_ts = now
+            # Plan 00180: a compaction actually happened, so refresh the injection
+            # budget. `max_injections` is a runaway-loop fuse on CONSECUTIVE FAILED
+            # injections (compact injected but nothing compacts), NOT a lifetime
+            # cap -- without this reset a long-lived session hits 20 legitimate
+            # compactions and is then permanently muzzled even at CRITICAL context.
+            # Reset ONLY here (the confirmed-compaction success path), never in
+            # `_enter_monitor` (the AWAIT-timeout give-up path also calls it, and a
+            # wedged session's failed injections MUST keep accumulating).
+            self._injections = 0
+            self._enter_monitor()
+            # Plan 00399: name whose compaction this was when the daemon's
+            # record says, so a human `/compact` the keystrokes missed is
+            # visible in the decision log as recognised.
+            origin = reading.compaction_origin if reading is not None else ""
+            label = _COMPACTION_ORIGIN_LABELS.get(origin)
+            detected = f"compaction detected ({label})" if label else "compaction detected"
+            return Evaluation(Decision.WOULD_CONTINUE, f"{detected} -> would inject continue")
+
+        # No compaction under way: reset the latch and run normal logic.
+        self._compaction_handled = False
+
+        # A human /compact wins over any supervisor action: enter AWAIT without
+        # injecting so we don't double-compact. Marked human so ESC-flush stays
+        # off (the human owns flushing their own queued command).
+        if human_compact_submitted and self.state is SupervisorState.MONITOR:
+            self._last_action_ts = now
+            self._enter_await(is_human=True)
+            return Evaluation(
+                Decision.NOOP, "human /compact detected -> awaiting compaction (no inject)"
+            )
+
+        if self.state is SupervisorState.AWAIT_COMPACTING:
+            return self._evaluate_await(idle=idle, now=now)
+        return self._evaluate_monitor(
+            reading,
+            idle=idle,
+            work_idle=work_idle,
+            now=now,
+            foreground_ambiguous=foreground_ambiguous,
+            input_line_abandoned=input_line_abandoned,
+        )
+
+    def _evaluate_monitor(
+        self,
+        reading: SidecarReading | None,
+        *,
+        idle: bool,
+        work_idle: bool,
+        now: float,
+        foreground_ambiguous: bool = False,
+        input_line_abandoned: bool = False,
+    ) -> Evaluation:
+        # Plan 00398 Phase 3: the flush latch is scoped to the box's CURRENT
+        # abandoned spell, consumed here every tick regardless of what follows
+        # below -- a stale/non-red/ambiguous tick must not leave a stale latch
+        # armed for a LATER, unrelated episode.
+        if not input_line_abandoned:
+            self._abandoned_box_handled = False
+        if reading is None:
+            return Evaluation(Decision.NOOP, "no sidecar reading")
+        if reading.stale:
+            return Evaluation(Decision.NOOP, "sidecar stale")
+        if not reading.red:
+            return Evaluation(Decision.NOOP, f"not red (tier={reading.tier})")
+        # Plan 00160: defer a would-be compaction while the foreground thread is
+        # ambiguous (recent thread switch) -- injecting now could compact the
+        # wrong Agent-View thread. Self-resolves as the backgrounded sidecar ages.
+        if foreground_ambiguous:
+            return Evaluation(Decision.NOOP, _REASON_FOREGROUND_AMBIGUOUS)
+        if not idle:
+            if input_line_abandoned and not self._abandoned_box_handled:
+                # Owner ruling (Plan 00398): text unchanged for the stability
+                # threshold is "captured text by accident" -- submit it via the
+                # SAME resubmit/Enter machinery the AWAIT-flush loop already
+                # uses (no new keystroke path), then let the ordinary idle+red
+                # check above compact on a later tick once the box reads empty.
+                # One-shot: `_abandoned_box_handled` is not cleared again until
+                # the box stops reading abandoned, so a box the Enter fails to
+                # clear gets exactly one attempt, never a resubmit loop.
+                # Deliberately does NOT touch `_last_action_ts`: doing so would
+                # arm the (up to 300s) compact cooldown against this flush and
+                # delay the very compaction it exists to unblock -- CRITICAL
+                # bypasses cooldown, but a non-critical urgent reading (the
+                # production incident's actual band) would not.
+                self._abandoned_box_handled = True
+                return Evaluation(
+                    Decision.WOULD_RESUBMIT,
+                    f"input box unchanged for >= "
+                    f"{_DEFAULT_INPUT_LINE_ABANDON_SECONDS:.0f}s -> submitting the "
+                    "pending text before compacting",
+                    abandoned_box_flush=True,
+                )
+            return Evaluation(Decision.NOOP, _REASON_BUSY_COMPOSING)
+        # Plan 00152 graduated bands: critical is always urgent. In the LOWER red
+        # band (red but not urgent) stay PATIENT -- defer until the child output
+        # has settled -- so an in-progress turn is never interrupted. The
+        # elevated + critical bands act promptly even while the child streams.
+        urgent = reading.compact_urgent or reading.critical
+        if not urgent and not work_idle:
+            return Evaluation(Decision.NOOP, _REASON_RED_WORK_IN_PROGRESS)
+        if self._injections >= self._policy.max_injections:
+            return Evaluation(Decision.NOOP, "injection cap reached")
+        # CRITICAL bypasses the cooldown so a dangerously-high context compacts
+        # on the very next idle tick instead of waiting the cooldown out.
+        if not self._cooldown_elapsed(now, critical=reading.critical):
+            return Evaluation(Decision.NOOP, "cooldown active")
+
+        self._injections += 1
+        self._last_action_ts = now
+        # Enter AWAIT: from here the queued /compact is flushed with [esc] if it
+        # stalls -- for ANY band, not just critical (Plan 00164 supersedes the
+        # Plan 00152 critical-only gate: a stalled queued /compact MUST be
+        # flushable or the machine loops re-injecting it).
+        self._enter_await(is_human=False)
+        urgency = "CRITICAL" if reading.critical else ("urgent" if urgent else "red")
+        return Evaluation(
+            Decision.WOULD_COMPACT,
+            f"{urgency} at {reading.pct:.0f}% + idle -> would inject /compact",
+        )
+
+    def _evaluate_await(self, *, idle: bool, now: float) -> Evaluation:
+        if self._await_timed_out(now):
+            self._enter_monitor()
+            return Evaluation(Decision.NOOP, "await-compacting timed out -> back to monitor")
+        # A human-originated AWAIT never gets a supervisor ESC -- the human owns
+        # flushing their own queued /compact.
+        if self._await_is_human:
+            return Evaluation(Decision.NOOP, "awaiting human compaction start")
+        # ESC-flush (Plan 00164): a supervisor /compact that Claude Code queued
+        # behind the in-flight turn needs an [esc] to run, so we NEVER re-inject a
+        # second /compact -- we fire [esc] REPEATEDLY at escape_after intervals
+        # ("fire escape until it does") for ANY band, re-arming the interval each
+        # time, until compaction starts or max_escapes is reached. After that we
+        # give up and return to MONITOR so a missed transition cannot wedge us.
+        if idle and self._escape_due(now):
+            if self._escapes_sent >= self._policy.max_escapes:
+                self._enter_monitor()
+                return Evaluation(
+                    Decision.NOOP,
+                    "max escapes reached, compaction never started -> back to monitor",
+                )
+            self._escapes_sent += 1
+            self._last_action_ts = now
+            # Two causes, two remedies, and no way to tell them apart from here:
+            # the supervisor's own injections are kept out of the input-box model
+            # (so they can never mark it non-empty), which is exactly the signal
+            # that would distinguish "queued" from "never submitted".
+            #
+            # ESC stays FIRST because the queued cause is the one observed
+            # resolving in the field. From the second attempt the remedies
+            # ALTERNATE, so a line stuck in the input box gets an Enter as soon
+            # as ESC has visibly failed once, and neither cause is starved.
+            # Both share the one budget: adding a remedy must not double how
+            # long a wedged session escalates before giving up.
+            if self._escapes_sent % 2 == 0:
+                return Evaluation(
+                    Decision.WOULD_RESUBMIT,
+                    f"/compact stalled and [esc] did not flush it -> may be "
+                    f"unsubmitted in the input box; would press [enter] "
+                    f"({self._escapes_sent}/{self._policy.max_escapes})",
+                )
+            return Evaluation(
+                Decision.WOULD_ESCAPE,
+                f"queued /compact stalled -> would inject [esc] to flush "
+                f"({self._escapes_sent}/{self._policy.max_escapes})",
+            )
+        return Evaluation(Decision.NOOP, "awaiting compaction start")
+
+    def _enter_await(self, *, is_human: bool) -> None:
+        """Enter AWAIT_COMPACTING, resetting the per-episode ESC-flush counter."""
+        self.state = SupervisorState.AWAIT_COMPACTING
+        self._escapes_sent = 0
+        self._await_is_human = is_human
+
+    def _enter_monitor(self) -> None:
+        """Return to MONITOR, clearing per-episode AWAIT bookkeeping."""
+        self.state = SupervisorState.MONITOR
+        self._escapes_sent = 0
+        self._await_is_human = False
+
+    def _cooldown_elapsed(self, now: float, *, critical: bool = False) -> bool:
+        if critical:
+            return True
+        if self._last_action_ts is None:
+            return True
+        return (now - self._last_action_ts) >= self._policy.cooldown_seconds
+
+    def _escape_due(self, now: float) -> bool:
+        if self._last_action_ts is None:
+            return False
+        return (now - self._last_action_ts) >= self._flush_interval()
+
+    def _flush_interval(self) -> float:
+        """How long to wait before the NEXT flush attempt.
+
+        A resubmit follows its escape after ``_RESUBMIT_FOLLOW_SECONDS`` rather
+        than a full ``escape_after_seconds``, because a blind Enter CONFIRMS a
+        modal dialog's highlighted default -- measured against a real Claude
+        Code, where Enter on the `/model` picker answered "saved as your default
+        for new sessions" and ESC answered "Kept model as Opus 5".
+
+        ESC being attempt 1 already dismisses any dialog that was open when the
+        episode started. What the full interval left open was a dialog appearing
+        AFTER that escape: it would still be on screen a whole minute later when
+        the Enter fired. Pairing them in time closes that to one poll.
+
+        The escape keeps the full interval, so escalation is still paced by the
+        configured policy -- only the Enter is pulled in behind its own ESC.
+        """
+        next_attempt = self._escapes_sent + 1
+        if next_attempt % 2 == 0:
+            return _RESUBMIT_FOLLOW_SECONDS
+        return self._policy.escape_after_seconds
+
+    def _await_timed_out(self, now: float) -> bool:
+        if self._last_action_ts is None:
+            return False
+        return (now - self._last_action_ts) > self._policy.await_timeout_seconds
+
+
+# ---------------------------------------------------------------------------
+# Keystroke injection (Plan 00135 Slice 2)
+#
+# In DRY-RUN (default) the supervisor types a harmless, visible MARKER string
+# into the live session when the compact trigger fires -- proving the
+# end-to-end injection path without triggering a real compaction. When ARMED
+# it types the real `/compact` (and, later, `continue`). Both go through the
+# same code path; only the payload text differs.
+# ---------------------------------------------------------------------------
+
+# All supervisor-injected PROMPTS carry this bot prefix (with an emoji) so they
+# are visibly machine-generated in the transcript and never mistaken for
+# something the human typed. The full prefix appends the local wall-clock time
+# the message was injected (see `_format_bot_prefix`) so a human scrolling back
+# through a long session can see WHEN each supervisor action happened -- the
+# `]` closes the bracket AFTER the timestamp: `🤖 [ccy-supervisor 2026-07-16 14:30:05]`.
+_BOT_PREFIX = "🤖 [ccy-supervisor"
+# Local time (not UTC): the marker is read by a human scrolling their own
+# terminal history, for whom local time is the natural "when" reference.
+_BOT_PREFIX_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+# Message BODIES (without the timestamped prefix, which is prepended at inject
+# time by `_resolve_payload`). Kept as the single source of truth for the text.
+_DRY_RUN_COMPACT_BODY = "compact suggestion fired (dry-run — not a real /compact, not human input)"
+# The armed compact is a real `/compact`, but `/compact` accepts freeform custom
+# instructions as its argument -- so the bot chrome rides along AS those
+# instructions. The slash command is still the first token (recognised
+# normally) and the timestamped `🤖 [ccy-supervisor ...]` prefix marks it for a
+# human reading scrollback. The instruction itself is purely ACTIONABLE -- just
+# "resume and continue" -- with no provenance framing: the agent should act on
+# what it is told regardless of who initiated it (reinforced by the `continue`
+# keystroke the supervisor injects once compaction ends).
+# Why the note exists: the supervisor presses Esc to flush a /compact queued
+# behind an in-flight turn, and Claude Code reports the interrupted tool call as
+# "The user doesn't want to proceed with this tool use... STOP", which an agent
+# reads as a human rejection and stops to wait. The note says it was not.
+_ESC_INTERRUPT_NOTE = (
+    "Any tool call interrupted or reported as rejected just before this compact "
+    "was the supervisor pressing Esc to make the compact run, NOT a human rejection."
+)
+_ARMED_COMPACT_BODY = (
+    f"{_ESC_INTERRUPT_NOTE} After compacting, retry any tool call that was "
+    "interrupted, then immediately resume and continue the work that was in progress."
+)
+# Plan 00281: the instruction body for a flag-cleaning /compact. Phrased WITHOUT
+# the trigger vocabulary itself (naming those categories would re-seed the very
+# terms the compaction exists to clear) — it asks for a high-level summary that
+# omits low-level technical specifics, so the compacted context stops
+# re-triggering the content classifier and the model-restore can stick.
+_FLAG_COMPACT_BODY = (
+    "Summarise the work so far at a HIGH LEVEL. Where the conversation touched "
+    "sensitive or security-adjacent material, keep only what was done and the "
+    "outcome — leave out the low-level technical specifics, sample text, and "
+    "sensitive strings, which are preserved in git and the plan docs. This keeps "
+    "the continuing context from re-triggering content classifiers. "
+    f"{_ESC_INTERRUPT_NOTE} Then retry any tool call that was interrupted, resume "
+    "and continue the work in progress."
+)
+_DRY_RUN_FLAG_COMPACT_BODY = (
+    "flag-cleaning compact fired (dry-run — not a real /compact, not human input)"
+)
+# Plan 00479 Task 4.5: the instruction of the ONE /compact typed while a usage
+# pause holds. It is the opposite of `_ARMED_COMPACT_BODY`: the session is told
+# to do NOTHING after compacting, because the daemon's resume cron -- not a
+# nudge -- is what wakes it at the window reset. `{resume}` is the human-readable
+# UTC resume time (`_USAGE_PAUSE_TIME_FORMAT`).
+_PAUSE_COMPACT_BODY = (
+    "Usage ceiling reached: this session is PAUSED until {resume}. After "
+    "compacting, do nothing further — take no action, send no message and do "
+    "not continue any work — until the scheduled resume cron fires at {resume}. "
+    "(Any interrupted tool call was the supervisor's Esc, NOT a human rejection; "
+    "do not retry it now.)"
+)
+_DRY_RUN_PAUSE_COMPACT_BODY = (
+    "usage-pause compact fired (dry-run — not a real /compact, not human input)"
+)
+# `continue` is harmless -- it only nudges the agent to resume -- so it is
+# injected FOR REAL in both dry-run and armed modes. Detecting a compaction and
+# not resuming would defeat the purpose, and (unlike /compact) a stray
+# `continue` cannot destroy context. It keeps the bot prefix so a post-compact
+# resume is clearly the supervisor's doing, not a human message.
+_CONTINUE_BODY = "continue"
+# The real ESC byte injected (armed) to interrupt the current turn so a QUEUED
+# `/compact` runs. It is an interrupt KEY, not a line: injected raw with NO
+# trailing Enter. ESC is harmless (it only interrupts), but it DOES affect the
+# session, so in dry-run a visible marker is shown instead of a real ESC.
+_ESC_PAYLOAD = "\x1b"
+_DRY_RUN_ESCAPE_BODY = "would send [esc] to flush a queued /compact (dry-run — no real ESC sent)"
+# A stalled `/compact` has two possible causes and they need opposite remedies.
+# ESC (above) flushes a command Claude Code QUEUED behind an in-flight turn. But
+# the line may never have been submitted at all -- see `_PASTE_START` below for
+# the measured mechanism (a large burst is read as a PASTE, and a carriage
+# return inside pasted text is a literal newline). The paste framing is the fix
+# for that; this is the safety net for a line that reaches the box unsubmitted
+# anyway, because ESC cannot submit a line sitting in the box and only another
+# Enter can. Like ESC this is a raw KEY, injected with no trailing Enter of its
+# own -- submitting the submit would send two.
+_RESUBMIT_PAYLOAD = "\r"
+_DRY_RUN_RESUBMIT_BODY = (
+    "would press [enter] to submit a /compact left unsubmitted in the input box "
+    "(dry-run — no real Enter sent)"
+)
+# Plan 00398 Phase 3: the SAME keystroke (Decision.WOULD_RESUBMIT, a raw Enter)
+# also flushes a box abandoned by the HUMAN, which is a different situation
+# from the AWAIT-flush use above (no /compact was ever queued) -- distinct
+# dry-run wording only, so the visible marker does not mislead about a stuck
+# /compact that was never there. The armed payload is identical either way
+# (`_RESUBMIT_PAYLOAD`): only the human-visible dry-run text differs.
+_DRY_RUN_ABANDONED_FLUSH_BODY = (
+    "would press [enter] to submit text left unchanged in the input box, then "
+    "compact (dry-run — no real Enter sent)"
+)
+# The supervisor's OWN typed line is followed up. A submitted injection is
+# remembered as box content until there is evidence it went: a human Enter, or
+# the session going busy after a follow-up Enter. Until then, at each lull
+# (human idle, child quiet) this long after the line was typed, one more Enter
+# is pressed -- harmless on an empty box, and the only key that submits a line
+# left sitting there (an Enter mid-turn did not submit a pasted /goal, which
+# then sat in the box for eight hours). Bounded so a session with a dialog
+# open, where Enter confirms a default, is never hammered.
+_OWN_LINE_RESUBMIT_SECONDS = 15.0
+_MAX_OWN_LINE_RESUBMITS = 2
+_OWN_LINE_NOOP_PREFIX = "own line"
+
+
+def _format_bot_prefix(now_wall: float | None = None) -> str:
+    """Return the bot prefix stamped with the tick's local wall-clock time.
+
+    ``now_wall`` is the tick's epoch-seconds wall clock (``time.time()``), so the
+    stamp is deterministic and matches the decision that triggered the injection.
+    When omitted the current local time is used. Local time (not UTC) is used
+    deliberately: the marker is read by a human scrolling their own terminal
+    history, for whom local time is the natural "when did this happen" reference.
+    """
+    # Built tz-AWARE and then converted to local with `.astimezone()`, rather
+    # than via the naive `datetime.now()` / `fromtimestamp(now_wall)`. The
+    # rendered string is identical -- `.astimezone()` with no argument converts
+    # to the system local zone, which is what the naive calls already returned
+    # -- so this states the "local, deliberately" intent above in code instead
+    # of only in prose. It also keeps the file clean under ruff's DEFAULT rule
+    # set (DTZ005/DTZ006 joined those defaults in ruff 0.16), which the client
+    # boundary document promises of every deployed asset.
+    moment = (
+        datetime.now(UTC).astimezone()
+        if now_wall is None
+        else datetime.fromtimestamp(now_wall, UTC).astimezone()
+    )
+    return f"{_BOT_PREFIX} {moment.strftime(_BOT_PREFIX_TIME_FORMAT)}]"
+
+
+# ── Injection iconography (RULESET — single source of truth) ─────────────────
+# Every supervisor chat injection carries the invariant provenance marker
+# `🤖 [ccy-supervisor <local-time>]` (machine origin + WHEN). That marker is
+# NEVER split or removed: skill-scan (`EXCLUDE_CONTENT_MARKERS`) and the
+# guardrail tests recognise supervisor traffic by the `🤖 [ccy-supervisor`
+# substring, so any classifying glyph is added AROUND it, never inside it.
+#
+# A leading CATEGORY banner lets a human classify an injection at a glance when
+# scrolling back through a long session — this is what makes an audit comment
+# easy to SPOT versus a goal or a resume nudge:
+#   🧾  audit  — a record of silent actions ALREADY TAKEN on your behalf
+# Within an audit line each injected command is prefixed with a per-ACTION
+# glyph, so the specific silent actions are scannable without reading the whole
+# sentence:
+#   ♻️  /model …    (model restored / switched)
+#   🧽  /compact …  (flag-cleaning compaction, Plan 00281)
+# New action families extend `_AUDIT_ACTION_GLYPHS`; unknown items fall back to
+# the neutral bullet. Keep this block and the table in sync.
+_AUDIT_BANNER_GLYPH = "🧾"
+_AUDIT_ACTION_MODEL_GLYPH = "♻️"
+_AUDIT_ACTION_COMPACT_GLYPH = "🧽"
+_AUDIT_ACTION_KEYSTROKE_GLYPH = "⌨️"
+_AUDIT_ACTION_DEFAULT_GLYPH = "•"
+
+# Labels for the two RAW-KEYSTROKE families (Plan 00355). They carry no slash
+# because they are keys, not slash commands -- and the distinction matters to a
+# reader: `/compact` types a visible line into the transcript, whereas an ESC
+# leaves no trace anywhere but decision.log. That invisibility is exactly why
+# the keystroke families are the ones that most need the banner, and why they
+# were the ones that never had it.
+_ESC_AUDIT_LABEL = "esc"
+_RESUBMIT_AUDIT_LABEL = "enter"
+# Which decisions inject a raw KEY rather than a line of text, and the label
+# each one announces itself under. Keyed on the decision VALUE (the string).
+_KEYSTROKE_AUDIT_LABELS: dict[str, str] = {
+    Decision.WOULD_ESCAPE.value: _ESC_AUDIT_LABEL,
+    Decision.WOULD_RESUBMIT.value: _RESUBMIT_AUDIT_LABEL,
+}
+
+# (command-prefix, glyph) pairs, longest-prefix-first is unnecessary here since
+# the commands share no prefix; a plain first-match scan suffices.
+_AUDIT_ACTION_GLYPHS: tuple[tuple[str, str], ...] = (
+    ("/model", _AUDIT_ACTION_MODEL_GLYPH),
+    ("/compact", _AUDIT_ACTION_COMPACT_GLYPH),
+    (_ESC_AUDIT_LABEL, _AUDIT_ACTION_KEYSTROKE_GLYPH),
+    (_RESUBMIT_AUDIT_LABEL, _AUDIT_ACTION_KEYSTROKE_GLYPH),
+)
+# Plan 00318: the audit trail is a transient STATUS-LINE banner, not a chat
+# injection. A banner is read at a glance mid-render, so it lives longer than a
+# keystroke hint (_STATUS_MESSAGE_TTL_SECONDS) and carries a countdown, and it
+# shows only WHAT was done — the per-item reason and the full record stay in
+# decision.log, which the status line has no room for and no need to repeat.
+_AUDIT_BANNER_TTL_SECONDS = 30.0
+# Separator between an audit item's command and its parenthesised reason; the
+# banner keeps only the part before it.
+_AUDIT_ITEM_REASON_SEPARATOR = " ("
+
+
+def _audit_action_glyph(item: str) -> str:
+    """Return the per-action glyph for one pending audit item.
+
+    Keys on the leading slash-command token so the caller does not have to
+    tag items at arm time — the glyph is derived from the command text itself.
+    """
+    stripped = item.lstrip()
+    for prefix, glyph in _AUDIT_ACTION_GLYPHS:
+        if stripped.startswith(prefix):
+            return glyph
+    return _AUDIT_ACTION_DEFAULT_GLYPH
+
+
+def _audit_action_label(item: str) -> str:
+    """The short action name a banner shows for one pending item.
+
+    Drops the parenthesised reason (it is in decision.log, and repeating it here
+    would push the interesting part off the end of the line) and the leading
+    slash, so a command and a keystroke read the same way: ``compact``,
+    ``effort low``, ``esc``. The ARGUMENT is kept — ``effort low`` and
+    ``effort high`` are different actions and tallying them together would
+    report a number no one can act on.
+    """
+    return item.split(_AUDIT_ITEM_REASON_SEPARATOR)[0].strip().lstrip("/")
+
+
+def _format_audit_banner(items: tuple[str, ...]) -> str:
+    """Compose the transient STATUS-LINE form of the audit trail (Plan 00318).
+
+    A TALLY, not a list (Plan 00355): repeats of one action collapse to
+    ``label (N)`` and the entries are comma-separated, so twenty escapes read as
+    ``esc (20)`` instead of filling the line and truncating everything after
+    them. A count is shown only when an action actually repeated — ``esc (1)``
+    is noise the bare name already says.
+
+    Because a tally is short by construction, nothing is dropped: the previous
+    ``+N more`` truncation existed to bound a list that could not bound itself,
+    and the number of DISTINCT actions is small.
+
+    Insertion order is preserved, so the banner still reads oldest-first — which
+    is the part that tells a human what happened before what.
+    """
+    counts: dict[str, int] = {}
+    for item in items:
+        label = _audit_action_label(item)
+        if not label:
+            continue
+        counts[label] = counts.get(label, 0) + 1
+
+    glyphs = {_audit_action_label(item): _audit_action_glyph(item) for item in reversed(items)}
+    entries = [
+        f"{glyphs[label]} {label}" + (f" ({count})" if count > 1 else "")
+        for label, count in counts.items()
+    ]
+    return f"{_AUDIT_BANNER_GLYPH} {', '.join(entries)}"
+
+
+_INJECT_SUBMIT = "\r"
+# Bracketed-paste markers. A submitted payload is written INSIDE them so the
+# TUI is TOLD where the pasted text ends, making the `\r` that follows
+# unambiguously a keypress. Measured against a real Claude Code (v2.1.263)
+# driven over a PTY with the real 131-byte armed compact payload: written as
+# one `payload + \r` burst the line sits UNSUBMITTED in the box, and written
+# with these markers the same single burst SUBMITS. A short bare `/compact\r`
+# submits either way -- Claude Code treats a burst that LARGE as pasted text,
+# and a carriage return inside pasted text is a literal newline. That is the
+# reported bug: a compaction message and a newline, never submitted.
+# The pasted line still behaves as typed input (the probe saw the slash-command
+# menu open and the submitted `/compact` run), so slash-command recognition --
+# the risk worth measuring before shipping this -- is intact.
+_PASTE_START = "\x1b[200~"
+_PASTE_END = "\x1b[201~"
+# The submit (Enter) is ALSO written separately from the payload, after this
+# pause. This was the original defence on its own, and it cannot be sufficient:
+# the pause is on the WRITE side while the paste heuristic is applied at the
+# READER, so an event loop blocked longer than the pause still sees one burst.
+# The framing above is what actually removes the timing dependence; the pause
+# is kept as a second line of defence and mirrors how tmux/expect/pexpect drive
+# a TUI -- send text, then send Enter as its own key.
+_SUBMIT_DELAY_SECONDS = 0.2
+# A `/model <family>` switch shows a CONFIRMATION dialog after the command
+# line is submitted; a second, standalone Enter is needed to complete it, and
+# the dialog needs a moment to render before that keystroke lands. Kept
+# separate from _SUBMIT_DELAY_SECONDS (a different UI element, a different
+# render latency) rather than reusing the same constant for two purposes.
+_MODEL_CONFIRM_DELAY_SECONDS = 0.4
+
+_DEFAULT_POLL_SECONDS = 2.0
+_DEFAULT_IDLE_FLOOR_SECONDS = 2.0
+# Plan 00152: the LOWER red band waits for the child to be quiet this long before
+# compacting. It must exceed the poll interval so a full quiet tick has to pass
+# with no child output -- faithfully mirroring the pre-Plan-00151 behaviour where
+# the tick only ran on a clear `select` timeout (a genuine lull). Between-turn
+# lulls easily exceed this; an actively streaming turn never does.
+_DEFAULT_WORK_SETTLE_SECONDS = 3.0
+# Plan 00398 Phase 2: how long the input box's CONTENT must sit UNCHANGED
+# before it is judged abandoned rather than mid-composition. Far above the
+# idle floor above (2s, "between keystrokes") -- this is "the human walked
+# away", not "between keystrokes", so it must not be confused with or tuned
+# alongside it. Owner ruling, verbatim: "120 to give it plenty of safety".
+_DEFAULT_INPUT_LINE_ABANDON_SECONDS = 120.0
+
+
+def _resolve_payload(
+    decision: Decision,
+    *,
+    dry_run: bool,
+    now_wall: float | None = None,
+    abandoned_box_flush: bool = False,
+) -> str | None:
+    """Return the keystroke payload for a decision, or None for NOOP.
+
+    In dry-run mode the payload is a harmless, visible MARKER string so the
+    injection path can be exercised end-to-end without triggering a real
+    compaction. Armed mode injects the real slash-command / prompt.
+
+    Every visible payload embeds the tick's local wall-clock time (via
+    ``_format_bot_prefix(now_wall)``) so the human can see WHEN the supervisor
+    acted when scrolling back. The raw ESC (armed) is exempt -- it is an
+    interrupt key, not a human-readable line.
+
+    ``abandoned_box_flush`` (Plan 00398 Phase 3) selects the dry-run wording
+    for a ``WOULD_RESUBMIT`` fired to flush a box abandoned by the HUMAN,
+    rather than the AWAIT-flush loop's stuck-``/compact`` case -- the armed
+    payload is identical either way (a bare Enter); only the visible marker
+    text would otherwise mislead about a ``/compact`` that was never queued.
+    """
+    prefix = _format_bot_prefix(now_wall)
+    if decision is Decision.WOULD_COMPACT:
+        if dry_run:
+            return f"{prefix} {_DRY_RUN_COMPACT_BODY}"
+        # `/compact` MUST stay the FIRST token so it is recognised as the slash
+        # command; the timestamped bot chrome rides along as its instruction arg.
+        return f"/compact {prefix} {_ARMED_COMPACT_BODY}"
+    if decision is Decision.WOULD_CONTINUE:
+        return f"{prefix} {_CONTINUE_BODY}"
+    if decision is Decision.WOULD_ESCAPE:
+        return f"{prefix} {_DRY_RUN_ESCAPE_BODY}" if dry_run else _ESC_PAYLOAD
+    if decision is Decision.WOULD_RESUBMIT:
+        if not dry_run:
+            return _RESUBMIT_PAYLOAD
+        body = _DRY_RUN_ABANDONED_FLUSH_BODY if abandoned_box_flush else _DRY_RUN_RESUBMIT_BODY
+        return f"{prefix} {body}"
+    return None
+
+
+def _perform_injection(
+    master_writer: Callable[[bytes], None],
+    payload: str,
+    *,
+    submit: bool = True,
+    confirm_enters: int = 0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Type ``payload`` into the child PTY, optionally submitting it with Enter.
+
+    A submitted payload is written as ONE bracketed-paste burst
+    (``_PASTE_START`` + text + ``_PASTE_END``), so the TUI knows exactly where
+    the paste ends and the carriage return that follows is read as a keypress
+    rather than absorbed into the multi-line input box as a literal newline
+    (which left a long ``/compact`` line sitting unsubmitted). The submit is
+    still a distinct write delayed by ``_SUBMIT_DELAY_SECONDS`` as a second line
+    of defence. ``sleep`` is injectable so tests do not actually pause.
+
+    ``submit=False`` writes the payload RAW, with no framing and no trailing
+    Enter -- used for the ESC interrupt and the bare-Enter resubmit, which are
+    keypresses, not lines. Framing either one would paste the control character
+    as literal text instead of pressing it.
+
+    ``confirm_enters`` sends that many ADDITIONAL standalone Enter keystrokes
+    after the normal submit, each preceded by ``_MODEL_CONFIRM_DELAY_SECONDS``
+    -- a ``/model <family>`` switch shows a confirmation dialog that needs a
+    SECOND Enter to complete. Every other decision passes 0, making this loop
+    a no-op for them; it is also skipped entirely when ``submit=False`` (an
+    interrupt keypress is never followed by a confirmation dialog).
+    """
+    if not submit:
+        master_writer(payload.encode("utf-8"))
+        return
+    # Bare `.encode()` (not `.encode("utf-8")` like its neighbours) because
+    # ruff's UP012 flags an explicit utf-8 argument on a string LITERAL, which
+    # this f-string is and they are not.
+    master_writer(f"{_PASTE_START}{payload}{_PASTE_END}".encode())
+    sleep(_SUBMIT_DELAY_SECONDS)
+    master_writer(_INJECT_SUBMIT.encode("utf-8"))
+    for _ in range(confirm_enters):
+        sleep(_MODEL_CONFIRM_DELAY_SECONDS)
+        master_writer(_INJECT_SUBMIT.encode("utf-8"))
+
+
+def _consume_signal(path: Path, log: DecisionLog | None) -> None:
+    """Delete a handled compaction-signal file so the resume fires exactly once.
+
+    Best-effort: a missing or undeletable file is harmless because the TTL will
+    eventually age it out and the ``_compaction_handled`` latch already blocks a
+    same-episode repeat. A delete failure is LOGGED (never silently swallowed)
+    so a broken untracked dir is visible.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        if log is not None:
+            log.write(f"warning: could not consume compaction signal {path}: {exc}")
+
+
+def _is_idle(activity: InputActivity, *, now_monotonic: float, idle_floor_seconds: float) -> bool:
+    """True when no stdin byte has been forwarded within ``idle_floor_seconds``.
+
+    Never inject while the human is composing: an injection mid-keystroke would
+    corrupt their input. A session with no observed input yet counts as idle.
+    """
+    if activity.last_input_monotonic is None:
+        return True
+    return (now_monotonic - activity.last_input_monotonic) >= idle_floor_seconds
+
+
+def _is_work_idle(
+    output_activity: OutputActivity, *, now_monotonic: float, work_settle_seconds: float
+) -> bool:
+    """True when the child has produced no output within ``work_settle_seconds``.
+
+    Plan 00152: distinguishes an actively-streaming turn (recent output -> NOT
+    work-idle) from a settled session (a lull -> work-idle). A child that has
+    produced no output at all yet counts as settled.
+    """
+    if output_activity.last_output_monotonic is None:
+        return True
+    return (now_monotonic - output_activity.last_output_monotonic) >= work_settle_seconds
+
+
+def _output_quiet_seconds(output_activity: OutputActivity, *, now_monotonic: float) -> float:
+    """Seconds since the child last produced output; 0.0 when none was seen yet.
+
+    Plan 00470 Task 2.3: unlike :func:`_is_work_idle` a child that has produced
+    nothing is NOT reported quiet, so the cron-expiry watchdog cannot fire on a
+    session whose output the supervisor never observed.
+    """
+    if output_activity.last_output_monotonic is None:
+        return 0.0
+    return max(0.0, now_monotonic - output_activity.last_output_monotonic)
+
+
+def _is_benign_not_red(reading: SidecarReading | None) -> bool:
+    """True when the supervisor POSITIVELY sees a not-red, non-stale context.
+
+    This is the overwhelmingly common idle tick -- the context is genuinely
+    fine and there is nothing to do. Its NOOP carries no diagnostic value, so
+    Plan 00168 Phase 1 stays SILENT on it (keeping a green idle session's
+    decision.log empty). Every OTHER NOOP gate IS logged -- crucially the
+    ``reading is None`` (no sidecar / filtered out) and ``reading.stale`` cases,
+    which are the blind-spots (H3 / H1) a red-but-not-compacting report needs.
+    """
+    return reading is not None and not reading.stale and not reading.red
+
+
+def _noop_band_suffix(reading: SidecarReading | None) -> str:
+    """A coarse ' [band]' suffix for a NOOP-reason line (Plan 00168 Phase 1).
+
+    Annotates the observed context severity when it is known and not already
+    stated by the reason itself. Deliberately low-cardinality (band, never a
+    per-tick pct) so ``DecisionLog.write_noop`` dedup keeps a steady gate to one
+    line. Empty when there is no reading, the reading is stale, or the context
+    is not red (those cases the reason string already describes fully).
+    """
+    if reading is None or reading.stale or not reading.red:
+        return ""
+    if reading.critical:
+        return " [critical]"
+    if reading.compact_urgent:
+        return " [urgent]"
+    return " [red]"
+
+
+def _usage_pause_outcome(
+    machine: CompactStateMachine,
+    pause: UsagePauseRecord,
+    *,
+    facts: TickFacts,
+    dry_run: bool,
+) -> TickOutcome:
+    """Decide a tick while a usage pause holds (Plan 00479 Task 4.5).
+
+    The whole decision, replacing the machine's evaluation and every injection
+    family below it: while the session is paused it gets ONE `/compact` whose
+    instruction is to do nothing until the resume cron fires, and then nothing
+    at all -- no `continue`, `/goal`, restore, reminder or other nudge, since
+    any of them would wake a session that exists to stay quiet. The compact
+    waits for the session to STOP (the same ``idle`` + ``work_idle`` gates the
+    band compaction uses, plus an empty input box) and is latched per pause
+    (``pause_compacted_for``) so a pause compacts exactly once.
+    """
+    resume = datetime.fromtimestamp(pause.resume_at, tz=UTC).strftime(_USAGE_PAUSE_TIME_FORMAT)
+    held = f"usage pause until {resume} ({pause.window})"
+
+    def outcome(
+        decision: Decision,
+        reason: str,
+        *,
+        payload: str | None = None,
+        deferred_log: str | None = None,
+        noop_reason_log: str | None = None,
+    ) -> TickOutcome:
+        return TickOutcome(
+            decision_value=decision.value,
+            reason=reason,
+            payload=payload,
+            submit=True,
+            consume_signal_path=None,
+            deferred_log=deferred_log,
+            machine_state=machine.export_state(),
+            noop_reason_log=noop_reason_log,
+        )
+
+    if machine.drop_await_for_usage_pause():
+        # No compact this tick: the host suppresses a WOULD_COMPACT while its own
+        # state is still AWAIT_COMPACTING, which would swallow the latch.
+        return outcome(
+            Decision.NOOP,
+            held,
+            noop_reason_log=f"{_NOOP_LOG_PREFIX}: {held}: compaction wait dropped, no continue",
+        )
+    if machine.pause_compacted_for == pause.paused_at:
+        return outcome(
+            Decision.NOOP,
+            held,
+            noop_reason_log=f"{_NOOP_LOG_PREFIX}: {held}: compact issued, no nudges",
+        )
+    if not (facts.idle and facts.work_idle):
+        return outcome(
+            Decision.NOOP,
+            held,
+            noop_reason_log=(
+                f"{_NOOP_LOG_PREFIX}: {held}: waiting for the session to stop before compacting"
+            ),
+        )
+    if not facts.input_line_empty:
+        return outcome(
+            Decision.NOOP,
+            held,
+            deferred_log=f"{_DEFERRED_LOG_PREFIX} (usage-pause compact pending)",
+        )
+    prefix = _format_bot_prefix(facts.now_wall)
+    if dry_run:
+        payload = f"{prefix} {_DRY_RUN_PAUSE_COMPACT_BODY}"
+    else:
+        # `/compact` MUST stay the FIRST token so it is recognised as the slash
+        # command; the bot chrome rides along as its instruction.
+        payload = f"/compact {prefix} {_PAUSE_COMPACT_BODY.format(resume=resume)}"
+    machine.mark_pause_compacted(pause.paused_at)
+    return outcome(
+        Decision.WOULD_COMPACT,
+        f"{held} -> would inject /compact (do nothing until the resume cron fires)",
+        payload=payload,
+    )
+
+
+def decide_once(
+    machine: CompactStateMachine,
+    *,
+    sidecar_dir: Path,
+    facts: TickFacts,
+    dry_run: bool,
+    freshness_seconds: float,
+    log: DecisionLog | None = None,
+    compaction_signal_ttl_seconds: float = _DEFAULT_COMPACTION_SIGNAL_TTL_SECONDS,
+    reap_ttl_seconds: float = _DEFAULT_REAP_TTL_SECONDS,
+    foreground_margin_seconds: float = _DEFAULT_FOREGROUND_MARGIN_SECONDS,
+    own_sessions: frozenset[str] | None = None,
+    goal_signal_ttl_seconds: float = _DEFAULT_GOAL_SIGNAL_TTL_SECONDS,
+    model_confirm_enters: int = _DEFAULT_MODEL_CONFIRM_ENTERS,
+    plugins: PluginRuntime | None = None,
+) -> TickOutcome:
+    """Decide what to inject this tick WITHOUT touching the PTY (Plan 00164 P4).
+
+    This is the whole 'brain': reap dead files, read the foreground sidecar and
+    compaction signal, advance the state machine, and resolve the payload. It
+    performs NO injection — the host (or the in-process fallback) applies the
+    returned :class:`TickOutcome`. Because it is pure w.r.t. the PTY, it runs
+    IDENTICALLY in the policy-worker subprocess and in-process, so a worker
+    restart cannot change behaviour. ``log`` is used only for reap diagnostics.
+
+    ``own_sessions`` (Plan 00166): the set of session ids belonging to THIS
+    supervisor's own Claude instance. Sidecars and compaction signals from any
+    other session in the shared dir are ignored, so a compaction in one terminal
+    never drives an injection into another. ``None`` disables the filter (the
+    legacy behaviour, used by unit tests); the production callers resolve the
+    set via :func:`cached_own_session_ids` and pass it. The empty set fails safe
+    (act on nothing).
+
+    See ``_poll_once`` for the semantics of the individual :class:`TickFacts`
+    (empty-input-box guard, human-compact edge, work-idle band gating, reaping).
+    """
+    reap_stale_sidecars(sidecar_dir, now=facts.now_wall, ttl_seconds=reap_ttl_seconds, log=log)
+    # Plan 00160: resolve the FOREGROUND sidecar and whether it is ambiguous (a
+    # recent Agent-View thread switch left two still-fresh sidecars). Ambiguity
+    # gates only the compact path in the machine below. Plan 00166: scoped to
+    # this instance's own sessions so a foreign terminal's sidecar is invisible.
+    reading, foreground_ambiguous = load_foreground_sidecar(
+        sidecar_dir,
+        now=facts.now_wall,
+        freshness_seconds=freshness_seconds,
+        margin_seconds=foreground_margin_seconds,
+        own_sessions=own_sessions,
+    )
+    # A compaction stops status renders, so the context sidecar goes
+    # stale/absent during one -- the compaction signal is an independent input.
+    # Plan 00166: only this instance's own compaction signal counts.
+    signal_path = load_compaction_signal(
+        sidecar_dir,
+        now=facts.now_wall,
+        ttl_seconds=compaction_signal_ttl_seconds,
+        own_sessions=own_sessions,
+    )
+    if signal_path is not None:
+        origin = load_compaction_origin(signal_path)
+        reading = (
+            replace(reading, compacting=True, compaction_origin=origin)
+            if reading is not None
+            else SidecarReading(
+                red=False,
+                critical=False,
+                compact_urgent=False,
+                tier="",
+                pct=0.0,
+                session_id="",
+                ts=facts.now_wall,
+                seq=0,
+                writer_pid=0,
+                compacting=True,
+                stale=False,
+                compaction_origin=origin,
+            )
+        )
+    # Empty-input-box guard: the machine only ever decides to inject when its
+    # `idle` input is True, so AND-ing the box state into `idle` guards every
+    # injection path without new machine states -- the busy branches already
+    # defer-and-retry correctly (no latch, no cooldown, signal kept). Plan
+    # 00398: this guard is no longer UNBOUNDED -- while `can_inject` is False,
+    # `_evaluate_monitor` separately checks `facts.input_line_abandoned` (the
+    # box content unchanged past the stability threshold) and, for a
+    # red-or-worse reading, flushes it via the existing resubmit/Enter
+    # machinery instead of deferring forever.
+    can_inject = facts.idle and facts.input_line_empty
+    # Plan 00164 Phase 4 fix: adopt the host's authoritative machine state before
+    # deciding so the worker never runs on divergent state. None on the in-process
+    # path (the passed machine is already the live authoritative one).
+    if facts.machine_state is not None:
+        machine.import_state(facts.machine_state)
+    # Plan 00479 Task 4.5: a live usage pause for this session decides the whole
+    # tick (one /compact, then silence) and bypasses every injection family below.
+    usage_pause = load_usage_pause(sidecar_dir, now=facts.now_wall, own_sessions=own_sessions)
+    if usage_pause is not None:
+        return _usage_pause_outcome(machine, usage_pause, facts=facts, dry_run=dry_run)
+    pause_lifted_log: str | None = None
+    if machine.pause_compacted_for is not None:
+        machine.clear_pause_compacted()
+        pause_lifted_log = f"{_NOOP_LOG_PREFIX}: usage pause lifted -> normal behaviour resumed"
+    # Plan 00328: adopt the platform's OWN record of a safety downgrade before
+    # the reading is tracked, because that is the tick on which the drop is
+    # first observed and the episode would open. Nothing else opens one.
+    attributed = load_model_downgrade_signal(sidecar_dir, own_sessions=own_sessions)
+    if attributed is not None:
+        machine.note_machine_downgrade(attributed, now_wall=facts.now_wall)
+    # Plan 00278: track the foreground model family so an attributed downgrade
+    # opens a model-restore episode (the `/model` flip-back, fired further
+    # below, subordinate to every other family). Synthetic/stale readings are
+    # ignored.
+    if reading is not None and not reading.stale:
+        machine.note_model_reading(reading, now_wall=facts.now_wall)
+    # Plan 00466 N47 review 3 item C: a drop observed before its record was
+    # published, attributed now that it is -- after this tick's reading, so a
+    # human who has since left the fallback is never restored.
+    machine.settle_pending_drop(now_wall=facts.now_wall)
+    evaluation = machine.evaluate(
+        reading,
+        idle=can_inject,
+        now=facts.now_wall,
+        human_compact_submitted=facts.human_compact_submitted,
+        work_idle=facts.work_idle,
+        foreground_ambiguous=foreground_ambiguous,
+        input_line_abandoned=facts.input_line_abandoned,
+    )
+    payload = _resolve_payload(
+        evaluation.decision,
+        dry_run=dry_run,
+        now_wall=facts.now_wall,
+        abandoned_box_flush=evaluation.abandoned_box_flush,
+    )
+    # Additional confirming Enters for a /model injection (set by the manual
+    # switch branch and the auto-restore branch below); every other decision
+    # leaves this at 0, which is a no-op in _perform_injection.
+    confirm_enters = 0
+    # Plan 00183: dry-run fires ONCE per session, once only. A dry-run marker is a
+    # no-op on the environment (no real /compact), so context stays red and the
+    # machine re-decides to act every episode -- and each marker is Enter-submitted,
+    # so it lands as a real prompt that wakes the agent. Left unlatched this floods
+    # the session (MONITOR -> WOULD_COMPACT -> AWAIT -> WOULD_ESCAPE x N -> ...).
+    # After the FIRST would-be injection we latch OFF for the process lifetime: one
+    # visible demonstration, then silence. Armed mode never latches -- real
+    # compaction feedback resolves each episode there. The latch rides in the
+    # machine state so it round-trips through the policy worker (Plan 00164 P4).
+    dry_run_latched_log: str | None = None
+    if dry_run and payload is not None:
+        if machine.dry_run_fired:
+            payload = None
+            dry_run_latched_log = f"{_NOOP_LOG_PREFIX}: dry-run already fired once this session"
+        else:
+            machine.mark_dry_run_fired()
+    # The raw ESC is an interrupt key, not a line -- inject it WITHOUT a trailing
+    # Enter. The resubmit is the same shape: its payload IS the Enter, so
+    # submitting it would send two and the second would submit an empty box.
+    # Every other payload (compact / continue / markers) is a line.
+    submit = not (
+        evaluation.decision in (Decision.WOULD_ESCAPE, Decision.WOULD_RESUBMIT) and not dry_run
+    )
+    # Consume the signal ONLY after a resume actually fired (the host does the
+    # consuming, so a failed PTY write never loses the resume).
+    consume_signal_path = (
+        str(signal_path)
+        if evaluation.decision is Decision.WOULD_CONTINUE and signal_path is not None
+        else None
+    )
+    deferred_log = None
+    if (
+        payload is None
+        and facts.idle
+        and not facts.input_line_empty
+        and evaluation.reason in _INJECTION_GATED_REASONS
+    ):
+        deferred_log = f"{_DEFERRED_LOG_PREFIX} ({evaluation.reason}){_noop_band_suffix(reading)}"
+    # Plan 00168 Phase 1: for every OTHER NOOP tick (not the input-box deferral
+    # above, which already logs), emit a deduped NOOP-reason diagnostic naming
+    # the gate + observed band. This makes a red-but-not-compacting session
+    # self-explaining in decision.log. Decision-preserving: pure logging.
+    noop_reason_log = None
+    if (
+        payload is None
+        and deferred_log is None
+        and evaluation.decision is Decision.NOOP
+        and not _is_benign_not_red(reading)
+    ):
+        noop_reason_log = f"{_NOOP_LOG_PREFIX}: {evaluation.reason}{_noop_band_suffix(reading)}"
+    # A dry-run suppression is not a NOOP decision (the machine still WOULD act),
+    # so the block above skips it -- surface it explicitly for decision.log.
+    if dry_run_latched_log is not None:
+        noop_reason_log = dry_run_latched_log
+    # Plan 00328: a ranked drop arrived with no platform record attributing it
+    # to the safety classifier, so no episode opened. Said out loud because
+    # the alternative is indistinguishable from a session that was never
+    # downgraded -- which is exactly how a disabled or failing
+    # `model_downgrade_recorder` would hide.
+    unattributed_note = machine.take_unattributed_downgrade_note()
+    if unattributed_note is not None:
+        noop_reason_log = f"{_NOOP_LOG_PREFIX}: {unattributed_note}"
+    # Plan 00466 N47 review 4 finding 8: the log's last word on a drop
+    # attributed retroactively was "unattributed -- no restore", so the change
+    # of verdict is said out loud too. A restore on this same tick replaces
+    # this line with its own, so it carries the note in its reason (below).
+    retro_note = machine.take_retro_attribution_note()
+    if retro_note is not None:
+        noop_reason_log = f"{_NOOP_LOG_PREFIX}: {retro_note}"
+    # ── Goal injection (Plan 00269) ─────────────────────────────────────────
+    # Strictly SUBORDINATE to compact/continue: the goal branch runs only when
+    # this tick decided NOOP with no payload, no compaction signal is pending,
+    # and the machine is in MONITOR — so a pending goal can never starve or
+    # reorder a compact/continue decision. The idle + empty-input-box gate
+    # applies unchanged (a deferred goal keeps its signal and retries).
+    decision_value = evaluation.decision.value
+    reason = evaluation.reason
+    # Populated below whenever THIS tick's decision is WOULD_MODEL, so the
+    # HOST can record the auto-restore's cap/backoff bookkeeping after a
+    # successful injection (Plan 00278 continuation) -- the manual
+    # test-trigger switch does not use these (own signal lifecycle).
+    model_switch_family: str | None = None
+    model_switch_session: str | None = None
+    model_switch_is_auto_restore = False
+    # Plan 00281: set True by the flip-flop flag-compact branch below, so the
+    # HOST counts the successful injection against the flag-compaction budget.
+    is_flag_compact = False
+    # Plan 00299: populated only by the goal branch below when this tick
+    # decides WOULD_GOAL, so the HOST can record the injected text's hash
+    # (`mark_goal_injection`) as the multi-plan thrash guard -- an identical
+    # combined /goal never re-types on a later tick.
+    goal_line_for_hash: str | None = None
+    # ── Operator signal (Plan 00417): reboot/shutdown warning from the HOST ──
+    # Placed ahead of goal and model injections (owner's placement): a
+    # host-initiated reboot/shutdown warning is time-critical in a way
+    # neither is. Still strictly subordinate to compact/continue/escape
+    # above -- never interrupted by an informational warning. The STATUS-LINE
+    # notice below posts as soon as a valid signal is observed, regardless of
+    # whether the chat line can be typed THIS tick -- mirroring the audit
+    # banner's rationale (a file write cannot disturb what the user is
+    # typing) -- so the human sees the countdown at once even mid-turn. The
+    # chat line itself waits for the same idle + empty-box gate as the goal
+    # signal (``can_inject``), and additionally will not paste over a
+    # still-unconfirmed own line, since it types free text the same way goal
+    # and standing-auth do.
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+    ):
+        operator_path, operator_message, operator_deadline, operator_reject = load_operator_signal(
+            sidecar_dir, now=facts.now_wall, own_sessions=own_sessions
+        )
+        if operator_reject is not None:
+            # Fail-closed: an in-scope signal that failed validation (unknown
+            # kind, a non-positive-integer minutes) is dropped and the reason
+            # is logged -- nothing is ever posted to the status line for it.
+            noop_reason_log = f"{_NOOP_LOG_PREFIX}: {operator_reject}"
+        elif operator_path is not None and operator_message is not None:
+            write_status_message(
+                sidecar_dir.parent,
+                text=operator_message,
+                expires_at=(
+                    operator_deadline
+                    if operator_deadline is not None
+                    else facts.now_wall + _OPERATOR_CANCEL_NOTICE_TTL_SECONDS
+                ),
+                level=_STATUS_LEVEL_WARNING,
+                countdown=operator_deadline is not None,
+                now=facts.now_wall,
+            )
+            if machine.own_line_pending:
+                noop_reason_log = (
+                    f"{_NOOP_LOG_PREFIX}: operator signal pending but "
+                    f"{_OWN_LINE_NOOP_PREFIX} still in the input box"
+                )
+            elif not can_inject:
+                if facts.idle and not facts.input_line_empty:
+                    deferred_log = f"{_DEFERRED_LOG_PREFIX} (operator signal pending)"
+                else:
+                    noop_reason_log = (
+                        f"{_NOOP_LOG_PREFIX}: operator signal pending but session busy"
+                    )
+            else:
+                decision_value = Decision.WOULD_OPERATOR_SIGNAL.value
+                reason = "operator signal -> would inject warning"
+                if dry_run:
+                    payload = (
+                        f"{_format_bot_prefix(facts.now_wall)} "
+                        f"{_DRY_RUN_OPERATOR_BODY_PREFIX} {operator_message}"
+                    )
+                else:
+                    # The rendered message already opens with the bot-prefixed
+                    # machine-origin header, so it is typed verbatim as one
+                    # real user-role line -- no slash command, no extra chrome.
+                    payload = operator_message
+                submit = True
+                # Consumed in dry-run too -- the demonstration episode is
+                # spent either way, mirroring the goal signal's rule.
+                consume_signal_path = str(operator_path)
+                deferred_log = None
+                noop_reason_log = None
+    # ── Plugin notice (Plan 00487): a plugin failed, the session is told once ─
+    # Ranked with the operator signal -- ahead of the model-switch/restore and
+    # goal families -- and under the same gates: strictly subordinate to
+    # compact/continue/escape, and typed only at the idle + empty-box choke
+    # point, never over a still-unconfirmed own line. The text is rendered from
+    # fixed templates by `render_plugin_notice`; the status-line WARNING and the
+    # audit line were produced when the failure was observed.
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+    ):
+        owed_notice = machine.next_plugin_notice()
+        # Plan 00487 Task 1.3c: a session notice (a plugin's `Notify`, or the
+        # supervisor's own RESTARTED line) rides the same gates and the same
+        # slot, after any plugin-failure notice.
+        owed_session_notice = machine.next_session_notice() if owed_notice is None else None
+        if owed_notice is not None or owed_session_notice is not None:
+            notice_label = "plugin notice" if owed_notice is not None else "session notice"
+            if machine.own_line_pending:
+                noop_reason_log = (
+                    f"{_NOOP_LOG_PREFIX}: {notice_label} pending but "
+                    f"{_OWN_LINE_NOOP_PREFIX} still in the input box"
+                )
+            elif not can_inject:
+                if facts.idle and not facts.input_line_empty:
+                    deferred_log = f"{_DEFERRED_LOG_PREFIX} ({notice_label} pending)"
+                else:
+                    noop_reason_log = f"{_NOOP_LOG_PREFIX}: {notice_label} pending but session busy"
+            else:
+                if owed_notice is not None:
+                    notice_message = render_plugin_notice(*owed_notice)
+                    decision_value = Decision.WOULD_PLUGIN_NOTICE.value
+                    reason = "plugin failure -> would inject notice"
+                    dry_run_prefix = _DRY_RUN_PLUGIN_NOTICE_BODY_PREFIX
+                else:
+                    assert owed_session_notice is not None
+                    notice_message = render_session_notice(*owed_session_notice)
+                    decision_value = Decision.WOULD_SESSION_NOTICE.value
+                    reason = f"session notice ({owed_session_notice[0]}) -> would inject notice"
+                    dry_run_prefix = _DRY_RUN_SESSION_NOTICE_BODY_PREFIX
+                if dry_run:
+                    payload = (
+                        f"{_format_bot_prefix(facts.now_wall)} {dry_run_prefix} {notice_message}"
+                    )
+                else:
+                    # Already opens with the machine-origin header: typed verbatim
+                    # as one user-role line, no slash command, no extra chrome.
+                    payload = notice_message
+                submit = True
+                deferred_log = None
+                noop_reason_log = None
+    # ── Manual model-switch override (test trigger / deliberate override) ────
+    # Checked ahead of goal and auto-model-restore so a deliberate switch is
+    # never starved by them -- but still strictly after compact/continue/escape
+    # above, so it can never disrupt an in-flight compaction. Unlike every
+    # other family, the injection
+    # gate here is `facts.input_line_empty` ONLY, not the full `can_inject`
+    # (which also requires the keystroke-idle floor): the whole point of a
+    # manual trigger is to fire promptly, and an empty input box is the one
+    # hard safety rail (never type into a box mid-composition).
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+    ):
+        switch_path, switch_family, switch_reject = load_model_switch_signal(
+            sidecar_dir,
+            now=facts.now_wall,
+            own_sessions=own_sessions,
+        )
+        if switch_reject is not None:
+            # Fail-closed: an in-scope signal that failed validation (unknown
+            # family, malformed JSON) is dropped and the reason is logged.
+            noop_reason_log = f"{_NOOP_LOG_PREFIX}: {switch_reject}"
+        elif switch_path is not None and switch_family is not None:
+            if not facts.input_line_empty:
+                if facts.idle:
+                    deferred_log = f"{_DEFERRED_LOG_PREFIX} (model-switch signal pending)"
+                else:
+                    noop_reason_log = (
+                        f"{_NOOP_LOG_PREFIX}: model-switch signal pending but session busy"
+                    )
+            else:
+                decision_value = Decision.WOULD_MODEL.value
+                model_command = f"{_MODEL_COMMAND} {switch_family}"
+                reason = f"model-switch signal -> would inject {model_command}"
+                model_switch_family = switch_family
+                # The signal file is named "<session_id>.model-switch-intent"
+                # (write_model_switch_signal) -- derive the session the same
+                # way rather than re-parsing the JSON body a second time.
+                model_switch_session = switch_path.name.removesuffix(_MODEL_SWITCH_SIGNAL_SUFFIX)
+                if dry_run:
+                    payload = (
+                        f"{_format_bot_prefix(facts.now_wall)} "
+                        f"{_DRY_RUN_MODEL_BODY_PREFIX} {model_command}"
+                    )
+                else:
+                    payload = model_command
+                    machine.arm_audit(f"{model_command} (manual switch signal)")
+                submit = True
+                confirm_enters = model_confirm_enters
+                # Consumed in dry-run too — the demonstration episode is
+                # spent either way, mirroring the goal signal's rule.
+                consume_signal_path = str(switch_path)
+                deferred_log = None
+                noop_reason_log = None
+    # ── The supervisor's OWN line is followed up ────────────────────────────
+    # Ahead of every family that would type MORE text (goal, goal clear,
+    # standing-auth), because those must not paste on top of a line that may
+    # still be sitting in the box. Subordinate to the compaction machine,
+    # whose ESC/Enter flush already handles its own stuck /compact.
+    own_line_blocks_text = False
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+        and machine.own_line_pending
+    ):
+        if facts.human_enter_pressed:
+            # The human submitted the box, own line included.
+            machine.clear_own_line()
+            noop_reason_log = (
+                f"{_NOOP_LOG_PREFIX}: {_OWN_LINE_NOOP_PREFIX} submitted by a human [enter]"
+            )
+        elif machine.own_line_resubmits > 0 and not facts.work_idle:
+            # The child went to work after the follow-up Enter: the line went.
+            machine.clear_own_line()
+            noop_reason_log = (
+                f"{_NOOP_LOG_PREFIX}: {_OWN_LINE_NOOP_PREFIX} confirmed submitted "
+                "(session busy after [enter])"
+            )
+        elif machine.own_line_resubmits >= _MAX_OWN_LINE_RESUBMITS:
+            machine.clear_own_line()
+            noop_reason_log = (
+                f"{_NOOP_LOG_PREFIX}: {_OWN_LINE_NOOP_PREFIX} follow-up budget spent "
+                f"({_MAX_OWN_LINE_RESUBMITS} [enter]) -> assumed submitted"
+            )
+        elif can_inject and facts.work_idle and machine.own_line_resubmit_due(facts.now_wall):
+            decision_value = Decision.WOULD_RESUBMIT.value
+            reason = (
+                f"{_OWN_LINE_NOOP_PREFIX} may still be unsubmitted in the input box "
+                f"({machine.own_line_text.split(None, 1)[0] if machine.own_line_text else '?'}) "
+                f"-> pressing [enter] "
+                f"({machine.own_line_resubmits + 1}/{_MAX_OWN_LINE_RESUBMITS})"
+            )
+            payload = (
+                f"{_format_bot_prefix(facts.now_wall)} {_DRY_RUN_RESUBMIT_BODY}"
+                if dry_run
+                else _RESUBMIT_PAYLOAD
+            )
+            submit = False
+            machine.mark_own_line_resubmit(facts.now_wall)
+            deferred_log = None
+            noop_reason_log = None
+        else:
+            own_line_blocks_text = True
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+    ):
+        goal_path, goal_line, goal_reject = load_goal_signal(
+            sidecar_dir,
+            now=facts.now_wall,
+            ttl_seconds=goal_signal_ttl_seconds,
+            own_sessions=own_sessions,
+        )
+        if goal_reject is not None:
+            # Fail-closed: an in-scope signal that failed the validation gate
+            # is dropped and the reason is logged (deduped by write_noop).
+            noop_reason_log = f"{_NOOP_LOG_PREFIX}: {goal_reject}"
+        elif goal_path is not None and goal_line is not None:
+            if own_line_blocks_text:
+                noop_reason_log = (
+                    f"{_NOOP_LOG_PREFIX}: goal signal pending but {_OWN_LINE_NOOP_PREFIX} "
+                    "still in the input box"
+                )
+            elif not can_inject:
+                if facts.idle and not facts.input_line_empty:
+                    deferred_log = f"{_DEFERRED_LOG_PREFIX} (goal injection pending)"
+                else:
+                    noop_reason_log = f"{_NOOP_LOG_PREFIX}: goal signal pending but session busy"
+            elif (
+                machine.goal_injections_within(_GOAL_CAP_WINDOW_SECONDS, facts.now_wall)
+                >= _MAX_GOAL_INJECTIONS
+            ):
+                noop_reason_log = f"{_NOOP_LOG_PREFIX}: goal injection cap reached"
+            elif goal_line == machine.last_goal_text:
+                # Plan 00299 thrash guard: the daemon re-renders the combined
+                # multi-plan /goal on every ledgered status flip (not just
+                # this session's own), so an unrelated plan's edit can
+                # rewrite an IDENTICAL signal file. Re-typing the same
+                # /goal condition teaches nothing new -- skip it. The stale
+                # duplicate file is left for the TTL reaper, mirroring how a
+                # completed plan's now-stale signal already ages out today.
+                noop_reason_log = f"{_NOOP_LOG_PREFIX}: goal signal identical to last injection"
+            else:
+                # The cap is counted by the HOST only after a SUCCESSFUL
+                # injection (see the callers of _apply_decision) — a PTY
+                # write failure must not burn the cap while the signal
+                # survives for retry. decide_once stays pure.
+                decision_value = Decision.WOULD_GOAL.value
+                reason = "goal signal -> would inject /goal"
+                if dry_run:
+                    payload = (
+                        f"{_format_bot_prefix(facts.now_wall)} "
+                        f"{_DRY_RUN_GOAL_BODY_PREFIX} {goal_line}"
+                    )
+                else:
+                    payload = f"{_GOAL_COMMAND} {goal_line}"
+                submit = True
+                goal_line_for_hash = goal_line
+                # Consumed in dry-run too — the demonstration episode is spent
+                # either way, so a goal can never flood the session.
+                consume_signal_path = str(goal_path)
+                deferred_log = None
+                noop_reason_log = None
+    # ── Goal RETRACTION (Plan 00321) ────────────────────────────────────────
+    # Subordinate to goal INJECTION above: if both a fresh goal and a clear
+    # trigger are somehow present, the goal wins and the clear waits a tick.
+    # In practice they are mutually exclusive -- the daemon removes the
+    # `.goal-intent` file in the same call that writes the clear trigger.
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+    ):
+        clear_path = load_goal_clear_signal(
+            sidecar_dir,
+            now=facts.now_wall,
+            ttl_seconds=goal_signal_ttl_seconds,
+            own_sessions=own_sessions,
+        )
+        if clear_path is not None:
+            if own_line_blocks_text:
+                noop_reason_log = (
+                    f"{_NOOP_LOG_PREFIX}: goal clear pending but {_OWN_LINE_NOOP_PREFIX} "
+                    "still in the input box"
+                )
+            elif not can_inject:
+                if facts.idle and not facts.input_line_empty:
+                    deferred_log = f"{_DEFERRED_LOG_PREFIX} (goal clear pending)"
+                else:
+                    noop_reason_log = f"{_NOOP_LOG_PREFIX}: goal clear pending but session busy"
+            elif machine.goal_clear_injections >= _MAX_GOAL_CLEAR_INJECTIONS:
+                noop_reason_log = f"{_NOOP_LOG_PREFIX}: goal clear cap reached"
+            else:
+                decision_value = Decision.WOULD_GOAL_CLEAR.value
+                reason = "goal clear trigger -> would inject /goal clear"
+                if dry_run:
+                    payload = f"{_format_bot_prefix(facts.now_wall)} {_DRY_RUN_GOAL_CLEAR_BODY}"
+                else:
+                    # Fixed literal: nothing from the trigger file reaches the
+                    # PTY, so this channel cannot type text of a writer's
+                    # choosing (see the note on _GOAL_CLEAR_GLOB).
+                    payload = _GOAL_CLEAR_COMMAND
+                submit = True
+                consume_signal_path = str(clear_path)
+                deferred_log = None
+                noop_reason_log = None
+    # ── Flag-cleaning compaction on a REPEATED downgrade (Plan 00281) ───────
+    # Checked JUST BEFORE the model restore: on a flip-flop (an open episode
+    # AND a prior auto-restore that the classifier already undid) a re-restore
+    # cannot win while the context keeps re-tripping, so instead fire ONE armed
+    # `/compact` that asks the agent to summarise the sensitive material at a
+    # high level. Opt-in (default off), capped and backed off (all inside
+    # flag_compact_due). Fires only when idle (can_inject) so no ESC interrupt
+    # is needed; the resume is driven by the compaction signal like every other
+    # `/compact`. The HOST counts a successful injection (mark_flag_compaction).
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+        and machine.flag_compact_due(facts.now_wall)
+    ):
+        if not can_inject:
+            if facts.idle and not facts.input_line_empty:
+                deferred_log = f"{_DEFERRED_LOG_PREFIX} (flag-cleaning compact pending)"
+            else:
+                noop_reason_log = (
+                    f"{_NOOP_LOG_PREFIX}: flag-cleaning compact pending but session busy"
+                )
+        else:
+            decision_value = Decision.WOULD_COMPACT.value
+            reason = "repeated downgrade (flip-flop) -> would inject flag-cleaning /compact"
+            is_flag_compact = True
+            if dry_run:
+                payload = f"{_format_bot_prefix(facts.now_wall)} {_DRY_RUN_FLAG_COMPACT_BODY}"
+            else:
+                # `/compact` MUST stay the FIRST token so it is recognised as the
+                # slash command; the bot chrome rides along as its instruction.
+                payload = f"/compact {_format_bot_prefix(facts.now_wall)} {_FLAG_COMPACT_BODY}"
+                machine.arm_audit("/compact (flag-cleaning after repeated downgrade)")
+            submit = True
+            deferred_log = None
+            noop_reason_log = None
+    # ── Model restore after a downgrade (Plan 00278 Task 2b.3) ──────────────
+    # Fires only on an otherwise-NOOP MONITOR tick, after the quiet delay,
+    # under the lifetime cap and the flip-flop backoff (all inside
+    # model_restore_due). The HOST marks success (mark_model_restore) for
+    # the cap/backoff -- see `model_switch_is_auto_restore` below. Claude
+    # Code applies the restored model's configured effort itself.
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+    ):
+        restore_family = machine.model_restore_due(facts.now_wall)
+        if restore_family is not None:
+            if not can_inject:
+                if facts.idle and not facts.input_line_empty:
+                    deferred_log = f"{_DEFERRED_LOG_PREFIX} (model restore pending)"
+                else:
+                    noop_reason_log = f"{_NOOP_LOG_PREFIX}: model restore pending but session busy"
+            else:
+                decision_value = Decision.WOULD_MODEL.value
+                model_command = f"{_MODEL_COMMAND} {restore_family}"
+                reason = f"downgrade quiet delay elapsed -> would inject {model_command}"
+                if retro_note is not None:
+                    reason = f"{reason} [{retro_note}]"
+                model_switch_family = restore_family
+                model_switch_session = machine.last_model_session
+                model_switch_is_auto_restore = True
+                if dry_run:
+                    payload = (
+                        f"{_format_bot_prefix(facts.now_wall)} "
+                        f"{_DRY_RUN_MODEL_BODY_PREFIX} {model_command}"
+                    )
+                else:
+                    payload = model_command
+                    machine.arm_audit(f"{model_command} (auto-restore after downgrade)")
+                submit = True
+                confirm_enters = model_confirm_enters
+                deferred_log = None
+                noop_reason_log = None
+    # ── Audit-trail flush: transient status-line banner (Plan 00318) ────────
+    # LOWEST priority of all families: a pending /model, goal or restore
+    # always lands first, so a switch sequence flushes as ONE banner once the
+    # sequence itself is complete. /model leaves no trace in the chat (unlike
+    # /compact and /goal, whose payloads carry visible text) — without this
+    # flush, decision.log is the only audit trail and nobody watching the
+    # session can tell anything happened.
+    #
+    # This posts a TTL-bounded, self-counting-down BANNER rather than
+    # injecting a chat line. The chat form cost a whole model turn plus a
+    # permanent transcript entry to tell the HUMAN something the session
+    # itself did not need to know; a banner costs neither. It also needs
+    # neither an idle session nor an empty input box (`can_inject`) — writing
+    # a file cannot disturb what the user is typing — so the notice surfaces
+    # at once instead of waiting for a quiet moment.
+    #
+    # Plan 00355 — a RAW KEYSTROKE is armed here and flushed on the SAME tick.
+    # `/compact` and `/goal` type visible text, so a human can scroll back and
+    # find them; an ESC types nothing anywhere but decision.log, which is
+    # precisely why 122 of them in one session read as random keypresses. It
+    # cannot use the batching rule above, either: an ESC fires in
+    # AWAIT_COMPACTING, so an escape armed under that rule would surface
+    # minutes later in a state that has nothing to do with it, or never. It is
+    # armed only when the payload is the REAL key -- a dry-run marker is
+    # visible text that changes nothing, and tallying it as a keystroke would
+    # announce an action the supervisor did not take.
+    keystroke_label = None if dry_run else _KEYSTROKE_AUDIT_LABELS.get(decision_value)
+    keystroke_sent = keystroke_label is not None and payload is not None
+    if keystroke_sent:
+        machine.arm_audit(f"{keystroke_label}{_AUDIT_ITEM_REASON_SEPARATOR}{reason})")
+    # Plan 00319 F3: the audit flush's own decision.log line, held here
+    # SEPARATELY from `noop_reason_log` so a later same-tick block (only
+    # standing-auth, below, can) is free to claim the primary decision without
+    # erasing the record that the flush ALSO happened this tick. Surfaced on
+    # the returned TickOutcome only when something later did overwrite the
+    # primary slot -- see the `audit_flush_log=` line below.
+    audit_flush_log_line: str | None = None
+    if machine.audit_pending and (
+        keystroke_sent
+        or (
+            payload is None
+            and evaluation.decision is Decision.NOOP
+            and signal_path is None
+            and machine.state is SupervisorState.MONITOR
+        )
+    ):
+        # A keystroke tick keeps its OWN decision: the banner rides along with
+        # the injection rather than replacing it, so decision.log still records
+        # what was actually sent.
+        pending_items = machine.audit_pending
+        flush_reason = f"audit trail flush ({len(pending_items)} item(s))"
+        banner_path = write_status_message(
+            sidecar_dir.parent,
+            text=_format_audit_banner(pending_items),
+            expires_at=facts.now_wall + _AUDIT_BANNER_TTL_SECONDS,
+            countdown=True,
+            # The tick's own clock, so the live-warning check is made against
+            # the same instant as every other decision on this tick.
+            now=facts.now_wall,
+        )
+        # Cleared at DECISION time (worker-side, hot-reloadable) and ONLY when
+        # the banner actually landed. A write that failed, or that yielded to a
+        # live keystroke warning (Plan 00319 F9), leaves the items pending so
+        # the next tick shows them instead of dropping them — which is also
+        # what makes a stack accumulate into `esc (20)` rather than vanishing
+        # one at a time. `arm_audit` caps the list, so this cannot grow without
+        # bound, and decision.log holds the durable record either way.
+        if banner_path is not None:
+            machine.mark_audit_injection()
+        if not keystroke_sent:
+            decision_value = Decision.WOULD_AUDIT.value
+            reason = flush_reason
+            # The log line carries the FULL items (reasons included) — the
+            # banner showed only the short form. A deferral log already in hand
+            # wins, since it describes an injection this tick actually held back.
+            if deferred_log is None:
+                noop_reason_log = f"{flush_reason}: {'; '.join(pending_items)}"
+                audit_flush_log_line = noop_reason_log
+        # On a keystroke tick `reason` and `noop_reason_log` are LEFT ALONE.
+        # They belong to the injection this tick is actually performing, and
+        # decision.log is the durable record the banner is only a convenience
+        # for — overwriting the escape's reason with "audit trail flush" would
+        # destroy the very thing the banner exists to make visible.
+    # ── Standing-authorisation reinforcement (Plan 00283) ───────────────────
+    # LEAST urgent of every injectable family: a reminder, not an action, so it
+    # fires only on a tick that would otherwise NOOP in MONITOR with nothing else
+    # pending — a real /compact, /model, goal, restore or audit flush always
+    # lands first. The daemon's standing_authorisations handler writes the
+    # signal on a due reinforcement when its supervisor channel is enabled; here
+    # we type it as one real user-role line. The HOST counts a successful
+    # injection (mark_standing_auth_injection); the signal is consumed on
+    # injection so it cannot re-fire. Reuses the goal signal TTL.
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+    ):
+        sa_path, sa_line, sa_reject = load_standing_auth_signal(
+            sidecar_dir,
+            now=facts.now_wall,
+            ttl_seconds=goal_signal_ttl_seconds,
+            own_sessions=own_sessions,
+        )
+        if sa_reject is not None:
+            # Fail-closed: an in-scope signal that failed the gate is dropped and
+            # the reason logged (deduped by write_noop).
+            noop_reason_log = f"{_NOOP_LOG_PREFIX}: {sa_reject}"
+        elif sa_path is not None and sa_line is not None:
+            if own_line_blocks_text:
+                noop_reason_log = (
+                    f"{_NOOP_LOG_PREFIX}: standing-auth signal pending but "
+                    f"{_OWN_LINE_NOOP_PREFIX} still in the input box"
+                )
+            elif not can_inject:
+                if facts.idle and not facts.input_line_empty:
+                    deferred_log = f"{_DEFERRED_LOG_PREFIX} (standing-auth reminder pending)"
+                else:
+                    noop_reason_log = (
+                        f"{_NOOP_LOG_PREFIX}: standing-auth signal pending but session busy"
+                    )
+            elif machine.standing_auth_injections >= _MAX_STANDING_AUTH_INJECTIONS:
+                noop_reason_log = f"{_NOOP_LOG_PREFIX}: standing-auth injection cap reached"
+            else:
+                # Counted by the HOST only after a SUCCESSFUL injection, so a PTY
+                # write failure does not burn the backstop while the signal
+                # survives for retry. decide_once stays pure.
+                decision_value = Decision.WOULD_STANDING_AUTH.value
+                reason = "standing-auth signal -> would inject reminder"
+                if dry_run:
+                    payload = (
+                        f"{_format_bot_prefix(facts.now_wall)} "
+                        f"{_DRY_RUN_STANDING_AUTH_BODY_PREFIX} {sa_line}"
+                    )
+                else:
+                    # The joined line ALREADY opens with the bot-prefixed
+                    # machine-origin header, so it is typed verbatim as one real
+                    # user-role line — no slash command, no extra chrome.
+                    payload = sa_line
+                submit = True
+                # Consumed on injection (dry-run too) so it cannot re-fire.
+                consume_signal_path = str(sa_path)
+                deferred_log = None
+                noop_reason_log = None
+    # ── Session-actions directive (Plan 00416 Task 2.3) ─────────────────────
+    # LAST of every injectable family, below even the standing-auth reminder:
+    # it points at something the session has ALREADY been told, in its own
+    # start-up output, so anything with a live action to take goes first. The
+    # daemon's session_actions_directive handler writes the signal when a
+    # SessionStart verifier is currently failing; here we type the fixed
+    # directive as one real user-role line. The HOST counts a successful
+    # injection (mark_session_actions_injection); the signal is consumed on
+    # injection so it cannot re-fire.
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+    ):
+        actions_path, actions_message, actions_reject = load_session_actions_signal(
+            sidecar_dir,
+            now=facts.now_wall,
+            ttl_seconds=goal_signal_ttl_seconds,
+            own_sessions=own_sessions,
+        )
+        if actions_reject is not None:
+            # Fail-closed: an in-scope signal that failed validation (a
+            # non-positive-integer count, malformed JSON) is dropped and the
+            # reason logged.
+            noop_reason_log = f"{_NOOP_LOG_PREFIX}: {actions_reject}"
+        elif actions_path is not None and actions_message is not None:
+            if own_line_blocks_text:
+                noop_reason_log = (
+                    f"{_NOOP_LOG_PREFIX}: session-actions directive pending but "
+                    f"{_OWN_LINE_NOOP_PREFIX} still in the input box"
+                )
+            elif not can_inject:
+                if facts.idle and not facts.input_line_empty:
+                    deferred_log = f"{_DEFERRED_LOG_PREFIX} (session-actions directive pending)"
+                else:
+                    noop_reason_log = (
+                        f"{_NOOP_LOG_PREFIX}: session-actions directive pending but session busy"
+                    )
+            elif machine.session_actions_injections >= _MAX_SESSION_ACTIONS_INJECTIONS:
+                noop_reason_log = f"{_NOOP_LOG_PREFIX}: session-actions injection cap reached"
+            else:
+                decision_value = Decision.WOULD_SESSION_ACTIONS.value
+                reason = "session-actions signal -> would inject directive"
+                if dry_run:
+                    payload = (
+                        f"{_format_bot_prefix(facts.now_wall)} "
+                        f"{_DRY_RUN_SESSION_ACTIONS_BODY_PREFIX} {actions_message}"
+                    )
+                else:
+                    # The rendered message already opens with the bot-prefixed
+                    # machine-origin header, so it is typed verbatim as one real
+                    # user-role line — no slash command, no extra chrome.
+                    payload = actions_message
+                submit = True
+                # Consumed on injection (dry-run too) so it cannot re-fire.
+                consume_signal_path = str(actions_path)
+                deferred_log = None
+                noop_reason_log = None
+    # ── Cron-expiry watchdog (Plan 00470 Task 2.3) ──────────────────────────
+    # LAST of the built-in families, below session-actions: it fires only on a
+    # tick nothing else claimed, after a long quiet spell, when every recorded
+    # cron job is past its seven-day expiry. The usage pause above has already
+    # returned for a paused session, so it never reaches here. Nothing is
+    # consumed (the trigger is a file the daemon owns), so the spacing rule --
+    # one prompt per quiet window -- and the cap keep it from repeating.
+    if (
+        payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+        and facts.output_quiet_seconds >= _CRON_WATCHDOG_QUIET_SECONDS
+        and (
+            machine.cron_reconcile_last_ts is None
+            or facts.now_wall - machine.cron_reconcile_last_ts >= _CRON_WATCHDOG_QUIET_SECONDS
+        )
+        and _cron_records_all_expired(sidecar_dir, now=facts.now_wall, own_sessions=own_sessions)
+    ):
+        if own_line_blocks_text:
+            noop_reason_log = (
+                f"{_NOOP_LOG_PREFIX}: cron-reconcile prompt pending but "
+                f"{_OWN_LINE_NOOP_PREFIX} still in the input box"
+            )
+        elif not can_inject:
+            if facts.idle and not facts.input_line_empty:
+                deferred_log = f"{_DEFERRED_LOG_PREFIX} (cron-reconcile prompt pending)"
+            else:
+                noop_reason_log = (
+                    f"{_NOOP_LOG_PREFIX}: cron-reconcile prompt pending but session busy"
+                )
+        elif machine.cron_reconcile_injections >= _MAX_CRON_RECONCILE_INJECTIONS:
+            noop_reason_log = f"{_NOOP_LOG_PREFIX}: cron-reconcile injection cap reached"
+        else:
+            decision_value = Decision.WOULD_CRON_RECONCILE.value
+            reason = (
+                "every recorded cron expired and the session is quiet -> would inject reconcile"
+            )
+            if dry_run:
+                payload = (
+                    f"{_format_bot_prefix(facts.now_wall)} "
+                    f"{_DRY_RUN_CRON_RECONCILE_BODY_PREFIX} {_render_cron_reconcile_message()}"
+                )
+            else:
+                payload = _render_cron_reconcile_message()
+            submit = True
+            deferred_log = None
+            noop_reason_log = None
+    # ── Plugins (Plan 00487) ────────────────────────────────────────────────
+    # LAST of everything: a plugin's `on_idle` is asked only when no built-in
+    # family claimed the tick, i.e. the same gates as the families above plus
+    # `can_inject` (idle, empty box) and no unconfirmed own line. Plugins are
+    # asked in the order they were named; the first to return an
+    # `ExitForRestart` wins. A plugin never types anything: its only effect on
+    # the session is the exit request, which the HOST validates and performs.
+    exit_for_restart: tuple[str, str] | None = None
+    if (
+        plugins is not None
+        and payload is None
+        and evaluation.decision is Decision.NOOP
+        and signal_path is None
+        and machine.state is SupervisorState.MONITOR
+        and can_inject
+        and not machine.own_line_pending
+    ):
+        exit_request = plugins.run_idle(facts.now_wall)
+        for notification in plugins.notifications:
+            # The supervisor renders the line itself; only the kind and a
+            # bounded integer cross from the plugin. Rate-limited per kind.
+            machine.arm_session_notice(
+                notification.kind,
+                "" if notification.minutes is None else str(notification.minutes),
+                now_wall=facts.now_wall,
+            )
+        if exit_request is not None:
+            exit_for_restart = (exit_request.plugin, exit_request.reason)
+            reason = f"plugin {exit_request.plugin} asked to exit for restart"
+    if plugins is not None:
+        # Plan 00487 Task 1.6: owe the session a notice (and warn on the status
+        # line) for every plugin failure seen so far. Idempotent, so the
+        # cumulative list is walked on every tick: a failure whose armed notice
+        # was lost with a discarded reply is armed again by the next tick.
+        for plugin_failure in plugins.failures:
+            report_plugin_failure(
+                machine, plugin_failure, status_dir=sidecar_dir.parent, now=facts.now_wall
+            )
+    # Remember a submitted own LINE (never a raw keypress, never a dry-run
+    # marker) as unconfirmed box content -- recorded at decision time, like
+    # the audit trail, so the follow-up ships by worker hot-reload alone. A
+    # failed PTY write costs one harmless Enter at the next lull.
+    if payload is not None and submit and not dry_run:
+        machine.mark_own_line_typed(payload, facts.now_wall)
+    return TickOutcome(
+        decision_value=decision_value,
+        reason=reason,
+        payload=payload,
+        submit=submit,
+        consume_signal_path=consume_signal_path,
+        deferred_log=deferred_log,
+        machine_state=machine.export_state(),
+        noop_reason_log=pause_lifted_log or noop_reason_log,
+        confirm_enters=confirm_enters,
+        model_switch_family=model_switch_family,
+        model_switch_session=model_switch_session,
+        model_switch_is_auto_restore=model_switch_is_auto_restore,
+        is_flag_compact=is_flag_compact,
+        goal_line=goal_line_for_hash,
+        # None when the flush's own line already made it into `noop_reason_log`
+        # (no clobber -- the normal case) or when the flush never happened this
+        # tick -- either way `_apply_decision` would write a duplicate.
+        audit_flush_log=(
+            audit_flush_log_line if decision_value != Decision.WOULD_AUDIT.value else None
+        ),
+        abandoned_box_flushed=evaluation.abandoned_box_flush,
+        plugin_failures=(
+            tuple((f.plugin, f.kind, f.hook, f.detail) for f in plugins.failures)
+            if plugins is not None
+            else ()
+        ),
+        plugin_versions=tuple(plugins.loaded) if plugins is not None else (),
+        plugin_log_lines=plugins.take_audit_lines() if plugins is not None else (),
+        exit_for_restart=exit_for_restart,
+    )
+
+
+def _apply_decision(
+    outcome: TickOutcome,
+    *,
+    master_writer: Callable[[bytes], None],
+    log: DecisionLog | None,
+    host_state: str | None = None,
+) -> bool:
+    """Perform a :class:`TickOutcome` on the PTY (host side, Plan 00164 P4).
+
+    Injects the payload (if any), logs it, and consumes the compaction signal
+    only AFTER a successful resume injection — mirroring the original inline
+    behaviour of ``_poll_once`` exactly.
+
+    Returns True when a payload was actually injected (the PTY write
+    succeeded); False on a NOOP/suppressed tick. Callers use this to count a
+    ``would-goal`` injection against the goal cap only on SUCCESS (Plan
+    00269 review fix): a PTY write failure raises out of this function
+    before the return, so the cap is not burned and the un-consumed signal
+    survives for retry.
+
+    Plan 00182 defence-in-depth: ``host_state`` is the host's authoritative
+    ``SupervisorState`` value BEFORE this outcome is adopted. If the host is
+    already ``AWAIT_COMPACTING`` a ``WOULD_COMPACT`` outcome is stale/impossible
+    (a compaction is already in flight) -- injecting it would stack a second
+    ``/compact``, so it is suppressed and logged rather than performed. The
+    in-process path passes ``None`` (single live machine -- no desync possible).
+    """
+    if (
+        host_state == SupervisorState.AWAIT_COMPACTING.value
+        and outcome.decision_value == Decision.WOULD_COMPACT.value
+    ):
+        if log is not None:
+            log.write_noop("noop: stale /compact suppressed (host already awaiting compaction)")
+        return False
+    # Plan 00319 F3: an audit flush that happened this tick but lost the
+    # primary decision slot to a same-tick standing-auth injection still gets
+    # its own decision.log line -- written FIRST (the flush is logically the
+    # earlier event in `decide_once`'s cascade), never in place of whatever
+    # follows.
+    if log is not None and outcome.audit_flush_log is not None:
+        log.write_noop(outcome.audit_flush_log)
+    if outcome.payload is not None:
+        _perform_injection(
+            master_writer,
+            outcome.payload,
+            submit=outcome.submit,
+            confirm_enters=outcome.confirm_enters,
+        )
+        if log is not None:
+            log.write(f"{outcome.decision_value}: {outcome.reason}; injected {outcome.payload!r}")
+        if outcome.consume_signal_path is not None:
+            _consume_signal(Path(outcome.consume_signal_path), log)
+        return True
+    if log is not None and outcome.deferred_log is not None:
+        # An injection was pending and the NON-EMPTY INPUT BOX was the sole gate.
+        log.write(outcome.deferred_log)
+    elif log is not None and outcome.noop_reason_log is not None:
+        # Plan 00168 Phase 1: record WHY this idle tick did nothing (deduped, so
+        # an unchanged gate never floods). Makes red-but-not-compacting visible.
+        log.write_noop(outcome.noop_reason_log)
+    return False
+
+
+def _apply_post_injection_bookkeeping(
+    machine: CompactStateMachine,
+    outcome: TickOutcome,
+    *,
+    injected: bool,
+    now_wall: float | None = None,
+) -> None:
+    """Update per-family cap/pending bookkeeping after ``_apply_decision`` runs.
+
+    Shared by both host call sites (``_poll_once``'s in-process path and
+    ``supervise()``'s ``_on_poll``) so the success-only counting/clearing
+    rules for every injectable family live in exactly one place. Every
+    mark_*/arm_* call below fires ONLY on a successful injection
+    (``injected``) -- a failed PTY write keeps every pending episode/signal
+    intact so the next tick retries.
+    """
+    if not injected:
+        return
+    # NOTE: audit-trail arming and clearing deliberately do NOT live here.
+    # They happen at DECISION time inside decide_once, i.e. in the WORKER --
+    # so the whole audit loop is deployable by worker hot-reload without a
+    # host restart (import_state merges by present key, so an older host
+    # never clobbers the worker's audit backlog; it merely doesn't carry it).
+    if outcome.decision_value == Decision.WOULD_GOAL.value:
+        machine.mark_goal_injection(outcome.goal_line, now_wall=now_wall)
+    elif outcome.decision_value == Decision.WOULD_GOAL_CLEAR.value:
+        machine.mark_goal_clear_injection()
+    elif outcome.decision_value == Decision.WOULD_STANDING_AUTH.value:
+        machine.mark_standing_auth_injection()
+    elif outcome.decision_value == Decision.WOULD_SESSION_ACTIONS.value:
+        machine.mark_session_actions_injection()
+    elif outcome.decision_value == Decision.WOULD_CRON_RECONCILE.value:
+        machine.mark_cron_reconcile_injection(now_wall if now_wall is not None else time.time())
+    elif outcome.decision_value == Decision.WOULD_PLUGIN_NOTICE.value:
+        machine.mark_plugin_notice_injection()
+    elif outcome.decision_value == Decision.WOULD_SESSION_NOTICE.value:
+        machine.mark_session_notice_injection()
+    elif outcome.decision_value == Decision.WOULD_MODEL.value:
+        # Cap/backoff bookkeeping is reserved for the AUTO-restore path --
+        # the manual test-trigger switch has its own signal-consumption
+        # lifecycle and must not eat into that budget.
+        if outcome.model_switch_is_auto_restore:
+            machine.mark_model_restore(
+                now_wall,
+                family=outcome.model_switch_family,
+                session=outcome.model_switch_session,
+            )
+    elif outcome.decision_value == Decision.WOULD_COMPACT.value and outcome.is_flag_compact:
+        # Plan 00281: only the flip-flop flag-compact counts against the
+        # flag-compaction cap/backoff. The capacity-based /compact leaves
+        # is_flag_compact False and is governed by its AWAIT_COMPACTING
+        # lifecycle instead.
+        machine.mark_flag_compaction()
+
+
+def _poll_once(
+    machine: CompactStateMachine,
+    *,
+    sidecar_dir: Path,
+    now_wall: float,
+    idle: bool,
+    dry_run: bool,
+    master_writer: Callable[[bytes], None],
+    log: DecisionLog | None,
+    freshness_seconds: float,
+    compaction_signal_ttl_seconds: float = _DEFAULT_COMPACTION_SIGNAL_TTL_SECONDS,
+    input_line_empty: bool = True,
+    human_compact_submitted: bool = False,
+    work_idle: bool = True,
+    reap_ttl_seconds: float = _DEFAULT_REAP_TTL_SECONDS,
+    foreground_margin_seconds: float = _DEFAULT_FOREGROUND_MARGIN_SECONDS,
+    own_sessions: frozenset[str] | None = None,
+    goal_signal_ttl_seconds: float = _DEFAULT_GOAL_SIGNAL_TTL_SECONDS,
+    model_confirm_enters: int = _DEFAULT_MODEL_CONFIRM_ENTERS,
+    input_line_abandoned: bool = False,
+    on_input_line_flushed: Callable[[], None] | None = None,
+    plugins: PluginRuntime | None = None,
+    on_outcome: Callable[[TickOutcome], None] | None = None,
+    output_quiet_seconds: float = 0.0,
+) -> Evaluation:
+    """One in-process supervisor tick: decide (``decide_once``) then inject.
+
+    Retained as the in-process fast path AND the fallback used when the policy
+    worker cannot run (Plan 00164 Phase 4). Behaviour is unchanged: it delegates
+    the decision to ``decide_once`` and the injection to ``_apply_decision``.
+    ``own_sessions`` (Plan 00166) is passed straight through to ``decide_once``
+    (``None`` = no own-session filter; the production loop resolves and passes it).
+
+    ``on_input_line_flushed`` (Plan 00398 Phase 3) is called, if given, exactly
+    when this tick's outcome is the abandoned-box flush -- the caller's chance
+    to reset whatever tracked ``HumanInputLine`` it owns, which this function
+    has no reference to (``input_line_empty``/``input_line_abandoned`` arrive
+    as plain booleans, same as every other fact here).
+
+    ``plugins`` (Plan 00487) is the in-process plugin runtime, asked exactly as
+    the worker asks its own; ``on_outcome`` receives the tick's `TickOutcome`
+    after it was applied, so the caller can act on what the plugins reported
+    (failures, an exit-for-restart request) through the same code the worker
+    path uses.
+    """
+    facts = TickFacts(
+        now_wall=now_wall,
+        idle=idle,
+        input_line_empty=input_line_empty,
+        human_compact_submitted=human_compact_submitted,
+        work_idle=work_idle,
+        input_line_abandoned=input_line_abandoned,
+        output_quiet_seconds=output_quiet_seconds,
+    )
+    outcome = decide_once(
+        machine,
+        sidecar_dir=sidecar_dir,
+        facts=facts,
+        dry_run=dry_run,
+        log=log,
+        freshness_seconds=freshness_seconds,
+        compaction_signal_ttl_seconds=compaction_signal_ttl_seconds,
+        reap_ttl_seconds=reap_ttl_seconds,
+        foreground_margin_seconds=foreground_margin_seconds,
+        own_sessions=own_sessions,
+        goal_signal_ttl_seconds=goal_signal_ttl_seconds,
+        model_confirm_enters=model_confirm_enters,
+        plugins=plugins,
+    )
+    injected = _apply_decision(outcome, master_writer=master_writer, log=log)
+    _apply_post_injection_bookkeeping(machine, outcome, injected=injected, now_wall=now_wall)
+    if outcome.abandoned_box_flushed and on_input_line_flushed is not None:
+        on_input_line_flushed()
+    if on_outcome is not None:
+        on_outcome(outcome)
+    return Evaluation(decision=Decision(outcome.decision_value), reason=outcome.reason)
+
+
+# ---------------------------------------------------------------------------
+# Policy-worker split (Plan 00164 Phase 4)
+#
+# The decision logic (decide_once + the state machine) runs in a restartable
+# `--worker` subprocess so it can be hot-reloaded from a freshly-deployed
+# claude-supervise.py WITHOUT restarting the PTY host that owns `claude`. Host
+# and worker exchange line-delimited JSON: host -> worker TickFacts, worker ->
+# host TickOutcome. Anything that goes wrong with the worker falls back to an
+# identical in-process decision, so the supervised session is never at risk.
+# ---------------------------------------------------------------------------
+
+
+def _facts_to_json(facts: TickFacts) -> str:
+    return json.dumps(
+        {
+            "now_wall": facts.now_wall,
+            "idle": facts.idle,
+            "input_line_empty": facts.input_line_empty,
+            "human_compact_submitted": facts.human_compact_submitted,
+            "work_idle": facts.work_idle,
+            "human_enter_pressed": facts.human_enter_pressed,
+            "human_raw_input": facts.human_raw_input,
+            "machine_state": facts.machine_state,
+            "tick_id": facts.tick_id,
+            "input_line_abandoned": facts.input_line_abandoned,
+            "output_quiet_seconds": facts.output_quiet_seconds,
+        }
+    )
+
+
+def _facts_from_json(line: str) -> TickFacts:
+    data = json.loads(line)
+    return TickFacts(
+        now_wall=float(data["now_wall"]),
+        idle=bool(data["idle"]),
+        input_line_empty=bool(data["input_line_empty"]),
+        human_compact_submitted=bool(data["human_compact_submitted"]),
+        work_idle=bool(data["work_idle"]),
+        human_enter_pressed=bool(data.get("human_enter_pressed", False)),
+        human_raw_input=str(data.get("human_raw_input", "")),
+        machine_state=data.get("machine_state"),
+        tick_id=int(data.get("tick_id", 0)),
+        input_line_abandoned=bool(data.get("input_line_abandoned", False)),
+        output_quiet_seconds=float(data.get("output_quiet_seconds", 0.0)),
+    )
+
+
+def _outcome_to_json(outcome: TickOutcome) -> str:
+    return json.dumps(
+        {
+            "decision_value": outcome.decision_value,
+            "reason": outcome.reason,
+            "payload": outcome.payload,
+            "submit": outcome.submit,
+            "consume_signal_path": outcome.consume_signal_path,
+            "deferred_log": outcome.deferred_log,
+            "machine_state": outcome.machine_state,
+            "noop_reason_log": outcome.noop_reason_log,
+            "tick_id": outcome.tick_id,
+            "confirm_enters": outcome.confirm_enters,
+            "model_switch_family": outcome.model_switch_family,
+            "model_switch_session": outcome.model_switch_session,
+            "model_switch_is_auto_restore": outcome.model_switch_is_auto_restore,
+            "is_flag_compact": outcome.is_flag_compact,
+            "audit_flush_log": outcome.audit_flush_log,
+            "abandoned_box_flushed": outcome.abandoned_box_flushed,
+            "plugin_failures": [list(failure) for failure in outcome.plugin_failures],
+            "plugin_versions": [list(pair) for pair in outcome.plugin_versions],
+            "plugin_log_lines": list(outcome.plugin_log_lines),
+            "exit_for_restart": (
+                list(outcome.exit_for_restart) if outcome.exit_for_restart is not None else None
+            ),
+        }
+    )
+
+
+def _decode_plugin_failures(raw: object) -> tuple[tuple[str, str, str, str], ...]:
+    """Well-formed `(plugin, kind, hook, detail)` entries of a decoded JSON list; the rest are dropped."""
+    if not isinstance(raw, list):
+        return ()
+    return tuple(
+        (item[0], item[1], item[2], item[3])
+        for item in raw
+        if isinstance(item, list) and len(item) == 4 and all(isinstance(part, str) for part in item)
+    )
+
+
+def _decode_plugin_versions(raw: object) -> tuple[tuple[str, str], ...]:
+    """Well-formed `(plugin, version)` entries of a decoded JSON list; the rest are dropped."""
+    if not isinstance(raw, list):
+        return ()
+    return tuple(
+        (item[0], item[1])
+        for item in raw
+        if isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)
+    )
+
+
+def _decode_plugin_log_lines(raw: object) -> tuple[str, ...]:
+    """The string entries of a decoded JSON list; anything else is dropped."""
+    if not isinstance(raw, list):
+        return ()
+    return tuple(line for line in raw if isinstance(line, str))
+
+
+def _decode_exit_for_restart(raw: object) -> tuple[str, str] | None:
+    """The `(plugin, reason)` pair of a decoded JSON list, or None when malformed."""
+    if isinstance(raw, list) and len(raw) == 2 and all(isinstance(part, str) for part in raw):
+        return (raw[0], raw[1])
+    return None
+
+
+def _outcome_from_json(line: str) -> TickOutcome:
+    data = json.loads(line)
+    return TickOutcome(
+        decision_value=str(data["decision_value"]),
+        reason=str(data["reason"]),
+        payload=data["payload"],
+        submit=bool(data["submit"]),
+        consume_signal_path=data["consume_signal_path"],
+        deferred_log=data["deferred_log"],
+        machine_state=data.get("machine_state"),
+        noop_reason_log=data.get("noop_reason_log"),
+        tick_id=int(data.get("tick_id", 0)),
+        confirm_enters=int(data.get("confirm_enters", 0)),
+        model_switch_family=data.get("model_switch_family"),
+        model_switch_session=data.get("model_switch_session"),
+        model_switch_is_auto_restore=bool(data.get("model_switch_is_auto_restore", False)),
+        is_flag_compact=bool(data.get("is_flag_compact", False)),
+        audit_flush_log=data.get("audit_flush_log"),
+        abandoned_box_flushed=bool(data.get("abandoned_box_flushed", False)),
+        plugin_failures=_decode_plugin_failures(data.get("plugin_failures")),
+        plugin_versions=_decode_plugin_versions(data.get("plugin_versions")),
+        plugin_log_lines=_decode_plugin_log_lines(data.get("plugin_log_lines")),
+        exit_for_restart=_decode_exit_for_restart(data.get("exit_for_restart")),
+    )
+
+
+def _slash_diagnostic_command(typed_slash: str) -> str:
+    """The command TOKEN of a submitted slash line, never its argument.
+
+    Plan 00319 F4: a recognition-miss diagnostic needs to know WHICH command
+    family the human typed (``/model``, ``/compact``, ...), not what they
+    typed after it -- an argument can carry a model id, a pasted secret, or
+    anything else, into a log with no other guard on its contents (only, as
+    of Plan 00319 F4, its size).
+    """
+    return typed_slash.split(None, 1)[0]
+
+
+def run_worker(
+    in_stream: TextIO,
+    out_stream: TextIO,
+    *,
+    dry_run: bool,
+    sidecar_dir: Path,
+    policy: CompactPolicy,
+    plugins: PluginRuntime | None = None,
+) -> int:
+    """Policy-worker loop: read TickFacts lines, emit TickOutcome lines.
+
+    Owns the ``CompactStateMachine`` so a host-side restart of this subprocess
+    reloads the decision code (this whole 'brain') without disturbing the PTY
+    host. Blocks on ``in_stream``; a closed pipe (host gone / EOF) ends the loop
+    and returns 0. A malformed line is skipped (logged to stderr), never fatal.
+
+    Also owns a persistent ``HumanInputLine`` (Plan 00317): the SAME class the
+    host's in-process fallback uses, but here it is fed each tick's
+    ``human_raw_input`` and its recognition -- ``human_compact_submitted`` /
+    ``human_model_command`` / ``input_line_empty`` -- overrides whatever the
+    host sent, before ``decide_once`` runs. This is
+    the piece that now hot-reloads with the rest of the worker: a code change
+    to typed-command recognition takes effect on the next worker restart, with
+    no host-side change and no session restart. Reset (buffer cleared) on
+    every restart -- the same risk profile ``machine``'s in-flight state
+    already carries across a restart.
+
+    ``input_line_abandoned`` (Plan 00398 Phase 2) is deliberately NOT
+    re-derived/ANDed here the way ``input_line_empty`` is: it is a duration
+    measured against a clock, not a parse of the current bytes, and this
+    recognizer's own clock resets to "fresh" on every worker restart with no
+    replay of prior history (``raw_tap`` only ships bytes forwarded SINCE the
+    restart). ANDing would silently re-open the unbounded gate Plan 00398
+    exists to close for up to the whole stability threshold after every
+    restart -- worse, indefinitely if no further human byte ever arrives to
+    seed a fresh reading. The host's own long-lived model never has that gap,
+    so its verdict is taken as-is.
+    """
+    machine = CompactStateMachine(policy)
+    line_recognizer = HumanInputLine()
+    if plugins is not None:
+        # Plan 00487: once per worker start (a hot reload starts it again).
+        plugins.start()
+    for raw in in_stream:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            facts = _facts_from_json(line)
+        except (ValueError, KeyError) as exc:
+            append_worker_error(f"bad tick line: {exc}")
+            continue
+        if facts.human_raw_input:
+            try:
+                line_recognizer.feed(base64.b64decode(facts.human_raw_input))
+            except (ValueError, TypeError) as exc:
+                # Fail-open: a malformed raw-input chunk must never stall or
+                # crash the worker -- just skip recognition for this tick.
+                append_worker_error(f"bad raw-input chunk: {exc}")
+        facts = replace(
+            facts,
+            human_compact_submitted=line_recognizer.take_compact_submitted(),
+            # AND, never override: a worker restart resets this recognizer, so
+            # its buffer reads EMPTY while the human still has unsubmitted text
+            # in the box. Overriding the host's own observation there would let
+            # `can_inject` go True and the supervisor type into a non-empty
+            # input box -- the exact invariant the empty-box guard exists for.
+            # Either side seeing text is enough to hold the injection.
+            input_line_empty=facts.input_line_empty and line_recognizer.is_empty,
+            # OR, never override: a legacy host sends False, and the worker's
+            # own recognizer is the one that actually sees the keypress.
+            human_enter_pressed=facts.human_enter_pressed or line_recognizer.take_enter_pressed(),
+        )
+        for typed_slash in line_recognizer.take_slash_submitted():
+            # Recognition-miss observability: WHICH command family the human's
+            # submitted slash line named, so a MISS (e.g. autocomplete
+            # inserting text the PTY never carries) is diagnosable from the
+            # field. Never the argument -- see `_slash_diagnostic_command`.
+            append_worker_error(
+                f"diagnostic typed-slash observed: "
+                f"command={_slash_diagnostic_command(typed_slash)!r} "
+                f"len={len(typed_slash)} "
+                f"(recognised compact={facts.human_compact_submitted!r})"
+            )
+        try:
+            outcome = decide_once(
+                machine,
+                sidecar_dir=sidecar_dir,
+                facts=facts,
+                dry_run=dry_run,
+                freshness_seconds=policy.freshness_seconds,
+                compaction_signal_ttl_seconds=policy.compaction_signal_ttl_seconds,
+                reap_ttl_seconds=policy.reap_ttl_seconds,
+                foreground_margin_seconds=policy.foreground_margin_seconds,
+                own_sessions=cached_own_session_ids(),  # Plan 00166: only our own sessions
+                goal_signal_ttl_seconds=policy.goal_signal_ttl_seconds,
+                model_confirm_enters=policy.model_confirm_enters,
+                plugins=plugins,
+            )
+        except Exception:
+            # SAFETY NET: a single tick's exception must not kill the worker
+            # (the host would respawn it and the crash would repeat every tick,
+            # flooding the PTY with tracebacks). Log the full traceback to the
+            # error FILE, emit a safe NOOP so the host still gets a reply, and
+            # carry on with the next tick. This is a deliberate broad catch --
+            # the whole purpose is to contain ANY unexpected decision failure.
+            append_worker_error("decide_once failed:\n" + traceback.format_exc())
+            outcome = _worker_error_noop()
+        if outcome.abandoned_box_flushed:
+            # Plan 00398 Phase 3: mirror the host's own reset (below) on THIS
+            # process's recognizer -- the flush's Enter never passes through
+            # `feed`, so without this `line_recognizer.is_empty` would keep
+            # ANDing the box back to non-empty on every later tick, forever.
+            line_recognizer.clear()
+        # Plan 00182: echo the request's correlation id so the host can match
+        # this reply to the tick that produced it and drop any stale reply left
+        # buffered by an earlier timed-out tick.
+        out_stream.write(_outcome_to_json(replace(outcome, tick_id=facts.tick_id)) + "\n")
+        out_stream.flush()
+    return 0
+
+
+def _worker_error_noop() -> TickOutcome:
+    """A do-nothing TickOutcome emitted when a worker tick raised.
+
+    ``machine_state=None`` leaves the host's authoritative state untouched, so a
+    transient tick error never advances or corrupts the compaction state.
+    """
+    return TickOutcome(
+        decision_value=Decision.NOOP.value,
+        reason="worker tick error (see worker error log)",
+        payload=None,
+        submit=True,
+        consume_signal_path=None,
+        deferred_log=None,
+        machine_state=None,
+    )
+
+
+class PolicyWorker:
+    """Host-side client for the restartable policy-worker subprocess (Phase 4).
+
+    ``decide(facts)`` returns the worker's TickOutcome, or ``None`` on ANY
+    problem (worker not started, dead, slow, or a malformed reply) so the host
+    can fall back to an in-process decision. ``reload_if_stale()`` respawns the
+    worker from the current on-disk code when the supervisor file changes.
+    """
+
+    def __init__(
+        self,
+        self_path: Path,
+        *,
+        dry_run: bool,
+        read_timeout: float = _WORKER_READ_TIMEOUT_SECONDS,
+        extra_argv: Callable[[], list[str]] | None = None,
+    ) -> None:
+        self._self_path = self_path
+        self._dry_run = dry_run
+        self._read_timeout = read_timeout
+        # Plan 00487: read afresh on EVERY start so the disabled-plugin set rides
+        # on each worker (re)start and a hot reload cannot bring a plugin back.
+        self._extra_argv = extra_argv
+        self._proc: subprocess.Popen[str] | None = None
+        self._err_stream: TextIO | None = None
+        self._source_fingerprint = self._current_fingerprint()
+        # Plan 00182: monotonically increasing per-request correlation id. The
+        # worker echoes it back; `decide` drops any reply whose id does not match
+        # the current request, so a stale reply buffered by a timed-out tick is
+        # never injected out of turn.
+        self._tick_id = 0
+
+    def _current_fingerprint(self) -> str | None:
+        """Best-effort source hash of the on-disk supervisor (None on error)."""
+        try:
+            return compute_source_hash(self._self_path)
+        except OSError:
+            return None
+
+    @property
+    def source_fingerprint(self) -> str | None:
+        """The fingerprint the current (or last) worker was spawned from."""
+        return self._source_fingerprint
+
+    def on_disk_fingerprint(self) -> str | None:
+        """The fingerprint of the supervisor file as it is on disk right now."""
+        return self._current_fingerprint()
+
+    def exit_code(self) -> int | None:
+        """The worker's exit code once it has exited; None while alive/unstarted."""
+        proc = self._proc
+        return None if proc is None else proc.poll()
+
+    def start(self) -> bool:
+        """Spawn the worker subprocess. Returns True on success."""
+        argv = [sys.executable, str(self._self_path), _WORKER_FLAG]
+        if not self._dry_run:
+            argv.append("--arm")
+        if self._extra_argv is not None:
+            try:
+                argv.extend(self._extra_argv())
+            except Exception as error:
+                # The worker starts without plugins rather than not at all.
+                append_worker_error(f"could not build the worker plugin flags: {error!r}")
+        # The worker's stderr MUST go to a file (or /dev/null), NEVER the PTY the
+        # host inherited: an uncaught per-tick traceback would otherwise flood
+        # the live Claude session. Open the error log; fall back to devnull.
+        self._err_stream = open_worker_error_log()
+        err_target: TextIO | int = (
+            self._err_stream if self._err_stream is not None else subprocess.DEVNULL
+        )
+        try:
+            # SECURITY: fixed argv (python + this script + flags), never a shell.
+            self._proc = subprocess.Popen(  # nosec B603 - trusted fixed argv, no shell
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=err_target,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            append_worker_error(f"could not start policy worker: {exc}")
+            self._close_err_stream()
+            self._proc = None
+            return False
+        self._source_fingerprint = self._current_fingerprint()
+        return self._proc.stdin is not None and self._proc.stdout is not None
+
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def decide(self, facts: TickFacts) -> TickOutcome | None:
+        """Ask the worker for a decision; None on any failure (host falls back).
+
+        Plan 00182: each request carries a unique ``tick_id`` the worker echoes
+        back. A reply whose id does not match the current request is a stale
+        reply left buffered by an earlier timed-out (slow) tick -- it is drained
+        and discarded, NEVER returned. Without this, a slow tick's late
+        ``WOULD_COMPACT`` reply would be read on the NEXT tick and injected on
+        top of a still-queued ``/compact``, stacking two compactions.
+        """
+        proc = self._proc
+        if proc is None or proc.stdin is None or proc.stdout is None or proc.poll() is not None:
+            return None
+        self._tick_id += 1
+        tick_id = self._tick_id
+        try:
+            proc.stdin.write(_facts_to_json(replace(facts, tick_id=tick_id)) + "\n")
+            proc.stdin.flush()
+        except (OSError, ValueError):
+            return None
+        # Bounded wait: a hung worker must not stall the PTY host for a whole
+        # tick. Drain stale replies (from earlier timed-out ticks) until the
+        # reply matching THIS request arrives or the deadline passes.
+        deadline = time.monotonic() + self._read_timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            ready, _, _ = select.select([proc.stdout], [], [], remaining)
+            if not ready:
+                return None
+            try:
+                line = proc.stdout.readline()
+            except (OSError, ValueError):
+                return None
+            if not line:
+                return None
+            try:
+                outcome = _outcome_from_json(line)
+            except Exception as exc:
+                # TOTAL on purpose: whatever is on the pipe is parsed untrusted,
+                # and a TypeError/AttributeError from a JSON scalar or list must
+                # be a bad reply (the host falls back), never an exception
+                # reaching the PTY loop and ending the session.
+                append_worker_error(f"bad worker reply ({type(exc).__name__}): {exc}")
+                return None
+            if outcome.tick_id == tick_id:
+                return outcome
+            # Stale reply from a previously timed-out tick -- discard and keep
+            # reading for the reply that matches this request.
+
+    def reload_if_stale(self) -> bool:
+        """Respawn the worker if the on-disk supervisor code has changed.
+
+        Returns True when a reload happened. The PTY host is untouched — only the
+        decision subprocess is swapped for one running the new code.
+        """
+        current = self._current_fingerprint()
+        if current is not None and current != self._source_fingerprint:
+            return self.restart()
+        return False
+
+    def restart(self) -> bool:
+        self.close()
+        return self.start()
+
+    def _close_err_stream(self) -> None:
+        """Close the worker's error-log stream handle if the host opened one."""
+        stream = self._err_stream
+        self._err_stream = None
+        if stream is None:
+            return
+        try:
+            stream.close()
+        except OSError as exc:
+            append_worker_error(f"worker error-log close failed: {exc}")
+
+    def close(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            self._close_err_stream()
+            return
+        for stream in (proc.stdin, proc.stdout):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except OSError as exc:
+                append_worker_error(f"worker stream close failed: {exc}")
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        except OSError as exc:
+            append_worker_error(f"worker terminate failed: {exc}")
+        self._close_err_stream()
+
+
+class WorkerCrashGuard:
+    """Host-side policy for a policy worker that has died (Plan 00361).
+
+    Pure and clock-free: the caller passes ``now``. Decides whether the dead
+    worker is respawned NOW and what single ``decision.log`` line (if any)
+    records it. First death on a source fingerprint: respawn and log. A second
+    death on the SAME fingerprint is a crash loop (the on-disk file cannot run):
+    log it once, then hold respawns to ``backoff_seconds`` so the host's
+    in-process fallback carries the session cheaply. A changed on-disk
+    fingerprint respawns at once, whatever the loop state -- the edit that
+    fixes the file must go live without waiting.
+    """
+
+    def __init__(self, backoff_seconds: float = _WORKER_CRASH_BACKOFF_SECONDS) -> None:
+        self._backoff_seconds = backoff_seconds
+        self._fingerprint: str | None = None
+        self._deaths = 0
+        self._looping = False
+        self._last_respawn_ts: float | None = None
+
+    def on_death(
+        self,
+        *,
+        dead_fingerprint: str | None,
+        on_disk_fingerprint: str | None,
+        exit_code: int | None,
+        now: float,
+    ) -> tuple[bool, str | None]:
+        """Return ``(respawn_now, log_line)`` for a worker found dead."""
+        dead = dead_fingerprint or _UNKNOWN_FINGERPRINT
+        on_disk = on_disk_fingerprint or _UNKNOWN_FINGERPRINT
+        code = _UNKNOWN_FINGERPRINT if exit_code is None else str(exit_code)
+        if dead != self._fingerprint:
+            self._fingerprint = dead
+            self._deaths = 0
+            self._looping = False
+        self._deaths += 1
+        if on_disk != dead:
+            # The source moved on: the next worker is a different program, so
+            # this fingerprint's history is over.
+            self._fingerprint = None
+            self._deaths = 0
+            self._looping = False
+            self._last_respawn_ts = now
+            return True, _WORKER_DIED_SOURCE_CHANGED_LINE.format(
+                exit_code=code, dead=dead, on_disk=on_disk
+            )
+        if self._deaths == 1:
+            self._last_respawn_ts = now
+            return True, _WORKER_DIED_LINE.format(exit_code=code, dead=dead)
+        if not self._looping:
+            self._looping = True
+            self._last_respawn_ts = now
+            return False, _WORKER_CRASH_LOOP_LINE.format(
+                dead=dead,
+                deaths=self._deaths,
+                exit_code=code,
+                backoff=self._backoff_seconds,
+            )
+        last = self._last_respawn_ts if self._last_respawn_ts is not None else now
+        if now - last >= self._backoff_seconds:
+            self._last_respawn_ts = now
+            return True, None
+        return False, None
+
+    def on_answer(self, *, fingerprint: str | None) -> str | None:
+        """A worker answered a tick: closes a crash loop, logging it once."""
+        if not self._looping:
+            return None
+        self._looping = False
+        self._deaths = 0
+        self._fingerprint = None
+        return _WORKER_RECOVERED_LINE.format(fingerprint=fingerprint or _UNKNOWN_FINGERPRINT)
+
+
+class FallbackTransitions:
+    """Log lines for the worker-answered <-> host-fallback transitions only.
+
+    Plan 00361: a tick the worker does not answer is decided in-process by the
+    host, with older code. That is by design, but a STRETCH of such ticks used
+    to be invisible. Only the edges are logged, so a long fallback costs two
+    lines, not one per tick.
+    """
+
+    def __init__(self) -> None:
+        self._answering = True
+
+    def note(self, *, worker_answered: bool) -> str | None:
+        previous = self._answering
+        self._answering = worker_answered
+        if previous == worker_answered:
+            return None
+        return _WORKER_FALLBACK_ENDED_LINE if worker_answered else _WORKER_FALLBACK_BEGAN_LINE
+
+
+def _get_winsize(stdin_fd: int) -> bytes:
+    """Read the controlling terminal's window size, falling back if unavailable."""
+    try:
+        return fcntl.ioctl(stdin_fd, termios.TIOCGWINSZ, b"\x00" * 8)
+    except OSError:
+        return _FALLBACK_WINSIZE
+
+
+def _set_winsize(master_fd: int, stdin_fd: int) -> None:
+    """Copy the controlling terminal's window size onto the pty master fd."""
+    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, _get_winsize(stdin_fd))
+
+
+def _exit_code_from_status(status: int) -> int:
+    """Translate a `waitpid` status into a shell-style exit code."""
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Exit for restart (Plan 00487 Task 1.3b)
+#
+# Claude Code is baked into the ccy image, so only a relaunch of the container
+# picks up a new version. A plugin that wants one returns `ExitForRestart` from
+# `on_idle`; the host then ends the session cleanly and tells the launcher so:
+#
+#   1. refuse unless exactly one own session id is known (the relaunch has to
+#      resume THE conversation, and a wrong id would resume another);
+#   2. type `/exit` through the ordinary injection path;
+#   3. HOLD every other injection until the child exits -- bounded: a child
+#      that ignores `/exit` is abandoned after `_RESTART_EXIT_WAIT_SECONDS` and
+#      the session carries on as if nothing had been asked;
+#   4. once the child has exited, write `.claude/ccy/state/restart-request.json`
+#      (session_id, reason, plugin, requested_at) and exit with
+#      `EXIT_STATUS_RESTART_REQUESTED` so the launcher relaunches with
+#      `--resume <session_id>`.
+#
+# The launcher must treat the status as a request only when the file is present
+# and fresh, and delete the file once it has read it.
+# ---------------------------------------------------------------------------
+
+# sysexits.h EX_TEMPFAIL: "temporary failure, retry". Never `claude`'s own
+# 0/1/2, never the exec failure 127, and below 128 so it cannot be a signal.
+EXIT_STATUS_RESTART_REQUESTED = 75
+_RESTART_REQUEST_FILENAME = "restart-request.json"
+_RESTART_EXIT_COMMAND = "/exit"
+_RESTART_EXIT_WAIT_SECONDS = 30.0
+_RESTART_REQUEST_FILE_MODE = 0o600
+# After a request is abandoned (the child ignored `/exit`) the same ask is not
+# acted on again for this long, and a plugin whose asks have been abandoned this
+# many times in one process is disabled through the uniform failure path.
+_RESTART_RETRY_COOLDOWN_SECONDS = 600.0
+# A small marker, separate from the request file (the launcher removes that one
+# before it relaunches), left at exit so the NEXT supervisor can tell the
+# resumed session once that it was restarted.
+_RESTARTED_MARKER_FILENAME = "restarted.json"
+_RESTARTED_MARKER_MAX_AGE_SECONDS = 24 * 60 * 60.0
+_CLAUDE_VERSION_TIMEOUT_SECONDS = 3.0
+_SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+_RESTART_MAX_ABANDONED = 3
+
+
+def _restart_request_path() -> Path:
+    """Where the exit-for-restart request file is written."""
+    return _ccy_state_dir() / _RESTART_REQUEST_FILENAME
+
+
+def _restarted_marker_path() -> Path:
+    """Where the "this session was restarted" marker is left (next to the request file)."""
+    return _ccy_state_dir() / _RESTARTED_MARKER_FILENAME
+
+
+def _write_private_json(path: Path, payload: dict[str, object]) -> None:
+    """Write ``payload`` as JSON to ``path`` atomically with mode 0600 (tmp file + replace)."""
+    path.parent.mkdir(mode=_PLUGIN_STATE_DIR_MODE, parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(
+        tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _RESTART_REQUEST_FILE_MODE
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload))
+    tmp_path.replace(path)
+
+
+@dataclass(frozen=True)
+class _PendingRestart:
+    plugin: str
+    reason: str
+    session_id: str
+    requested_at: float
+    deadline: float
+
+
+def _log_noop(log: DecisionLog | None, line: str) -> None:
+    if log is not None:
+        log.write_noop(line)
+
+
+def _log_line(log: DecisionLog | None, line: str) -> None:
+    if log is not None:
+        log.write(line)
+
+
+class RestartCoordinator:
+    """Host-side state of one exit-for-restart request (see the section above)."""
+
+    def __init__(
+        self,
+        *,
+        state_path: Path,
+        marker_path: Path | None = None,
+        wait_seconds: float = _RESTART_EXIT_WAIT_SECONDS,
+        cooldown_seconds: float = _RESTART_RETRY_COOLDOWN_SECONDS,
+        max_abandoned: int = _RESTART_MAX_ABANDONED,
+        monotonic: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._state_path = state_path
+        self._marker_path = (
+            marker_path
+            if marker_path is not None
+            else state_path.with_name(_RESTARTED_MARKER_FILENAME)
+        )
+        self._wait_seconds = wait_seconds
+        self._cooldown_seconds = cooldown_seconds
+        self._max_abandoned = max_abandoned
+        self._abandoned: dict[str, int] = {}
+        self._cooldown_until = float("-inf")
+        self._monotonic = monotonic
+        self._wall_clock = wall_clock
+        self._sleep = sleep
+        self._pending: _PendingRestart | None = None
+
+    @property
+    def pending(self) -> bool:
+        """True from the moment `/exit` was typed until the child exits or the wait is abandoned."""
+        return self._pending is not None
+
+    def expired(self) -> bool:
+        """True when a pending request has waited out its bound."""
+        return self._pending is not None and self._monotonic() >= self._pending.deadline
+
+    def request(
+        self,
+        plugin: str,
+        reason: str,
+        *,
+        session_ids: frozenset[str],
+        machine: CompactStateMachine,
+        write_master: Callable[[bytes], None],
+        log: DecisionLog | None,
+        dry_run: bool,
+    ) -> bool:
+        """Start an exit for restart; True only when `/exit` was actually typed."""
+        if self._pending is not None:
+            return False
+        if dry_run:
+            _log_noop(
+                log, f"noop: plugin {plugin} asked to exit for restart (dry-run: not exiting)"
+            )
+            return False
+        if self._monotonic() < self._cooldown_until:
+            _log_noop(
+                log,
+                f"noop: exit for restart asked by plugin {plugin} ignored: cooldown after an "
+                "abandoned attempt",
+            )
+            return False
+        if self._abandoned.get(plugin, 0) >= self._max_abandoned:
+            return False
+        if len(session_ids) != 1:
+            _log_noop(
+                log,
+                f"noop: exit for restart asked by plugin {plugin} refused: the own session id "
+                f"is not unambiguous ({len(session_ids)} known)",
+            )
+            return False
+        (session_id,) = session_ids
+        _perform_injection(write_master, _RESTART_EXIT_COMMAND, submit=True, sleep=self._sleep)
+        machine.mark_own_line_typed(_RESTART_EXIT_COMMAND, self._wall_clock())
+        self._pending = _PendingRestart(
+            plugin=plugin,
+            reason=reason,
+            session_id=session_id,
+            requested_at=self._wall_clock(),
+            deadline=self._monotonic() + self._wait_seconds,
+        )
+        _log_line(
+            log,
+            f"exit for restart: plugin {plugin} asked ({reason}); typed {_RESTART_EXIT_COMMAND}, "
+            "holding injections until the child exits",
+        )
+        return True
+
+    def abandon(self, log: DecisionLog | None) -> str | None:
+        """Give up on a child that did not exit; the session carries on.
+
+        Starts the retry cooldown and counts the attempt against the plugin.
+        Returns the plugin's name when this abandon reached the cap (the caller
+        then disables it), else None.
+        """
+        pending, self._pending = self._pending, None
+        if pending is None:
+            return None
+        self._cooldown_until = self._monotonic() + self._cooldown_seconds
+        count = self._abandoned.get(pending.plugin, 0) + 1
+        self._abandoned[pending.plugin] = count
+        _log_line(
+            log,
+            f"exit for restart: abandoned -- the child did not exit within "
+            f"{self._wait_seconds:g}s of {_RESTART_EXIT_COMMAND} (plugin {pending.plugin}, "
+            f"attempt {count} of {self._max_abandoned})",
+        )
+        return pending.plugin if count >= self._max_abandoned else None
+
+    def finish(self, exit_code: int, log: DecisionLog | None) -> int:
+        """The supervisor's exit status once the child has exited.
+
+        With a pending request: write the request file and return
+        `EXIT_STATUS_RESTART_REQUESTED`. If the file cannot be written the
+        launcher could not act on the status, so the child's own status is
+        returned instead and the failure is logged.
+        """
+        pending, self._pending = self._pending, None
+        if pending is None:
+            return exit_code
+        payload = {
+            "session_id": pending.session_id,
+            "reason": pending.reason,
+            "plugin": pending.plugin,
+            "requested_at": pending.requested_at,
+        }
+        try:
+            _write_private_json(self._state_path, payload)
+        except OSError as error:
+            _log_line(
+                log,
+                f"exit for restart: could not write {self._state_path}: {error}; "
+                f"exiting with the child's status {exit_code}",
+            )
+            return exit_code
+        _log_line(
+            log,
+            f"exit for restart: wrote {self._state_path}; exiting with status "
+            f"{EXIT_STATUS_RESTART_REQUESTED}",
+        )
+        try:
+            _write_private_json(
+                self._marker_path,
+                {"session_id": pending.session_id, "requested_at": pending.requested_at},
+            )
+        except OSError as error:
+            # The restart itself is what matters; only the RESTARTED notice is lost.
+            _log_line(log, f"exit for restart: could not write {self._marker_path}: {error}")
+        return EXIT_STATUS_RESTART_REQUESTED
+
+
+def _resumed_session_id(child_argv: Sequence[str]) -> str | None:
+    """The session id the child is resuming (``--resume <id>``, ``--resume=<id>``, ``-r <id>``)."""
+    candidate: str | None = None
+    for index, argument in enumerate(child_argv):
+        if argument in ("--resume", "-r") and index + 1 < len(child_argv):
+            candidate = child_argv[index + 1]
+            break
+        if argument.startswith("--resume="):
+            candidate = argument.partition("=")[2]
+            break
+    if candidate is None or _SESSION_ID_PATTERN.fullmatch(candidate) is None:
+        return None
+    return candidate
+
+
+def consume_restarted_marker(path: Path, resumed_session_id: str | None, *, now: float) -> bool:
+    """True once, when ``path`` is a fresh restart marker for the session being resumed.
+
+    A matching marker is removed (so it is consumed once). A garbled or stale
+    one is removed and ignored. A marker for another session, or any marker when
+    this launch is not a resume, is left alone.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        data = None
+    session_id = data.get("session_id") if isinstance(data, dict) else None
+    requested_at = data.get("requested_at") if isinstance(data, dict) else None
+    if (
+        not isinstance(session_id, str)
+        or not isinstance(requested_at, (int, float))
+        or isinstance(requested_at, bool)
+        or now - requested_at > _RESTARTED_MARKER_MAX_AGE_SECONDS
+    ):
+        _remove_marker(path)
+        return False
+    if resumed_session_id is None or session_id != resumed_session_id:
+        return False
+    _remove_marker(path)
+    return True
+
+
+def _remove_marker(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        append_worker_error(f"could not remove {path}: {error}")
+
+
+def _claude_version(executable: str) -> str | None:
+    """The version ``<executable> --version`` reports, or None. Bounded and validated.
+
+    Takes the first whitespace-separated token of the output; it must match
+    `_VERSION_PATTERN`, so nothing else the command prints can reach the chat.
+    """
+    try:
+        completed = (
+            subprocess.run(  # nosec B603 - fixed argv, the wrapped executable itself, no shell
+                [executable, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=_CLAUDE_VERSION_TIMEOUT_SECONDS,
+                stdin=subprocess.DEVNULL,
+                check=False,
+            )
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    tokens = completed.stdout[:200].split()
+    if tokens and _VERSION_PATTERN.fullmatch(tokens[0]) is not None:
+        return tokens[0]
+    return None
+
+
+def arm_restarted_notice(
+    machine: CompactStateMachine, child_argv: Sequence[str], *, marker_path: Path, now: float
+) -> bool:
+    """Owe the session its one RESTARTED notice when this launch resumes a restarted session.
+
+    Consumes the marker `RestartCoordinator.finish` left; the version comes from
+    ``<child> --version`` (bounded, validated), falling back to the installed
+    version wording. Never raises: a failure costs the notice, not the session.
+    """
+    try:
+        resumed = _resumed_session_id(child_argv)
+        if not consume_restarted_marker(marker_path, resumed, now=now):
+            return False
+        version = _claude_version(child_argv[0]) if child_argv else None
+        return machine.arm_session_notice(_SESSION_NOTICE_RESTARTED, version or "", now_wall=now)
+    except Exception as error:
+        append_worker_error(f"could not arm the restarted notice: {error!r}")
+        return False
+
+
+def handle_plugin_outcome(
+    outcome: TickOutcome,
+    *,
+    machine: CompactStateMachine,
+    restart: RestartCoordinator,
+    write_master: Callable[[bytes], None],
+    log: DecisionLog | None,
+    dry_run: bool,
+    session_ids: frozenset[str],
+    plugin_host: PluginHost | None,
+    restart_worker: Callable[[], bool] | None,
+) -> None:
+    """Act, on the HOST, on what one tick's plugin runtime reported.
+
+    The same function serves a worker-decided tick and an in-process one, so
+    plugins behave identically whichever path the tick took.
+    """
+    for line in outcome.plugin_log_lines:
+        _log_line(log, line)
+    if plugin_host is not None:
+        for plugin, version in outcome.plugin_versions:
+            plugin_host.record_loaded(plugin, version)
+        for plugin, kind, hook, detail in outcome.plugin_failures:
+            # The worker's words are only ever used if they are in the closed sets.
+            if kind not in _PLUGIN_KINDS or hook not in _PLUGIN_HOOKS:
+                continue
+            if plugin_host.record_failure(plugin, kind, hook, detail):
+                _log_line(log, failure_log_line(PluginFailure(plugin, kind, hook, detail)))
+                if kind in _PLUGIN_KINDS_NEEDING_WORKER_RESTART and restart_worker is not None:
+                    restart_worker()
+    if outcome.exit_for_restart is not None:
+        plugin, reason = outcome.exit_for_restart
+        restart.request(
+            plugin,
+            reason,
+            session_ids=session_ids,
+            machine=machine,
+            write_master=write_master,
+            log=log,
+            dry_run=dry_run,
+        )
+
+
+def handle_worker_silence(
+    *,
+    plugin_host: PluginHost,
+    machine: CompactStateMachine,
+    restart_worker: Callable[[], bool] | None,
+    log: DecisionLog | None,
+    status_dir: Path,
+    now_wall: float,
+) -> None:
+    """The worker did not answer a tick: if a plugin hook is why, take the plugin out.
+
+    Disables the culprit named by the in-hook marker, restarts the worker
+    WITHOUT it (the new worker is started with ``--disable-plugin``), and owes the
+    session a notice. Must run BEFORE the tick falls back to the in-process
+    decision, so a plugin that just wedged the worker is not run again in the
+    host. Silence with no culprit (a dead or merely slow worker) is not this
+    function's business.
+    """
+    failure = plugin_host.detect_wedge(now_wall)
+    if failure is None:
+        return
+    if not plugin_host.record_failure(failure.plugin, failure.kind, failure.hook):
+        return
+    _log_line(log, failure_log_line(failure))
+    report_plugin_failure(machine, failure, status_dir=status_dir, now=now_wall)
+    plugin_host.clear_marker()
+    if restart_worker is not None:
+        restart_worker()
+
+
+def _disable_stuck_exit_plugin(
+    plugin: str,
+    *,
+    plugin_host: PluginHost | None,
+    machine: CompactStateMachine,
+    restart_worker: Callable[[], bool] | None,
+    log: DecisionLog | None,
+    status_dir: Path,
+    now_wall: float,
+) -> None:
+    """A plugin's exit-for-restart asks keep being abandoned: take it out.
+
+    The same four steps as every other plugin failure -- disable (surviving a
+    worker reload), recover (restart the worker without it), log, and owe the
+    session its one fixed-template notice.
+    """
+    if plugin_host is None:
+        return
+    failure = PluginFailure(plugin, _PLUGIN_KIND_EXIT_STUCK, _PLUGIN_HOOK_ON_IDLE)
+    if not plugin_host.record_failure(failure.plugin, failure.kind, failure.hook):
+        return
+    _log_line(log, failure_log_line(failure))
+    report_plugin_failure(machine, failure, status_dir=status_dir, now=now_wall)
+    if restart_worker is not None:
+        restart_worker()
+
+
+class PluginContainment:
+    """Runs the host's plugin handling so that no fault in it can reach the session.
+
+    The first unexpected exception in any step stops the host handling plugin
+    results for the rest of the process. That alone would leave the worker
+    running every plugin the host no longer supervises (a plugin that then
+    hangs would stall every tick), so a trip also takes the uniform failure
+    path for ALL of them: every plugin is disabled, the session is told once,
+    and the worker is restarted with no plugin flags.
+    """
+
+    def __init__(
+        self,
+        *,
+        plugin_host: PluginHost | None,
+        machine: CompactStateMachine,
+        restart_worker: Callable[[], bool] | None,
+        log: DecisionLog | None,
+        status_dir: Path,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._plugin_host = plugin_host
+        self._machine = machine
+        self._restart_worker = restart_worker
+        self._log = log
+        self._status_dir = status_dir
+        self._clock = clock
+        self._active = True
+
+    @property
+    def active(self) -> bool:
+        """True until a step has tripped the containment."""
+        return self._active
+
+    def run(self, step: Callable[[], None]) -> None:
+        """Run ``step`` unless tripped; trip on the first exception it raises."""
+        if not self._active:
+            return
+        try:
+            step()
+        except Exception as error:
+            self._active = False
+            append_worker_error("plugin handling failed:\n" + traceback.format_exc())
+            _log_line(
+                self._log,
+                f"plugin handling failed ({type(error).__name__}): all plugins disabled",
+            )
+            self._switch_everything_off()
+
+    def _switch_everything_off(self) -> None:
+        host = self._plugin_host
+        if host is None:
+            return
+        names: list[str] = []
+        try:
+            names = host.disable_all()
+            if names:
+                failure = PluginFailure(names[0], _PLUGIN_KIND_HOST_FAULT, _PLUGIN_HOOK_ON_IDLE)
+                _log_line(self._log, failure_log_line(failure))
+                report_plugin_failure(
+                    self._machine, failure, status_dir=self._status_dir, now=self._clock()
+                )
+                host.clear_marker()
+        except Exception:
+            append_worker_error("plugin shutdown after a fault failed:\n" + traceback.format_exc())
+        if names and self._restart_worker is not None:
+            try:
+                self._restart_worker()
+            except Exception:
+                append_worker_error(
+                    "worker restart after a fault failed:\n" + traceback.format_exc()
+                )
+
+
+def _forward_io(
+    stdin_fd: int,
+    master_fd: int,
+    activity: InputActivity,
+    *,
+    poll_seconds: float | None = None,
+    on_poll: Callable[[], None] | None = None,
+    output_activity: OutputActivity | None = None,
+    on_suspend: Callable[[], object] | None = None,
+    ctrl_c_gate: CtrlCGate | None = None,
+    on_ctrl_c_event: Callable[[str], object] | None = None,
+    raw_tap: RawInputTap | None = None,
+) -> None:
+    """Select loop: forward stdin -> master, master -> stdout.
+
+    When ``poll_seconds`` is set, ``select`` wakes on that interval even with no
+    I/O, and ``on_poll`` (if given) runs one supervisor tick before looping.
+    A tick never touches the forwarded I/O -- it only reads the sidecar and may
+    inject -- so transparent passthrough is unchanged when polling is disabled.
+
+    Once stdin reaches EOF it is dropped from the watch set: an EOF fd is always
+    "readable", so continuing to select on it would spin the loop and starve the
+    poll timeout. Dropping it lets timeouts (and therefore polling) resume.
+
+    The supervisor tick fires on a MONOTONIC interval, not on the ``select``
+    timeout branch. A busy child streams output continuously, so ``master_fd``
+    is readable on almost every ``select`` call and the timeout branch would
+    never run -- starving the compact decision for the whole busy burst (Plan
+    00151: context climbed past red before any evaluation). Tracking the next
+    tick deadline and running ``on_poll`` whenever it is due -- readable or not
+    -- evaluates the decision every ``poll_seconds`` regardless of how busy the
+    thread is; resetting the deadline after each run throttles it to one tick
+    per interval.
+    """
+    stdin_open = True
+    # tick_interval is the monotonic period between supervisor ticks; it is
+    # None (polling disabled) only when a caller omits poll_seconds/on_poll.
+    tick_interval = poll_seconds if (poll_seconds is not None and on_poll is not None) else None
+    next_tick = time.monotonic() + tick_interval if tick_interval is not None else None
+    while True:
+        watch = [master_fd, stdin_fd] if stdin_open else [master_fd]
+        if tick_interval is not None and next_tick is not None:
+            timeout: float | None = max(0.0, next_tick - time.monotonic())
+        else:
+            timeout = poll_seconds
+        try:
+            readable, _, _ = select.select(watch, [], [], timeout)
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                continue
+            raise
+
+        # Run the supervisor tick whenever its interval has elapsed -- even if
+        # the child is mid-stream and select keeps returning readable.
+        if (
+            tick_interval is not None
+            and next_tick is not None
+            and on_poll is not None
+            and time.monotonic() >= next_tick
+        ):
+            on_poll()
+            next_tick = time.monotonic() + tick_interval
+
+        if not readable:
+            # select timed out with no I/O ready -> nothing to forward.
+            continue
+
+        if stdin_open and stdin_fd in readable:
+            data = os.read(stdin_fd, _READ_CHUNK_SIZE)
+            if data:
+                # Ctrl+C double-press gate (Plan 00312): a lone 0x03 chunk is
+                # withheld until confirmed by a second press inside the window.
+                # Runs BEFORE strip_suspend so the exact-chunk press test sees
+                # the raw read. A fully-swallowed chunk forwards nothing but
+                # must NOT be mistaken for EOF — so this stays inside `if data:`.
+                if ctrl_c_gate is not None:
+                    data, ctrl_c_event = ctrl_c_gate.filter(data)
+                    if ctrl_c_event is not None and on_ctrl_c_event is not None:
+                        # Surface the swallow/forward (status-line hint +
+                        # decision log). Best-effort: never let it break I/O.
+                        on_ctrl_c_event(ctrl_c_event)
+                # Drop Ctrl+Z (SUSP) before it reaches the child so it can never
+                # suspend the session. A chunk that was ONLY suspend bytes
+                # forwards nothing, but must NOT be mistaken for EOF (that is the
+                # empty-read branch below) — so this stays inside `if data:`.
+                forwarded = strip_suspend(data)
+                if forwarded != data and on_suspend is not None:
+                    # At least one suspend byte was swallowed — surface a
+                    # transient status-line notice so the user learns why their
+                    # Ctrl+Z did nothing. Best-effort: never let it break I/O.
+                    on_suspend()
+                if forwarded:
+                    activity.record(forwarded)
+                    if raw_tap is not None:
+                        # Plan 00317: same bytes, second sink -- feeds the
+                        # worker's hot-reloadable recognizer. Never blocks or
+                        # alters what is written to the child below.
+                        raw_tap.append(forwarded)
+                    os.write(master_fd, forwarded)
+            else:
+                # stdin EOF: stop watching it so poll timeouts can fire.
+                stdin_open = False
+
+        if master_fd in readable:
+            try:
+                output = os.read(master_fd, _READ_CHUNK_SIZE)
+            except OSError:
+                output = b""
+            if not output:
+                return
+            if output_activity is not None:
+                # Record child output timing so the supervisor can tell an
+                # actively-streaming turn from a settled lull (Plan 00152).
+                output_activity.record(output)
+            os.write(sys.stdout.fileno(), output)
+
+
+def supervise(
+    argv: list[str],
+    *,
+    dry_run: bool = True,
+    log: DecisionLog | None = None,
+    activity: InputActivity | None = None,
+    stdin_fd: int | None = None,
+    sidecar_dir: Path | None = None,
+    policy: CompactPolicy | None = None,
+    poll_seconds: float = _DEFAULT_POLL_SECONDS,
+    idle_floor_seconds: float = _DEFAULT_IDLE_FLOOR_SECONDS,
+    work_settle_seconds: float = _DEFAULT_WORK_SETTLE_SECONDS,
+    input_line_abandon_seconds: float = _DEFAULT_INPUT_LINE_ABANDON_SECONDS,
+    decider: Callable[[TickFacts], TickOutcome | None] | None = None,
+    plugin_host: PluginHost | None = None,
+    restart_worker: Callable[[], bool] | None = None,
+    restart_coordinator: RestartCoordinator | None = None,
+) -> int:
+    """Run `argv` under a PTY, forwarding I/O and polling the context sidecar.
+
+    On each idle poll tick the supervisor reads the daemon-written context
+    sidecar and runs the Decision H state machine. When the compact trigger
+    fires (red + idle + cooldown/cap) it INJECTS a payload into the child PTY:
+    a harmless visible MARKER in dry-run (default), or the real `/compact` when
+    armed. Injection only ever targets an EMPTY input box: the human input
+    line is tracked from the forwarded stdin bytes (`activity.line`) and any
+    tick that finds non-whitespace human text pending is deferred and logged
+    instead. Forwarded I/O is never altered by a tick.
+
+    Args:
+        argv: The child command and its arguments (argv[0] is the executable).
+        dry_run: When True (default) inject the harmless marker; when False
+            (armed) inject the real `/compact` / `continue`.
+        log: Optional decision log for startup, injection, and exit lines.
+        activity: Optional `InputActivity` to record stdin byte counts into.
+            A fresh one is created internally if not supplied.
+        stdin_fd: File descriptor to read supervisor input from. Defaults to
+            `sys.stdin.fileno()`. Overridable so callers (and tests) can pass
+            a real fd directly, bypassing wrappers that don't expose one.
+        sidecar_dir: Directory holding the daemon's context sidecars. Defaults
+            to the environment-derived `context-sidecar` dir.
+        policy: Compact state-machine policy (cooldown/cap/freshness/timeout).
+        poll_seconds: Idle poll interval for the sidecar tick.
+        idle_floor_seconds: Minimum quiet time before an injection is allowed.
+        work_settle_seconds: Minimum quiet time on the CHILD output before the
+            lower red band is allowed to compact (Plan 00152). The elevated and
+            critical bands ignore it and compact promptly.
+        input_line_abandon_seconds: How long the input box's content must sit
+            UNCHANGED before a red-or-worse reading submits it (via the
+            existing resubmit/Enter path) and compacts, rather than deferring
+            forever (Plan 00398). Not the same axis as `idle_floor_seconds`.
+
+    Returns:
+        The child's exit code (or 128+signal if it died from a signal).
+
+    Raises:
+        ValueError: If `argv` is empty.
+    """
+    if not argv:
+        raise ValueError("supervise() requires a non-empty argv")
+
+    activity = activity if activity is not None else InputActivity()
+    output_activity = OutputActivity()
+    # Plan 00317: fed the same forwarded bytes as `activity`, drained once per
+    # tick into TickFacts.human_raw_input for the worker's own recognizer.
+    raw_tap = RawInputTap()
+    # Plan 00361: only the EDGES of a worker-silent stretch are logged.
+    fallback_transitions = FallbackTransitions()
+    # Plan 00295 Task 3.8: kept as a SEPARATE, never-reassigned `int`-typed name
+    # rather than narrowing the `int | None` parameter in place. `_on_winch`
+    # below is registered as a real SIGWINCH handler, so a type checker cannot
+    # prove it never runs before this point -- once a variable is captured by
+    # a nested function, narrowing on the OUTER (parameter) name is unsound and
+    # a static checker must fall back to its declared type everywhere in the
+    # enclosing scope, not just inside the closure. A variable whose ONLY
+    # assignment is this one, of type `int`, carries no such ambiguity.
+    resolved_stdin_fd: int = stdin_fd if stdin_fd is not None else sys.stdin.fileno()
+    sidecar_dir = sidecar_dir if sidecar_dir is not None else _default_sidecar_dir()
+    policy = policy if policy is not None else CompactPolicy()
+    machine = CompactStateMachine(policy)
+    restart = (
+        restart_coordinator
+        if restart_coordinator is not None
+        else RestartCoordinator(state_path=_restart_request_path())
+    )
+    mode = "dry-run (injects marker)" if dry_run else "ARMED (injects /compact)"
+    # Transient supervisor->status-line message channel (GENERAL; the Ctrl+Z
+    # input guard is its first consumer). Co-located with the sidecar dir's
+    # PARENT — the daemon untracked dir — so the daemon's status handler reads
+    # the very same file. Thread-safe + rate-limited (see StatusMessagePoster).
+    status_message_poster = StatusMessagePoster(sidecar_dir.parent)
+
+    if log is not None:
+        log.write(
+            f"supervisor active ({mode}); polling {sidecar_dir} every "
+            f"{poll_seconds}s; wrapping: {argv}"
+        )
+    arm_restarted_notice(machine, argv, marker_path=_restarted_marker_path(), now=time.time())
+    # Plan 00487: host-side plugin handling is contained as a whole. The first
+    # unexpected exception in it switches the handling off for the rest of the
+    # process (logged once); the session itself carries on regardless.
+    containment = PluginContainment(
+        plugin_host=plugin_host,
+        machine=machine,
+        restart_worker=restart_worker,
+        log=log,
+        status_dir=sidecar_dir.parent,
+    )
+    _contained = containment.run
+
+    def _report_startup_refusals() -> None:
+        # A plugin the loader refused is skipped, never fatal; say so in the
+        # log, on the status line, and (once, at an idle point) to the session.
+        assert plugin_host is not None
+        for refusal in plugin_host.take_startup_failures():
+            _log_line(log, failure_log_line(refusal))
+            report_plugin_failure(machine, refusal, status_dir=sidecar_dir.parent, now=time.time())
+
+    if plugin_host is not None:
+        _contained(_report_startup_refusals)
+
+    # Startup banner + spinner (Plan 00164 Phase 2): give the launching ccy
+    # session immediate, informative feedback during the perceptible start-up
+    # lull. Both go to stderr and are gated on an interactive TTY, so piped/
+    # non-interactive launches and the test suite stay silent. The spinner is
+    # stopped (line cleared) right after the fork, BEFORE the child paints, so
+    # it never coexists with the wrapped process's output.
+    spinner: _StartupSpinner | None = None
+    if _should_show_banner(sys.stderr):
+        # Blank lines above and below set the banner apart from whatever the
+        # terminal was showing, so the startup notice reads as a distinct block.
+        banner = render_startup_banner(version=__version__, armed=not dry_run)
+        sys.stderr.write("\n\n" + banner + "\n\n")
+        sys.stderr.flush()
+        spinner = _StartupSpinner(sys.stderr)
+        spinner.start()
+
+    pid, master_fd = pty.fork()
+    if pid == 0:  # pragma: no cover - runs in the forked child process
+        # SECURITY: no shell involved -- argv is passed directly to execvp as
+        # a list (never a shell string), so there is no command-injection
+        # surface here. This IS the supervisor's job: exec the wrapped
+        # process (e.g. `claude`) on the child side of the PTY.
+        os.execvp(argv[0], argv)  # nosec B606
+        os._exit(127)  # unreachable on success
+
+    if spinner is not None:
+        spinner.stop()
+
+    _set_winsize(master_fd, resolved_stdin_fd)
+
+    old_termios: list[int | list[bytes | int]] | None = None
+    stdin_is_tty = os.isatty(resolved_stdin_fd)
+    if stdin_is_tty:
+        old_termios = termios.tcgetattr(resolved_stdin_fd)
+        tty.setraw(resolved_stdin_fd)
+
+    def _on_winch(_signum: int, _frame: FrameType | None) -> None:
+        _set_winsize(master_fd, resolved_stdin_fd)
+
+    def _write_master(data: bytes) -> None:
+        os.write(master_fd, data)
+
+    def _handle_plugin_outcome(outcome: TickOutcome) -> None:
+        # Plan 00487: what the plugin runtime told the host this tick -- audit
+        # lines, failures, an exit-for-restart request -- handled by ONE function
+        # whether the tick was decided by the worker or in-process.
+        _contained(
+            lambda: handle_plugin_outcome(
+                outcome,
+                machine=machine,
+                restart=restart,
+                write_master=_write_master,
+                log=log,
+                dry_run=dry_run,
+                session_ids=cached_own_session_ids(),
+                plugin_host=plugin_host,
+                restart_worker=restart_worker,
+            )
+        )
+
+    def _on_poll() -> None:
+        if restart.pending:
+            # Plan 00487 Task 1.3b: `/exit` was typed. Hold EVERYTHING until the
+            # child exits (the select loop then ends) -- or, past the bound,
+            # abandon the request and carry on with the session.
+            if not restart.expired():
+                return
+            capped = restart.abandon(log)
+            if capped is not None:
+                _contained(
+                    lambda: _disable_stuck_exit_plugin(
+                        capped,
+                        plugin_host=plugin_host,
+                        machine=machine,
+                        restart_worker=restart_worker,
+                        log=log,
+                        status_dir=sidecar_dir.parent,
+                        now_wall=time.time(),
+                    )
+                )
+        now_monotonic = os.times().elapsed
+        idle = _is_idle(
+            activity,
+            now_monotonic=now_monotonic,
+            idle_floor_seconds=idle_floor_seconds,
+        )
+        # Child-output lull: gates only the LOWER red band (Plan 00152).
+        work_idle = _is_work_idle(
+            output_activity,
+            now_monotonic=now_monotonic,
+            work_settle_seconds=work_settle_seconds,
+        )
+        # Plan 00470 Task 2.3: how long the child has been silent, for the
+        # cron-expiry watchdog.
+        output_quiet_seconds = _output_quiet_seconds(output_activity, now_monotonic=now_monotonic)
+        # Consume the human-/compact edge exactly once per tick so a human
+        # compaction defers the supervisor's own, never suppresses it forever.
+        human_compact = activity.take_compact_submitted()
+        # Plan 00317: drain the raw tap for the worker's OWN recognizer. Sent
+        # alongside the host-computed fields above (unchanged, still used by
+        # the in-process fallback below) so a worker restart alone can change
+        # recognition behaviour without any host-side code change.
+        human_raw_input = base64.b64encode(raw_tap.drain()).decode("ascii")
+        # Plan 00164 Phase 4: prefer the restartable policy worker; on ANY worker
+        # failure (decider returns None) fall back to the identical in-process
+        # path so a tick is never dropped. The host always performs the injection.
+        now_wall = time.time()
+        # Plan 00398 Phase 2: computed from the host's own long-lived model,
+        # which never loses history to a worker restart (see `TickFacts`).
+        input_line_abandoned = activity.line.is_abandoned(
+            now=now_wall, threshold_seconds=input_line_abandon_seconds
+        )
+        outcome = None
+        if decider is not None:
+            outcome = decider(
+                TickFacts(
+                    now_wall=now_wall,
+                    idle=idle,
+                    input_line_empty=activity.line.is_empty,
+                    human_compact_submitted=human_compact,
+                    work_idle=work_idle,
+                    human_raw_input=human_raw_input,
+                    # Ship the host's authoritative machine state so the worker
+                    # decides on it -- never on divergent worker-local state.
+                    machine_state=machine.export_state(),
+                    input_line_abandoned=input_line_abandoned,
+                    output_quiet_seconds=output_quiet_seconds,
+                )
+            )
+            transition = fallback_transitions.note(worker_answered=outcome is not None)
+            if transition is not None and log is not None:
+                log.write(transition)
+            if outcome is None and plugin_host is not None:
+                # Plan 00487: before this tick falls back to the in-process
+                # decision, take out any plugin the silent worker is stuck in.
+                silent_host = plugin_host
+                _contained(
+                    lambda: handle_worker_silence(
+                        plugin_host=silent_host,
+                        machine=machine,
+                        restart_worker=restart_worker,
+                        log=log,
+                        status_dir=sidecar_dir.parent,
+                        # A fresh reading, not this tick's: the worker was waited
+                        # on for up to its read timeout, and the marker's age is
+                        # judged against NOW.
+                        now_wall=time.time(),
+                    )
+                )
+        if outcome is not None:
+            # Plan 00182: pass the host's authoritative PRE-tick state so a stale
+            # WOULD_COMPACT reply (worker still MONITOR, host already awaiting)
+            # is suppressed instead of stacking a second /compact.
+            injected = _apply_decision(
+                outcome,
+                master_writer=_write_master,
+                log=log,
+                host_state=machine.state.value,
+            )
+            # Adopt the worker's post-tick state so `machine` remains the single
+            # source of truth; a later in-process fallback tick then cannot
+            # diverge and inject a duplicate /compact (Plan 00164 Phase 4 fix).
+            if outcome.machine_state is not None:
+                machine.import_state(outcome.machine_state)
+            # Success-only bookkeeping, run AFTER adopting the worker state
+            # (which carries the pre-injection counts) so no increment is
+            # ever overwritten. A PTY write failure raises above, so no cap
+            # is burned and no pending episode/signal is lost (Plan 00269
+            # review fix; Plan 00278 continuation).
+            _apply_post_injection_bookkeeping(
+                machine, outcome, injected=injected, now_wall=now_wall
+            )
+            # Plan 00398 Phase 3: the flush's own Enter never passes through
+            # `feed` (same as every other supervisor injection), so without
+            # this the model would show the just-flushed text forever.
+            if outcome.abandoned_box_flushed:
+                activity.line.clear()
+            _handle_plugin_outcome(outcome)
+        else:
+            _poll_once(
+                machine,
+                sidecar_dir=sidecar_dir,
+                now_wall=now_wall,
+                idle=idle,
+                dry_run=dry_run,
+                master_writer=_write_master,
+                log=log,
+                freshness_seconds=policy.freshness_seconds,
+                compaction_signal_ttl_seconds=policy.compaction_signal_ttl_seconds,
+                input_line_empty=activity.line.is_empty,
+                human_compact_submitted=human_compact,
+                work_idle=work_idle,
+                reap_ttl_seconds=policy.reap_ttl_seconds,
+                foreground_margin_seconds=policy.foreground_margin_seconds,
+                own_sessions=cached_own_session_ids(),  # Plan 00166: only our own sessions
+                goal_signal_ttl_seconds=policy.goal_signal_ttl_seconds,
+                input_line_abandoned=input_line_abandoned,
+                output_quiet_seconds=output_quiet_seconds,
+                on_input_line_flushed=activity.line.clear,
+                # NEVER a plugin runtime: this fallback runs in the PTY host
+                # process, and plugin code does not (Plan 00487).
+                plugins=None,
+                on_outcome=_handle_plugin_outcome,
+            )
+
+    previous_handler = signal.signal(signal.SIGWINCH, _on_winch)
+
+    # Belt-and-braces to the byte-level Ctrl+Z strip: swallow stop/quit SIGNALS
+    # if they ever reach the supervisor (race before setraw, non-tty stdin, `kill
+    # -TSTP`, job control) so the session can never freeze or core-dump. Uses a
+    # LOCK-FREE writer (not the poster) because it runs inside a signal handler
+    # (see install_input_signal_guards). Installed here in the PARENT, after the
+    # fork, so the child never inherits these dispositions.
+    def _post_signal_notice(notice: str) -> None:
+        write_status_message(
+            sidecar_dir.parent,
+            text=notice,
+            expires_at=time.time() + _STATUS_MESSAGE_TTL_SECONDS,
+            level=_STATUS_LEVEL_WARNING,
+        )
+
+    # Save prior dispositions so they are restored on exit (supervise() is called
+    # in-process by tests; leaked stop/quit handlers would break their job
+    # control). getsignal returns the typeshed _HANDLER union — inferred locally.
+    prev_signal_guards = {sig: signal.getsignal(sig) for sig in _INPUT_GUARD_SIGNALS}
+    install_input_signal_guards(_post_signal_notice)
+
+    # Ctrl+C double-press guard (Plan 00312): on by default, disable with
+    # CCY_CTRL_C_GUARD=0; window via CCY_CTRL_C_WINDOW_SECONDS. A None gate is
+    # full passthrough — Ctrl+C behaves exactly as before the guard existed.
+    ctrl_c_gate = (
+        CtrlCGate(window_seconds=_resolve_ctrl_c_window_seconds())
+        if _resolve_ctrl_c_guard_enabled()
+        else None
+    )
+
+    def _on_ctrl_c_event(event: str) -> None:
+        if event == _CTRL_C_EVENT_SWALLOWED and ctrl_c_gate is not None:
+            status_message_poster.post(
+                _ctrl_c_notice_text(ctrl_c_gate.window_seconds),
+                level=_STATUS_LEVEL_WARNING,
+            )
+        if log is not None:
+            log.write(f"ctrl-c guard: {event}")
+
+    try:
+        _forward_io(
+            resolved_stdin_fd,
+            master_fd,
+            activity,
+            poll_seconds=poll_seconds,
+            on_poll=_on_poll,
+            output_activity=output_activity,
+            on_suspend=lambda: status_message_poster.post(
+                _CTRL_Z_NOTICE_TEXT, level=_STATUS_LEVEL_WARNING
+            ),
+            ctrl_c_gate=ctrl_c_gate,
+            on_ctrl_c_event=_on_ctrl_c_event,
+            raw_tap=raw_tap,
+        )
+    finally:
+        for guarded_signal, prior_handler in prev_signal_guards.items():
+            signal.signal(guarded_signal, prior_handler)
+        signal.signal(signal.SIGWINCH, previous_handler)
+        if old_termios is not None:
+            termios.tcsetattr(resolved_stdin_fd, termios.TCSAFLUSH, old_termios)
+
+    _pid, status = os.waitpid(pid, 0)
+    # A pending exit-for-restart turns the child's clean exit into the dedicated
+    # status (and the request file) the ccy launcher relaunches on.
+    exit_code = restart.finish(_exit_code_from_status(status), log)
+
+    if log is not None:
+        log.write(
+            f"supervisor exiting ({mode}); transparent passthrough; "
+            f"{activity.bytes_seen} input bytes observed"
+        )
+
+    return exit_code
+
+
+def _split_child_argv(argv: list[str]) -> list[str] | None:
+    """Return everything after the first `--` separator, or None if absent/empty."""
+    if "--" not in argv:
+        return None
+    child = argv[argv.index("--") + 1 :]
+    return child if child else None
+
+
+def _parse_supervisor_flags(argv: list[str]) -> argparse.Namespace:
+    """Parse only the flags that appear before `--` (argparse never sees the child argv)."""
+    supervisor_argv = argv[: argv.index("--")] if "--" in argv else argv
+
+    parser = argparse.ArgumentParser(
+        prog="claude-supervise",
+        description="PTY supervisor for `claude` that watches the context sidecar "
+        "and injects a compact trigger when the context goes red.",
+        add_help=False,
+    )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=True,
+        help="Default. When the trigger fires, inject a harmless VISIBLE MARKER "
+        "into the session (proving the mechanism) instead of a real /compact.",
+    )
+    mode_group.add_argument(
+        "--arm",
+        dest="dry_run",
+        action="store_false",
+        help="Inject the REAL /compact (and continue) instead of the marker. "
+        "Use only when you want the supervisor to actually compact the session.",
+    )
+    parser.add_argument(
+        "--log",
+        dest="log_path",
+        type=Path,
+        default=None,
+        help="Decision log file path (default: $CLAUDE_PROJECT_DIR/untracked/supervise/).",
+    )
+    _add_plugin_arguments(parser)
+    return parser.parse_args(supervisor_argv)
+
+
+def _resolve_decision_log(explicit_path: Path | None) -> DecisionLog:
+    """Build the DecisionLog from an explicit path, or the environment-derived default."""
+    return DecisionLog(explicit_path)
+
+
+def _newest_sidecar_session_id(directory: Path) -> str | None:
+    """Return the ``session_id`` of the newest (max-``ts``) context sidecar.
+
+    Mirrors the scan ``load_freshest_sidecar`` uses for the supervisor's own
+    current reading source, without the freshness/staleness filtering -- the
+    CLI trigger wants whichever session is CURRENTLY under supervision,
+    live or not, so it can target it explicitly.
+    """
+    scanned = _scan_sidecars(directory)
+    if not scanned:
+        return None
+    data, _ts = max(scanned, key=lambda pair: pair[1])
+    session_id = data.get("session_id")
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+def _run_emit_model_switch(argv: list[str]) -> int:
+    """CLI test-trigger: write a manual model-switch signal and exit.
+
+    Does NOT start a supervisor. Resolves the sidecar/signal directory the
+    SAME way the running supervisor does (`_default_sidecar_dir`) and targets
+    whichever session currently owns the newest context sidecar there.
+
+    Returns:
+        0 on success; 2 on a usage error (missing ``<family>`` argument);
+        1 when no sidecar can be found or the signal cannot be written.
+    """
+    index = argv.index(_EMIT_MODEL_SWITCH_FLAG)
+    if index + 1 >= len(argv):
+        sys.stderr.write(f"Usage: claude-supervise.py {_EMIT_MODEL_SWITCH_FLAG} <family>\n")
+        return 2
+    family_arg = argv[index + 1]
+    sidecar_dir = _default_sidecar_dir()
+    session_id = _newest_sidecar_session_id(sidecar_dir)
+    if session_id is None:
+        sys.stderr.write(
+            f"claude-supervise: no context sidecar found under {sidecar_dir} -- "
+            "is a supervised session running?\n"
+        )
+        return 1
+    try:
+        path = write_model_switch_signal(
+            sidecar_dir, session_id=session_id, family=family_arg, now=time.time()
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"claude-supervise: {exc}\n")
+        return 1
+    except OSError as exc:
+        sys.stderr.write(f"claude-supervise: could not write model-switch signal: {exc}\n")
+        return 1
+    sys.stdout.write(
+        f"claude-supervise: wrote model-switch signal for session {session_id} "
+        f"-> {family_arg} ({path})\n"
+    )
+    return 0
+
+
+def _self_source_fingerprint() -> str:
+    """Fingerprint of THIS file on disk, or ``unknown`` if it cannot be read."""
+    try:
+        return compute_source_hash(_SELF_PATH)
+    except OSError:
+        return _UNKNOWN_FINGERPRINT
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point: parse args, run the PTY supervisor, return the exit code.
+
+    Args:
+        argv: Command-line arguments (excluding program name). Defaults to
+            `sys.argv[1:]` when None.
+
+    Returns:
+        2 if no child argv is supplied after `--`; otherwise the supervised
+        child's exit code.
+    """
+    argv = argv if argv is not None else sys.argv[1:]
+
+    # CLI test-trigger mode: writes a manual model-switch signal and exits --
+    # never starts a supervisor, so it is checked before the worker/child-argv
+    # modes below.
+    if _EMIT_MODEL_SWITCH_FLAG in argv:
+        return _run_emit_model_switch(argv)
+
+    # Policy-worker mode (Plan 00164 Phase 4): no child argv — read TickFacts
+    # from stdin, write TickOutcomes to stdout. The host spawns this.
+    if _WORKER_FLAG in argv:
+        # Defence in depth: guarantee the worker's stderr is a FILE, never a
+        # terminal, regardless of how it was launched (the host already sets
+        # this via Popen, but a direct/manual `--worker` run must not flood a
+        # tty either). See Plan 00166.
+        _redirect_worker_stderr_to_log()
+        try:
+            # Plan 00487: plugin code runs in this process, so the protocol
+            # pipes are made private BEFORE any plugin is loaded.
+            requests, replies = _isolate_worker_channels()
+            worker_sidecar_dir = _default_sidecar_dir()
+            return run_worker(
+                requests,
+                replies,
+                dry_run="--arm" not in argv,
+                sidecar_dir=worker_sidecar_dir,
+                policy=CompactPolicy(),
+                plugins=_make_worker_plugin_runtime(argv, worker_sidecar_dir.parent),
+            )
+        except Exception:
+            # Plan 00361: an escaped exception (typically a half-edited source
+            # file: a method removed before its call site) used to reach the
+            # error log as a raw, undated stderr traceback. Record it with a
+            # timestamp and the fingerprint it ran from, then exit non-zero so
+            # the host's crash guard sees a real death. Deliberate broad catch:
+            # this is the process's last line, and the traceback is the point.
+            append_worker_error(
+                _WORKER_CRASH_RECORD.format(fingerprint=_self_source_fingerprint())
+                + traceback.format_exc()
+            )
+            return 1
+
+    child_argv = _split_child_argv(argv)
+    if child_argv is None:
+        sys.stderr.write(_USAGE)
+        return 2
+
+    flags = _parse_supervisor_flags(argv)
+    log = _resolve_decision_log(flags.log_path)
+
+    # Advertise this running supervisor's identity (version + source hash) so a
+    # SessionStart advisory can detect when an upgrade has left a NEWER
+    # supervisor on disk than the one still running (Plan 00164 Phase 3). The
+    # status is removed on exit so a clean shutdown leaves nothing stale behind.
+    untracked_dir = _daemon_untracked_dir()
+    source_hash = compute_source_hash(_SELF_PATH)
+    started_at = time.time()
+
+    def _write_status(plugins: list[dict[str, str]] | None) -> Path | None:
+        return write_supervisor_status(
+            untracked_dir,
+            version=__version__,
+            source_hash=source_hash,
+            pid=os.getpid(),
+            started_at=started_at,
+            plugins=plugins,
+        )
+
+    # Plan 00487: plugins named with `--plugin`. Vetting a file never imports it
+    # and a refusal only skips that plugin -- the session always starts. The host
+    # rewrites the status file's plugin list whenever a plugin's state changes.
+    plugin_host = _make_plugin_host(flags, _write_status, untracked_dir)
+    if plugin_host is None:
+        _write_status(None)
+
+    # Run the decision logic in a restartable worker subprocess (Plan 00164
+    # Phase 4) so it can hot-reload from a freshly-deployed supervisor without
+    # disturbing this PTY host. Worker failure is invisible — the host falls back
+    # to an identical in-process decision — so the session is never at risk.
+    worker = _make_policy_worker(flags.dry_run, plugin_host=plugin_host)
+    decider = _make_worker_decider(worker, log=log) if worker is not None else None
+    try:
+        return supervise(
+            child_argv,
+            dry_run=flags.dry_run,
+            log=log,
+            decider=decider,
+            plugin_host=plugin_host,
+            restart_worker=worker.restart if worker is not None else None,
+        )
+    finally:
+        if worker is not None:
+            worker.close()
+        remove_supervisor_status(untracked_dir)
+
+
+def _make_plugin_host(
+    flags: argparse.Namespace,
+    write_status: Callable[[list[dict[str, str]]], object],
+    untracked_dir: Path,
+) -> PluginHost | None:
+    """Build the host's plugin registry from the flags, or None. Never raises.
+
+    No ``--plugin`` flag means no registry. An unexpected error while building
+    it also means none: the session starts without plugins rather than not at all.
+    """
+    if not flags.plugin:
+        return None
+    try:
+        return PluginHost(
+            flags.plugin,
+            write_status=write_status,
+            status_dir=untracked_dir,
+            marker_path=_plugin_marker_path(untracked_dir, os.getpid()),
+            disabled=flags.disable_plugin,
+        )
+    except Exception as error:
+        append_worker_error(f"plugin setup failed, starting without plugins: {error!r}")
+        return None
+
+
+def _make_worker_plugin_runtime(argv: Sequence[str], untracked_dir: Path) -> PluginRuntime | None:
+    """Build the ``--worker`` subprocess's plugin runtime from its argv, or None.
+
+    The host passed the loadable plugins (``--plugin``) and the disabled set
+    (``--disable-plugin``). The in-hook marker is keyed by the HOST's pid -- this
+    process's parent -- so the host can find it when this worker stops answering.
+    """
+    raw_specs, disabled = _parse_worker_plugin_flags(argv)
+    if not raw_specs:
+        return None
+    runtime = PluginRuntime(
+        state_root=_plugin_state_root(),
+        status_dir=untracked_dir,
+        marker_path=_plugin_marker_path(untracked_dir, os.getppid()),
+    )
+    specs: list[tuple[str, Path]] = []
+    for raw in raw_specs:
+        try:
+            parsed = parse_plugin_spec(raw)
+        except PluginLoadError as error:
+            append_worker_error(f"worker got an unusable --plugin value: {error.reason}")
+            continue
+        specs.append((parsed.name, parsed.path))
+    runtime.load(specs, disabled)
+    return runtime
+
+
+def _make_policy_worker(
+    dry_run: bool, plugin_host: PluginHost | None = None
+) -> PolicyWorker | None:
+    """Create + start the policy worker, or None (in-process) when opted out /
+    unstartable. Never raises — a worker problem must not break a launch."""
+    if os.environ.get(_NO_WORKER_ENV):
+        return None
+    worker = PolicyWorker(
+        _SELF_PATH,
+        dry_run=dry_run,
+        extra_argv=plugin_host.worker_argv if plugin_host is not None else None,
+    )
+    if not worker.start():
+        return None
+    return worker
+
+
+def _make_worker_decider(
+    worker: PolicyWorker, log: DecisionLog | None = None
+) -> Callable[[TickFacts], TickOutcome | None]:
+    """Return a per-tick decider that hot-reloads the worker on code change and
+    asks it to decide, returning None on any failure so the host falls back.
+
+    Plan 00361: a dead worker goes through ``WorkerCrashGuard`` -- respawned
+    once per source fingerprint and logged to ``decision.log``; a repeat death
+    on the same source is a crash loop, held to a backoff so the host's
+    in-process fallback carries the session instead of a respawn every tick.
+    """
+    last_reload_check = [0.0]
+    guard = WorkerCrashGuard()
+
+    def _record(line: str | None) -> None:
+        if line is not None and log is not None:
+            log.write(line)
+
+    def _decide(facts: TickFacts) -> TickOutcome | None:
+        # The death check runs BEFORE the staleness check so a worker that died
+        # on a now-changed source is logged as a death, not silently reloaded.
+        if not worker.alive():
+            respawn, line = guard.on_death(
+                dead_fingerprint=worker.source_fingerprint,
+                on_disk_fingerprint=worker.on_disk_fingerprint(),
+                exit_code=worker.exit_code(),
+                now=facts.now_wall,
+            )
+            _record(line)
+            if not respawn:
+                return None
+            if worker.restart() and not facts.input_line_empty:
+                append_worker_error(
+                    _WORKER_SWAP_DROPPED_LINE_TRACE.format(trigger="restarted (was not alive)")
+                )
+        if facts.now_wall - last_reload_check[0] >= _WORKER_RELOAD_CHECK_SECONDS:
+            last_reload_check[0] = facts.now_wall
+            if worker.reload_if_stale() and not facts.input_line_empty:
+                append_worker_error(
+                    _WORKER_SWAP_DROPPED_LINE_TRACE.format(trigger="reloaded (stale code)")
+                )
+        outcome = worker.decide(facts)
+        if outcome is not None:
+            _record(guard.on_answer(fingerprint=worker.source_fingerprint))
+        return outcome
+
+    return _decide
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

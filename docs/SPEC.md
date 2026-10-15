@@ -1,0 +1,597 @@
+# md-viewer specification
+
+This is the contract md-viewer is built to. Every numbered expectation is testable, and each
+gets a test that is seen to fail before the code that makes it pass is written
+([MILESTONES.md](MILESTONES.md) says which milestone builds which expectation). The package
+layout and public types are in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+Words used with a fixed meaning:
+
+- **dp** and **sp** are Gio's device-independent units (`unit.Dp`, `unit.Sp`). A CSS `px` in
+  GitHub's stylesheet is taken as 1 dp (lengths) or 1 sp (font sizes). At zoom 100% and a
+  display scale of 1, 1 dp is 1 pixel.
+- **em** is the font size of the element in question, as in CSS.
+- **content width** is the window width minus the left and right content padding (DOC-LAYOUT-1).
+- **stderr** and **stdout** are the process's standard error and standard output. Diagnostics go
+  to stderr; stdout carries only the `--help`, `--version` and `--time` output.
+
+## 1. Command line
+
+**CLI-1.** The program is invoked as `md-viewer [FLAGS] FILE`. Exactly one FILE is required.
+
+**CLI-2.** Flags are recognised anywhere among the arguments, before or after FILE. An
+argument `--` ends flag parsing: every later argument is a FILE operand, even if it begins
+with `-`. A lone `-` is a FILE operand (a file called `-`), not standard input.
+
+**CLI-3.** The flags are exactly these. Each is matched by its whole spelling; there are no
+abbreviations, no `=value` forms, and single-dash long forms (`-dark`) are unknown flags.
+
+| Flag           | Effect                                                                       |
+| -------------- | ---------------------------------------------------------------------------- |
+| `--dark`       | use the dark palette (STYLE-PAL-2)                                           |
+| `--time`       | print startup timings to stdout after the first frame, then exit 0 (SPEED-2) |
+| `--help`, `-h` | print the usage text (CLI-4) to stdout and exit 0; FILE is not needed        |
+| `--version`    | print the version line (CLI-5) to stdout and exit 0; FILE is not needed      |
+
+If both `--help` and `--version` are given, `--help` wins. Repeating a flag is allowed and has
+the same effect as giving it once.
+
+**CLI-4.** The usage text is exactly:
+
+```text
+Usage: md-viewer [--dark] [--time] FILE
+       md-viewer --help | --version
+
+Shows one Markdown file, rendered, in one window.
+
+  --dark     use the dark palette
+  --time     print startup timings after the first frame, then exit
+  --help     show this help
+  --version  show the version
+
+Scroll: wheel, arrows, Page Up/Down, Space, Home/End.
+Zoom: Ctrl and + or -, Ctrl+0 to reset, Ctrl and the wheel.
+Quit: q or Esc.
+```
+
+**CLI-5.** The version line is `md-viewer VERSION`, where VERSION is the main module version
+from `runtime/debug.ReadBuildInfo` (`v1.2.3` for a `go install …@v1.2.3` build). When that
+version is `(devel)` and the build info carries a `vcs.revision` setting, VERSION is
+`(devel) ` followed by the first 12 characters of the revision, and ` dirty` is appended when
+`vcs.modified` is `true`. When no build info is available VERSION is `unknown`.
+
+**CLI-6. Exit codes.**
+
+| Code | Meaning                                                                        |
+| ---- | ------------------------------------------------------------------------------ |
+| 0    | success: the window was closed by the user, or `--help`, `--version`, `--time` |
+| 1    | a runtime failure: the file cannot be read or is refused, or no window opened  |
+| 2    | a usage error: missing or extra FILE, an unknown flag                          |
+
+**CLI-7. Usage errors** print one line to stderr, then the line
+`Run 'md-viewer --help' for usage.`, and exit 2. The first line is exactly:
+
+| Condition         | Message                                           |
+| ----------------- | ------------------------------------------------- |
+| no FILE           | `md-viewer: missing FILE argument`                |
+| two or more FILEs | `md-viewer: expected one FILE, got N` (N counted) |
+| unknown flag      | `md-viewer: unknown flag: ARG` (ARG as typed)     |
+
+When several usage errors apply, the first unknown flag (in argument order) is reported;
+otherwise the FILE count error.
+
+**CLI-8. File errors** print one line to stderr and exit 1. PATH is the FILE argument exactly
+as typed.
+
+| Condition                                   | Message                                                           |
+| ------------------------------------------- | ----------------------------------------------------------------- |
+| the file cannot be opened or read           | `md-viewer: cannot read PATH: REASON`                             |
+| PATH is a directory                         | `md-viewer: cannot read PATH: is a directory`                     |
+| the file is larger than 64 MiB (67108864 B) | `md-viewer: PATH is too large: SIZE bytes, the limit is 67108864` |
+| the file contains a NUL byte                | `md-viewer: PATH is not a text file: it contains a NUL byte`      |
+
+REASON is the text of the operating system error underneath the `*fs.PathError` (for a missing
+file, `no such file or directory`; for a permission failure, `permission denied`). The size is
+checked with `Stat` before reading, so a huge file is refused without being read.
+
+**CLI-9.** If the window cannot be opened (no display, no GPU driver), md-viewer prints
+`md-viewer: cannot open a window: REASON` to stderr and exits 1, where REASON is the error Gio
+reports.
+
+**CLI-10.** The file extension is not checked: any text file is shown as Markdown.
+
+**CLI-11.** md-viewer reads no configuration file, no environment variable of its own, and no
+standard input.
+
+## 2. Document model
+
+The document model (`internal/doc`) is a typed tree produced from goldmark's AST. It holds no
+goldmark types, so the render layer depends on md-viewer's own types only. Types are listed in
+[ARCHITECTURE.md](ARCHITECTURE.md#internaldoc).
+
+**DOC-1.** Parsing uses goldmark with the GFM extension set: tables, strikethrough, linkify and
+task lists (`extension.GFM`). No other extension is enabled, so footnotes, definition lists,
+emoji shortcodes, typographer quotes and heading attributes are not interpreted; their source
+text appears as ordinary text.
+
+**DOC-2.** Every block in the goldmark AST maps to exactly one model block, except as stated in
+DOC-9 (HTML) and DOC-11 (images). A goldmark node kind with no mapping is a programming error:
+the conversion returns an error naming the kind, and a test covers every kind that GFM can
+produce, so that error is unreachable in practice.
+
+**DOC-3. Inline text is flattened into runs.** A paragraph, heading, or table cell holds a list
+of runs. A run is a string with a style set and an optional link:
+
+- style flags: `Emphasis`, `Strong`, `Strike`, `Code`; nested markup combines flags
+  (`***x***` is `Emphasis|Strong`);
+- adjacent text with identical style and link is merged into one run;
+- a soft line break becomes one space;
+- a hard line break (two trailing spaces or a trailing backslash) becomes a run of kind
+  `Break`, which carries no text;
+- in runs without `Code`, every sequence of spaces and tabs collapses to one space (as HTML
+  does); in `Code` runs spaces are kept as written, and a tab becomes one space;
+- leading and trailing spaces of a paragraph, heading or cell are removed.
+
+**DOC-4. Links.** A link run's link holds the destination as written. `[text](dest)` gives the
+runs of `text` with the link `dest`; an autolink `<https://…>` and a bare URL found by linkify
+give one run whose text is the URL and whose link is the URL; an email autolink gives the text
+`someone@example.com` and the link `mailto:someone@example.com`.
+
+**DOC-5. Link targets.** `doc.ResolveLink(docDir, dest)` classifies a destination:
+
+| Destination                                            | Target kind | Target value                                                                                                                                       |
+| ------------------------------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| scheme `http`, `https` or `mailto` (case-insensitive)  | `External`  | the destination unchanged                                                                                                                          |
+| scheme `file`                                          | `LocalFile` | the URL's path, cleaned                                                                                                                            |
+| no scheme, not starting with `#`                       | `LocalFile` | `docDir` joined with the path part, cleaned; an absolute path is kept as is; the `#fragment` and `?query` are dropped; percent-escapes are decoded |
+| starting with `#`                                      | `Fragment`  | the destination unchanged                                                                                                                          |
+| any other scheme, or a destination that fails to parse | `Refused`   | the destination unchanged                                                                                                                          |
+
+**DOC-6. Headings.** ATX and setext headings both map to `Heading` with level 1 to 6 and runs.
+
+**DOC-7. Code blocks.** Fenced and indented code blocks both map to `CodeBlock`. Its text is
+the lines exactly as goldmark gives them, with tabs expanded to the next multiple of 8 columns
+and the final newline removed. The fence's info string is kept as `Lang` (first word only) but
+changes nothing in rendering.
+
+**DOC-8. Lists.** Ordered and unordered lists map to `List` with `Ordered`, `Start` (the first
+number of an ordered list; 1 for unordered), `Tight` (goldmark's `IsTight`) and items. Each
+item holds its child blocks and a task state: `NotTask`, `Open` (`[ ]`) or `Done` (`[x]` or
+`[X]`). The checkbox is removed from the item's text. In a tight list goldmark's `TextBlock`
+maps to `Paragraph`, and the list's `Tight` flag decides the spacing (STYLE-LIST-4).
+
+**DOC-9. HTML is dropped.** HTML blocks (including comments) and inline raw HTML produce no
+model content. The text between inline tags is ordinary Markdown text and is kept
+(`a <span>b</span> c` gives the text `a b c`). The model counts what it dropped in
+`Document.DroppedHTML`, and md-viewer prints one line to stderr when that count is not zero:
+`md-viewer: N HTML fragment(s) not shown: HTML is not rendered`.
+
+**DOC-10. Tables.** A GFM table maps to `Table` with one alignment per column (`Left`,
+`Centre`, `Right`, `None`), a header row and body rows, each cell holding runs. Rows shorter
+than the header are padded with empty cells; GFM already drops extra cells.
+
+**DOC-11. Images.** An image is laid out as a block of its own. A paragraph containing images
+is split at each image into: the paragraph of the runs before it (omitted when empty), an
+`Image` block, the paragraph of the runs after it (omitted when empty), and so on. An `Image`
+holds its `Alt` text (the image's inline content flattened to plain text), its destination as
+written, its `Target` (DOC-5) and, when it is a link's content (`[![alt](img)](href)`), the
+link. An image inside a heading or a table cell is replaced by its alt text as a plain run.
+
+**DOC-12. Block quotes, rules.** A block quote maps to `Quote` holding its child blocks; a
+thematic break maps to `Rule`.
+
+**DOC-13. Loading.** `doc.Load(path)` applies CLI-8's checks in that order (stat, directory,
+size, read, NUL) and returns typed errors that the CLI turns into the messages of CLI-8.
+`Document.Dir` is the absolute directory of the file, and `Document.Name` its base name.
+
+**DOC-14.** Parsing is deterministic: the same bytes give a model that is `reflect.DeepEqual`
+to the last one.
+
+**DOC-15.** Invalid UTF-8 is not an error. goldmark passes the bytes through; the render layer
+shows each invalid byte as U+FFFD.
+
+## 3. Rendering in GitHub style
+
+The look follows GitHub's published Markdown stylesheet, **github-markdown-css v5.9.0** by
+Sindre Sorhus (MIT), the files `github-markdown-light.css` and `github-markdown-dark.css` at
+<https://github.com/sindresorhus/github-markdown-css/tree/v5.9.0>. The CSS selector each value
+comes from is cited beside it, so a later version can be compared rule by rule. Where md-viewer
+departs from the stylesheet, the expectation says so and why.
+
+### 3.1 Palettes
+
+**STYLE-PAL-1.** The palette has these named colours. `#RRGGBBAA` has alpha last, as in CSS.
+
+| Name          | Light       | Dark        | Source (light file)                                                                      |
+| ------------- | ----------- | ----------- | ---------------------------------------------------------------------------------------- |
+| `Fg`          | `#1f2328`   | `#f0f6fc`   | `.markdown-body { color }`                                                               |
+| `Canvas`      | `#ffffff`   | `#0d1117`   | `.markdown-body { background-color }`                                                    |
+| `FgMuted`     | `#59636e`   | `#9198a1`   | `h6 { color }`, `blockquote { color }`                                                   |
+| `Accent`      | `#0969da`   | `#4493f8`   | `a { color }`                                                                            |
+| `Border`      | `#d1d9e0`   | `#3d444d`   | `table th, table td { border }`, `hr { background-color }`, `blockquote { border-left }` |
+| `BorderMuted` | `#d1d9e0b3` | `#3d444db3` | `h1, h2 { border-bottom }`                                                               |
+| `BgMuted`     | `#f6f8fa`   | `#151b23`   | `pre { background-color }`, `tr:nth-child(2n)`                                           |
+| `CodeBg`      | `#818b981f` | `#656c7633` | `code, tt { background-color }`                                                          |
+| `OnAccent`    | `#ffffff`   | `#ffffff`   | md-viewer's own: the check mark on a done task box                                       |
+
+**STYLE-PAL-2.** The light palette is used unless `--dark` is given. Gio v0.10.3 exposes no
+system colour-scheme setting (its `app` package has no such event or query), so md-viewer does
+not follow the desktop's light or dark preference. See "Decisions for the owner" in
+[MILESTONES.md](MILESTONES.md).
+
+**STYLE-PAL-3.** The whole window, outside and inside the content, is filled with `Canvas`.
+
+### 3.2 Fonts
+
+**STYLE-FONT-1.** Text uses the Go fonts embedded in the binary (`golang.org/x/image/font/gofont`):
+Go Regular, Go Italic, Go Bold and Go Bold Italic for text, and Go Mono and Go Mono Bold for
+code. Exactly these six faces are loaded, and no system font is looked up
+(`text.NoSystemFonts()`). GitHub's stack (`-apple-system, "Segoe UI", "Noto Sans", …`) needs
+system fonts, which cost a font scan at start (SPEED-4); the Go fonts are the substitute.
+
+**STYLE-FONT-2.** Characters the Go fonts lack (emoji, CJK, most symbols) are drawn as the
+font's missing-glyph box. This is a known cost of STYLE-FONT-1.
+
+**STYLE-FONT-3.** `Strong` uses the Bold face. GitHub asks for weight 600 (`b, strong`,
+`h1`…`h6`); the Go fonts have 400 and 700 only, so 700 is used. Headings are Bold.
+
+**STYLE-FONT-4.** `Emphasis` uses the Italic face; `Emphasis|Strong` uses Bold Italic. `Code`
+uses Go Mono (Go Mono Bold when also `Strong`; Go Mono has no italic in this set, so `Code`
+with `Emphasis` is upright).
+
+### 3.3 Page layout and spacing
+
+**DOC-LAYOUT-1. Content padding.** The content is inset from the window edges by 45 dp on all
+four sides when the window is at least 768 dp wide (after zoom, STYLE-ZOOM-3), and 15 dp when
+it is narrower. Source: github-markdown-css's README recommends
+`.markdown-body { padding: 45px }` with `padding: 15px` under `max-width: 767px`.
+
+**DOC-LAYOUT-2. No maximum width.** The content fills the window's width minus the padding.
+GitHub caps the column at 980 px; md-viewer does not, because it wraps to the window
+(WRAP-1).
+
+**DOC-LAYOUT-3. Block spacing.** Each block has a top and a bottom margin. The space between
+two consecutive blocks is the larger of the first block's bottom margin and the second block's
+top margin (CSS margin collapsing). The first block of the document, of a quote and of a list
+item has a top margin of 0; the last has a bottom margin of 0 (`.markdown-body>*:first-child`,
+`>*:last-child`, `blockquote>:first-child`, `blockquote>:last-child`).
+
+**DOC-LAYOUT-4. Margins.**
+
+| Block                      | Top   | Bottom | Source                                                                   |
+| -------------------------- | ----- | ------ | ------------------------------------------------------------------------ |
+| Paragraph                  | 0     | 16 dp  | `p, blockquote, ul, ol, dl, table, pre, details { margin-bottom: 1rem }` |
+| Heading (all levels)       | 24 dp | 16 dp  | `h1, …, h6 { margin-top: 1.5rem; margin-bottom: 1rem }`                  |
+| Quote                      | 0     | 16 dp  | as Paragraph                                                             |
+| List (top level)           | 0     | 16 dp  | as Paragraph                                                             |
+| List nested in a list item | 0     | 0      | `ul ul, ul ol, ol ol, ol ul { margin-top: 0; margin-bottom: 0 }`         |
+| Code block                 | 0     | 16 dp  | as Paragraph                                                             |
+| Table                      | 0     | 16 dp  | as Paragraph                                                             |
+| Rule                       | 24 dp | 24 dp  | `hr { margin: 1.5rem 0 }`                                                |
+| Image                      | 0     | 16 dp  | it sits in a paragraph, so a paragraph's margins                         |
+
+`1rem` is 16 dp; it does not change with the element's own font size.
+
+### 3.4 Text
+
+**STYLE-TEXT-1. Body text** is 16 sp, colour `Fg`, line height 1.5 × font size
+(`.markdown-body { font-size: 16px; line-height: 1.5 }`).
+
+**STYLE-TEXT-2. Headings.**
+
+| Level | Size    | Line height | Padding below | Rule below          | Colour    |
+| ----- | ------- | ----------- | ------------- | ------------------- | --------- |
+| 1     | 32 sp   | 1.25        | 9.6 dp (.3em) | 1 dp, `BorderMuted` | `Fg`      |
+| 2     | 24 sp   | 1.25        | 7.2 dp (.3em) | 1 dp, `BorderMuted` | `Fg`      |
+| 3     | 20 sp   | 1.25        | 0             | none                | `Fg`      |
+| 4     | 16 sp   | 1.25        | 0             | none                | `Fg`      |
+| 5     | 14 sp   | 1.25        | 0             | none                | `Fg`      |
+| 6     | 13.6 sp | 1.25        | 0             | none                | `FgMuted` |
+
+Sources: `h1 { font-size: 2em; padding-bottom: .3em; border-bottom: 1px solid }`,
+`h2 { font-size: 1.5em; … }`, `h3 { 1.25em }`, `h4 { 1em }`, `h5 { .875em }`,
+`h6 { .85em; color }`, `h1, …, h6 { line-height: 1.25 }`. The rule spans the full content
+width, directly under the padding.
+
+**STYLE-TEXT-3. Links** are drawn in `Accent`, with no underline, keeping their other style
+flags. The pointer turns into the hand cursor (`pointer.CursorPointer`) over a link
+(`a { color; text-decoration: none }`). GitHub underlines on hover; md-viewer does not track
+hover.
+
+**STYLE-TEXT-4. Strikethrough** draws a line through the run, in the run's colour, at
+0.3 em above the baseline, max(1 dp, size ÷ 16) thick, across the run's width.
+
+**STYLE-TEXT-5. Inline code** is Go Mono at 85% of the surrounding font size (13.6 sp in body
+text), colour unchanged, on a `CodeBg` rounded rectangle with a 6 dp corner radius. The
+rectangle extends 0.2 em above and below the glyph line box without changing the line height,
+and 0.4 em to the left and right, and this horizontal padding is part of the run's width
+(`code, tt { padding: .2em .4em; font-size: 85%; background-color; border-radius: 6px }`).
+Inside a heading the code is 100% of the heading size with 0.2 em horizontal padding and none
+vertical (`h1 code, … { padding: 0 .2em; font-size: inherit }`). When a code run wraps across
+lines, each line's fragment gets its own rectangle.
+
+**STYLE-TEXT-6.** Text is aligned to the start (left). Paragraph text does not hyphenate.
+
+### 3.5 Blocks
+
+**STYLE-CODE-1. Code blocks** (fenced and indented, the same) are Go Mono at 13.6 sp (85% of
+16), colour `Fg`, line height 1.45, on a `BgMuted` rounded rectangle with a 6 dp radius that
+spans the full content width, with 16 dp padding on all sides (`pre { padding: 1rem; font-size: 85%; line-height: 1.45; background-color; border-radius: 6px }`). No syntax
+highlighting is done; `Lang` is ignored.
+
+**STYLE-CODE-2. Code lines wrap.** A code line longer than the box's inner width wraps at the
+character that would overflow (`text.WrapGraphemes`). GitHub instead scrolls a code block
+sideways (`pre { overflow: auto; word-wrap: normal }`); md-viewer has no horizontal scrolling,
+so it wraps.
+
+**STYLE-QUOTE-1. Quotes** draw a 4 dp wide bar (`.25em` of 16) in `Border` down their full
+height at the left edge, and lay out their child blocks with 20 dp of left inset (the bar plus
+16 dp padding) and 16 dp of right inset. Text inside a quote is drawn in `FgMuted`, except
+links (`Accent`) and code blocks (`Fg`), which set their own colour
+(`blockquote { padding: 0 1em; color; border-left: .25em solid }`). Nested quotes nest.
+
+**STYLE-RULE-1. A rule** is a 4 dp tall bar (`.25em`) in `Border` across the full content
+width (`hr { height: .25em; background-color; border: 0 }`).
+
+### 3.6 Lists
+
+**STYLE-LIST-1.** A list indents its items' content by 32 dp from the list's left edge
+(`ul, ol { padding-left: 2em }`); nested lists indent again from their item's content edge.
+
+**STYLE-LIST-2. Unordered markers** are shapes drawn with clip operations, not glyphs (the Go
+fonts lack ◦ and ▪), centred horizontally 11 dp left of the item's content edge and vertically
+at the first line's baseline minus 0.27 × the item's font size:
+
+| Nesting depth (lists around this one) | Marker                                           |
+| ------------------------------------- | ------------------------------------------------ |
+| 0                                     | filled circle, 5 dp diameter, colour `Fg`        |
+| 1                                     | circle outline, 5 dp diameter, 1 dp stroke, `Fg` |
+| 2 or more                             | filled square, 5 dp side, `Fg`                   |
+
+These are the browser defaults for `disc`, `circle`, `square`, which github-markdown-css does
+not change for unordered lists. Depth counts ordered and unordered lists alike.
+
+**STYLE-LIST-3. Ordered markers** are text in the item's font and colour, the number followed
+by `.`, right-aligned so that the marker's right edge is 4 dp left of the item's content edge,
+on the first line's baseline. Numbering starts at `Start` and counts up. The numbering style
+depends on the depth (lists around this one, ordered or not): depth 0 decimal (`1.`), depth 1
+lower-roman (`i.`), depth 2 or more lower-alpha (`a.`; after `z.` comes `aa.`)
+(`ol ol, ul ol { list-style-type: lower-roman }`, `ul ul ol, ul ol ol, ol ul ol, ol ol ol { list-style-type: lower-alpha }`).
+
+**STYLE-LIST-4. Item spacing.** In a tight list, consecutive items are 4 dp apart
+(`li+li { margin-top: .25em }`) and the paragraphs of an item have no margins. In a loose
+list, consecutive items are 16 dp apart and paragraphs inside an item keep their 16 dp bottom
+margin (`li>p { margin-top: 1rem }`, collapsed with the paragraph margins).
+
+**STYLE-LIST-5. Task items** draw no bullet. A 13 dp square box sits with its left edge 22 dp
+left of the item's content edge, centred vertically on the first line's baseline minus 0.35 ×
+font size, with a 3 dp corner radius (`.task-list-item { list-style-type: none }`,
+`.task-list-item-checkbox { margin: 0 .2em .25em -1.4em }`; 13 dp is the browser's checkbox
+size). An `Open` box is filled `Canvas` with a 1 dp `FgMuted` border. A `Done` box is filled
+`Accent` with no border and a check mark in `OnAccent`: a 1.5 dp stroked polyline through the
+points (3, 6.5), (5.5, 9), (10, 4) dp relative to the box's top-left corner. Boxes are not
+interactive. A list item that is a task in a list that also has non-task items is still drawn
+as a task item, and the others keep their bullets.
+
+### 3.7 Tables
+
+**STYLE-TABLE-1. Cells** have 6 dp vertical and 13 dp horizontal padding and a 1 dp `Border`
+line on every edge; adjacent cells share one line (`table th, table td { padding: 6px 13px; border: 1px solid }`, `border-collapse: collapse`).
+
+**STYLE-TABLE-2. The header row** is Bold. Its background is `Canvas`.
+
+**STYLE-TABLE-3. Body rows** alternate: the 2nd, 4th, 6th … body row (counting from 1) is
+filled `BgMuted`, the others `Canvas` (`table tr { background-color }`,
+`table tr:nth-child(2n) { background-color }`; the header row is in its own `thead`, so the
+count restarts in `tbody`).
+
+**STYLE-TABLE-4. Alignment.** A column marked `Left`, `Centre` or `Right` aligns every cell's
+text that way. A column marked `None` aligns body cells left and header cells centred: the
+browser's default for `th`, which github-markdown-css does not override.
+
+**STYLE-TABLE-5. Column widths.** Let W be the content width, and for each column let N be its
+natural width: the widest of its cells laid out on one line, plus 26 dp padding and 1 dp of
+border. If the sum of N fits in W, each column is N wide and the table is that sum wide,
+left-aligned (`table { width: max-content; max-width: 100% }`). Otherwise each column is
+max(64 dp, N × W ÷ ΣN) wide and cell text wraps. If the 64 dp minimums still exceed W, the
+table is clipped at the content's right edge. GitHub scrolls a too-wide table sideways;
+md-viewer has no horizontal scrolling.
+
+**STYLE-TABLE-6.** A row's height is its tallest cell. Cell text is vertically aligned to the
+top of the cell.
+
+### 3.8 Images
+
+**STYLE-IMG-1. Local PNG and JPEG images** are shown. The destination is resolved with DOC-5;
+only `LocalFile` targets whose decoded format is `png` or `jpeg` are drawn.
+
+**STYLE-IMG-2. Size.** One image pixel is one dp, so the image follows the zoom. An image wider
+than the content width is scaled down, keeping its aspect ratio, to the content width
+(`img { max-width: 100% }`). Images are never scaled up. An image is left-aligned.
+
+**STYLE-IMG-3. Placeholder.** An image that is not drawn (remote, missing, unreadable, another
+format, or failed to decode) is shown as its alt text, or its destination when the alt text is
+empty, in Italic `FgMuted` body text inside a 1 dp `Border` rectangle with 8 dp padding.
+md-viewer prints one line per such image to stderr:
+`md-viewer: image not shown: DEST: REASON`, where REASON is `remote images are not loaded`,
+`unsupported format`, or the operating system or decoder error.
+
+**STYLE-IMG-4. Linked images.** An image that is a link's content is clickable like a link
+(LINK-1), and shows the hand cursor.
+
+**STYLE-IMG-5.** Before an image's pixels are decoded (SPEED-5) its box is drawn at its final
+size, filled `BgMuted`, so the layout does not move when the pixels arrive.
+
+## 4. Links
+
+**LINK-1.** A primary-button click on a link (press and release on the same link) acts on its
+target (DOC-5):
+
+| Target kind | Action                                                                                                            |
+| ----------- | ----------------------------------------------------------------------------------------------------------------- |
+| `External`  | open it with the platform opener (`xdg-open URL` on Linux)                                                        |
+| `LocalFile` | if the file exists, open it with the opener; otherwise print `md-viewer: link target not found: PATH`             |
+| `Fragment`  | nothing is opened; print `md-viewer: in-page links are not followed: DEST`                                        |
+| `Refused`   | nothing is opened; print `md-viewer: link not opened: DEST: only http, https, mailto and local files are allowed` |
+
+**LINK-2.** The opener is started with `exec.CommandContext`, with the target as a separate
+argument and no shell. md-viewer does not wait for it before drawing the next frame; it waits
+in a goroutine and, if the opener cannot start or exits non-zero, prints
+`md-viewer: cannot open link: TARGET: REASON` to stderr. A failed link never ends the program.
+
+**LINK-3.** A `LocalFile` Markdown link opens through the opener like any other file, so the
+desktop's default application for Markdown handles it (which may be md-viewer itself).
+
+## 5. Scrolling
+
+**SCROLL-1.** The document scrolls vertically only. Only the blocks visible in the window are
+laid out in a frame (`layout.List`).
+
+**SCROLL-2. Keys.** A key acts on press, not release.
+
+| Key                   | Moves the view                                                |
+| --------------------- | ------------------------------------------------------------- |
+| Down arrow / Up arrow | down / up by 40 dp                                            |
+| Page Down / Page Up   | down / up by the viewport height minus 40 dp (at least 40 dp) |
+| Space / Shift+Space   | as Page Down / Page Up                                        |
+| Home / End            | to the top / to the bottom                                    |
+
+The distances are in dp, so they scale with the zoom. Scrolling stops at the top and at the
+bottom; it cannot move past either.
+
+**SCROLL-3. Wheel.** A vertical scroll event without Ctrl moves the view by the event's
+`Scroll.Y` in pixels, as Gio reports it (Gio reports 100 px per wheel notch on Wayland and
+10 px on X11). Horizontal scroll events are ignored.
+
+**SCROLL-4. Scrollbar.** A vertical scrollbar is drawn at the right edge (`material.List`
+with `material.Scrollbar`), and dragging its indicator scrolls the document.
+
+## 6. Zoom
+
+**ZOOM-1. Levels.** The zoom is one of these percentages: 50, 67, 75, 80, 90, 100, 110, 125,
+150, 175, 200, 250, 300. It starts at 100.
+
+**ZOOM-2. Controls.**
+
+| Input                               | Effect            |
+| ----------------------------------- | ----------------- |
+| Ctrl and `+` or `=` (Shift allowed) | next higher level |
+| Ctrl and `-`                        | next lower level  |
+| Ctrl and `0`                        | 100               |
+| Ctrl and a vertical wheel scroll    | see ZOOM-4        |
+
+At 300 a further zoom in, and at 50 a further zoom out, does nothing.
+
+**STYLE-ZOOM-3. Zoom scales everything inside the content area**: every dp and sp of the
+document, including the padding (DOC-LAYOUT-1), the scroll distances (SCROLL-2) and images. It
+is applied by multiplying the frame's `unit.Metric` (`PxPerDp` and `PxPerSp`) by the zoom
+factor. Gio's window decorations are not zoomed.
+
+**ZOOM-4. Ctrl+wheel.** Each vertical scroll event with Ctrl held adds its `Scroll.Y` to an
+accumulator. When the accumulator reaches −10 px or less the zoom goes one level up; at +10 px
+or more, one level down; the accumulator is then reset to 0. One event changes the zoom by at
+most one level. Ctrl+wheel never scrolls.
+
+**ZOOM-5. Reading position.** A zoom change keeps the block at the top of the view at the top,
+and scales its offset into that block by the ratio of the new zoom to the old.
+
+## 7. Word wrap
+
+**WRAP-1.** Text wraps at word boundaries to the content width (`text.WrapWords`). A word
+longer than the line breaks at a character instead. No text is clipped or scrolled sideways,
+except a too-wide table (STYLE-TABLE-5).
+
+**WRAP-2.** Resizing the window re-wraps all text in the next frame.
+
+## 8. Window
+
+**WIN-1. Title.** The window title is `NAME - md-viewer`, where NAME is the file's base name.
+
+**WIN-2. Size.** The window opens at 980 × 900 dp, and cannot be made smaller than
+320 × 240 dp.
+
+**WIN-3. One window, one file.** md-viewer opens exactly one window showing exactly the one
+FILE. It never opens another window or another file itself (LINK-3 hands files to the opener).
+
+**WIN-4. Quit.** `q` (no Ctrl, Alt or Super; with or without Shift) and `Esc` close the window
+and exit 0. Closing the window by the window manager exits 0.
+
+**WIN-5. No editing.** Nothing in the window changes the file, and there is no text cursor,
+selection or clipboard.
+
+**WIN-6. Wayland app ID.** The Wayland `app_id` and X11 class are `md-viewer` (Gio's default,
+the executable's base name).
+
+## 9. Speed
+
+The targets are measured on the owner's desktop, which has a display. The development
+container has none, and a virtual display (Xvfb with Mesa's software renderer) is too unlike a
+real one to measure against, so container and CI numbers are recorded as information, never
+judged against the targets.
+
+**SPEED-1. Work before the window.** Before the window is created, md-viewer parses its
+arguments, stats and reads the file, parses it into the document model, reads each local
+image's header (`image.DecodeConfig`, for its size), and loads the six font faces. Nothing else
+happens before the window opens.
+
+**SPEED-2. `--time`.** With `--time`, after the first frame has been submitted (the first
+`FrameEvent.Frame` call has returned), md-viewer prints exactly one line to stdout:
+
+```text
+read_ms=0.4 parse_ms=12.3 fonts_ms=6.1 first_frame_ms=88.0
+```
+
+`read_ms`, `parse_ms` and `fonts_ms` are the durations of those steps; `first_frame_ms` is the
+time from the first statement of `main` to the end of the first frame. Each value has one
+decimal place. md-viewer then closes the window and exits 0. The time before `main` (exec,
+dynamic linking, Go runtime start) is not included; the wall-clock measurement (SPEED-7)
+includes it.
+
+**SPEED-3. Targets.** Release build (`go build -trimpath`), on the owner's desktop under
+GNOME on Wayland, median of 10 runs:
+
+| Measure                                                      | Target     |
+| ------------------------------------------------------------ | ---------- |
+| `first_frame_ms` for `testdata/elements.md`                  | ≤ 120 ms   |
+| `first_frame_ms` for `testdata/large.md`                     | ≤ 150 ms   |
+| wall clock of `md-viewer --time testdata/large.md` (SPEED-7) | ≤ 250 ms   |
+| `BenchmarkParseLarge` (read excluded)                        | ≤ 25 ms/op |
+| `BenchmarkFirstViewportLarge`                                | ≤ 15 ms/op |
+| `BenchmarkLoadFonts`                                         | ≤ 10 ms/op |
+
+A target that is missed is reported to the owner with the measured number; it is not quietly
+moved.
+
+**SPEED-4. Fonts.** No system font scan, no font cache file, no fontconfig: the six embedded
+faces only (STYLE-FONT-1).
+
+**SPEED-5. Images.** An image's pixels are decoded only when its block first becomes visible,
+in a goroutine, one image at a time; the window is invalidated when it is ready. The first
+frame never waits for image pixels.
+
+**SPEED-6. Nothing else.** No `init` functions with work in md-viewer's packages, no
+background goroutines other than image decoding and the link opener's wait, no network, no
+D-Bus, no file watching, no configuration reads.
+
+**SPEED-7. Benchmarks and measurement.** Go benchmarks in the repository measure parse, first
+viewport layout and font loading on `testdata/large.md` (ARCHITECTURE "Benchmarks"). The owner
+measures wall clock with
+`hyperfine --warmup 3 --runs 20 'md-viewer --time testdata/large.md'`.
+
+## 10. Non-goals
+
+md-viewer will not have, and a change adding any of these is out of scope:
+
+- editing, a text cursor, selection, copy to clipboard;
+- syntax highlighting;
+- tabs, more than one window, more than one file, a file picker, a recent-files list;
+- live reload or watching the file for changes;
+- search, a table of contents, heading anchors, following in-page `#` links;
+- rendering HTML, math, Mermaid or other diagrams, footnotes, GitHub alerts (`> [!NOTE]` is an
+  ordinary quote), emoji shortcodes;
+- loading remote images or anything else from the network;
+- horizontal scrolling;
+- printing, export, PDF;
+- font, colour or size settings, configuration files;
+- reading from standard input;
+- following the desktop's dark-mode setting (STYLE-PAL-2), unless the owner decides otherwise.

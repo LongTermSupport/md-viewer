@@ -1,0 +1,14 @@
+# Claude Code Hooks Daemon
+.claude/hooks-daemon/
+.CLAUDE.md.pre-inject
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+untracked/
+
+# Protected paths: contents must never be read or committed
+*.secret*
+.vault-pass*
+*.vault-password
+*vault_pass*
+id_rsa
+id_ed25519
