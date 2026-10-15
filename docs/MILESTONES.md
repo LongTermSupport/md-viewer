@@ -392,6 +392,8 @@ The tests are in `trace_test.go` and `flow_test.go`, 16 in all: `TestTraceAdd`, 
 - `TestFlowWrapsToWidth`: a 60-word paragraph at 800 px and at 200 px: the second is taller,
   and at each width every `Glyphs` mark's `Rect.Max.X` is ≤ the width.
 - `TestFlowLongWord`: a 300-character word at 200 px breaks across lines, none wider than 200.
+  After `ab ` and the same word, the first line is exactly `ab ` (a word boundary breaks first,
+  and the long word breaks only on a line of its own).
 - `TestFlowLineHeight`: one line of body text is 24 px tall (16 × 1.5); two lines are 48.
 - `TestFlowBreakRun`: `a`, `BreakRun`, `b` gives two lines even at 800 px.
 - `TestFlowCodeBackground`: a code run gives one `CodeBg` mark in `CodeBg` colour whose
