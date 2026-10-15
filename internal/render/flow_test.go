@@ -1000,6 +1000,36 @@ func TestFlowAlignUnknown(t *testing.T) {
 	}
 }
 
+// TestFlowAbandonAligned: an error after an aligned line has opened its recording is returned
+// with no dimensions, and leaves no macro open. A macro left open swallows every later operation
+// on the same ops, so a link laid out after the error must still be clickable (STYLE-TABLE-4).
+func TestFlowAbandonAligned(t *testing.T) {
+	e := newFlowEnv(t, 200)
+	e.fp.align = alignCentre
+	dims, err := layoutFlow(e.context(), e.fp, []doc.Run{plain("a"), {Kind: doc.RunKind(9)}}, &Trace{})
+	if err == nil {
+		t.Fatal("run kind 9 after an aligned line: no error")
+	}
+	if dims != (layout.Dimensions{}) {
+		t.Fatalf("run kind 9 after an aligned line: dimensions %+v with an error", dims)
+	}
+	// No reset between these steps: the link must be laid out on the ops the error left behind.
+	tg := &doc.Target{Kind: doc.External, Value: "https://e.org/"}
+	runs := []doc.Run{linkRun("l", tg)}
+	e.trace(runs)
+	e.router.Frame(&e.ops)
+	if early, polled := e.fp.links.clicked(e.context()); polled {
+		t.Fatalf("a poll with no input reported %+v", early)
+	}
+	tr := e.trace(runs)
+	e.router.Frame(&e.ops)
+	la := needMarks(t, tr, MarkLinkArea, "LinkArea")[0]
+	e.router.Queue(move(centre(la.Rect)), press(centre(la.Rect)), release(centre(la.Rect)))
+	if got, ok := e.fp.links.clicked(e.context()); !ok || got != *tg {
+		t.Fatalf("click after an abandoned flow = %+v, %t; want the link's target and true", got, ok)
+	}
+}
+
 // TestFlowZeroGlyphs: a fragment with no glyphs is an error, not a silent skip, so a rune that
 // shapes to nothing cannot stall textRun's loop. No input shapes to nothing in this font, so
 // the check is called directly.
