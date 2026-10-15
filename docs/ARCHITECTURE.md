@@ -209,7 +209,8 @@ func BodyStyle(p Palette) TextStyle
 func HeadingStyle(level int, p Palette) (TextStyle, HeadingRule, error) // STYLE-TEXT-2
 // RunStyle keeps base.LineHeight for every run, so a code run never changes the line (F6).
 func RunStyle(base TextStyle, s doc.Style, link bool, p Palette, inHeading bool) TextStyle
-// Margins: nested affects the List row only (F7); a block type with no row is an error (F3).func Margins(b doc.Block, nested bool) (top, bottom unit.Dp, err error) // DOC-LAYOUT-4
+// Margins: nested affects the List row only (F7); a block type with no row is an error (F3).
+func Margins(b doc.Block, nested bool) (top, bottom unit.Dp, err error) // DOC-LAYOUT-4
 func Gap(prevBottom, nextTop unit.Dp) unit.Dp                           // DOC-LAYOUT-3
 func Padding(windowWidth unit.Dp) unit.Dp                               // DOC-LAYOUT-1
 // OrderedMarker: n below 1 or a roman numeral above 3999 prints decimal (F8).
