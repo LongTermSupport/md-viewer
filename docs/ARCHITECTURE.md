@@ -220,8 +220,10 @@ func BulletShape(depth int) Bullet      // STYLE-LIST-2, M6 (F2)
 // clipped in M7 (F9).
 func ColumnWidths(natural []int, width int, minCol int) []int // STYLE-TABLE-5
 
-// Trace records what layout drew, in pixels relative to the block's top-left corner.
-// The view keeps one per visible block; tests read it to assert structure.
+// Trace records what layout drew. Its origin is the top-left corner of what the trace was made
+// for: the flow's in a flow trace, the list element's (gap and padding included) in a View
+// trace. Nested layout translates by its origin (push and pop), so a sub-layout records in the
+// coordinates of the trace it was given. Tests read it to assert structure.
 type Trace struct{ Marks []Mark }
 type Mark struct {
 	Kind   MarkKind        // MarkGlyphs, MarkCodeBg, MarkCodeBlockBg, MarkHeadingRule, MarkQuoteBar, MarkRuleBar,
@@ -237,11 +239,16 @@ type Mark struct {
 // View lays out one document. It owns the per-link click state and the image cache,
 // so it lives as long as the window.
 type View struct{ /* unexported */ }
-func NewView(d *doc.Document, sh *text.Shaper, p Palette, img *Images) *View
+func NewView(d *doc.Document, sh *text.Shaper, p Palette) *View // M5; M8 adds img *Images
 func (v *View) Len() int                                             // number of top-level blocks
-func (v *View) Layout(gtx layout.Context, i int, tr *Trace) layout.Dimensions
+func (v *View) Layout(gtx layout.Context, i int, tr *Trace) layout.Dimensions // a layout.ListElement
+func (v *View) Err() error                                           // the first layout error (M5)
 // Layout draws block i, including the gap above it (and the content padding for the first
-// and last block), at gtx.Constraints.Max.X wide. tr may be nil.
+// and last block), at gtx.Constraints.Max.X wide. tr may be nil, and its origin is the list
+// element's top-left. Padding is chosen from that width (Metric.PxToDp of Max.X), so M9 decides
+// what width a scrollbar leaves. A failing element returns Dimensions{} and records the error
+// in Err; the first error is kept and never cleared. The View paints no background: the window
+// fills Canvas (STYLE-PAL-3, tested in M10).
 func (v *View) Clicked(gtx layout.Context) (doc.Target, bool)        // LINK-1, polled once per frame
 
 // Images probes headers before the window and decodes pixels lazily (SPEED-5).
@@ -289,7 +296,7 @@ Flow rules:
 - **Code padding.** Every fragment of a wrapped code run gets its own padding on both edges.
 - **Strike.** Top edge at baseline − round(0.3 em), spanning the whole fragment including code
   padding.
-- **Mark rectangles** (relative to the flow's top-left). `Glyphs`: from the fragment's text
+- **Mark rectangles** (relative to the trace's origin, see Trace). `Glyphs`: from the fragment's text
   start to its end; y from baseline − ceil(ascent) to baseline + ceil(descent) of the
   fragment's glyphs; `Text` is the fragment's bytes with each invalid byte as U+FFFD (DOC-15).
   `CodeBg`: the `Glyphs` rectangle grown by the horizontal pad on each side and, outside a
@@ -309,7 +316,8 @@ Flow rules:
 - **Known limitation.** A run boundary can break a word (as in styledtext).
 
 **Lists, tables, images** are laid out by `list.go`, `table.go` and `image.go` from the same
-primitives. Images use `paint.NewImageOp` with `op.Affine` scaling, or `widget.Image`
+primitives. Until M6 to M8 each is a placeholder: height 0 content with its DOC-LAYOUT-4 margins,
+and no marks. Images use `paint.NewImageOp` with `op.Affine` scaling, or `widget.Image`
 with `Fit: widget.ScaleDown` and `Scale: 1` (one image pixel per dp before zoom).
 
 ### internal/app
