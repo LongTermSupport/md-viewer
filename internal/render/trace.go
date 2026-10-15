@@ -46,6 +46,7 @@ type Trace struct {
 type Mark struct {
 	Kind   MarkKind
 	Rect   image.Rectangle
+	Origin image.Point // for Glyphs and Number: the point the outline is drawn at (STYLE-TEXT-7)
 	Colour color.NRGBA
 	Text   string      // for Glyphs and Number: the text drawn in Rect
 	Link   *doc.Target // for LinkArea

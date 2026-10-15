@@ -429,14 +429,13 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 		f.tr.add(Mark{Kind: MarkCodeBg, Rect: bg, Colour: f.fp.palette.CodeBg})
 	}
 
-	stack := op.Offset(image.Pt(originX, baseY-int(glyphs[0].Y))).Push(f.gtx.Ops)
+	origin := image.Pt(originX, baseY-int(glyphs[0].Y))
+	pop := pushGlyphs(f.gtx, f.fp.shaper, glyphs, origin)
 	paint.ColorOp{Color: ts.Colour}.Add(f.gtx.Ops)
-	clipStack := clip.Outline{Path: f.fp.shaper.Shape(glyphs)}.Op().Push(f.gtx.Ops)
 	paint.PaintOp{}.Add(f.gtx.Ops)
-	clipStack.Pop()
-	stack.Pop()
+	pop()
 
-	f.tr.add(Mark{Kind: MarkGlyphs, Rect: glyphRect, Colour: ts.Colour, Text: fragmentText(s)})
+	f.tr.add(Mark{Kind: MarkGlyphs, Rect: glyphRect, Origin: origin, Colour: ts.Colour, Text: fragmentText(s)})
 
 	boxStart := f.cursor
 	f.cursor += 2*padX + hi - lo
@@ -448,6 +447,19 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 	}
 	f.hasContent = true
 	return nil
+}
+
+// pushGlyphs makes the outline of glyphs the clip of what is drawn until the returned pop is
+// called, with the outline's origin at origin (STYLE-TEXT-7). Shape's outline has its baseline at
+// y = 0 and x from the first glyph, and Glyph.Y is not in it (gioui.org/text, Shape), so origin
+// is the fragment's left edge on its baseline. The paint and the ink probes both use it.
+func pushGlyphs(gtx layout.Context, sh *text.Shaper, glyphs []text.Glyph, origin image.Point) (pop func()) {
+	offset := op.Offset(origin).Push(gtx.Ops)
+	outline := clip.Outline{Path: sh.Shape(glyphs)}.Op().Push(gtx.Ops)
+	return func() {
+		outline.Pop()
+		offset.Pop()
+	}
 }
 
 // linkArea makes rect a link's clickable area: the hand cursor shows over it, and a press and
