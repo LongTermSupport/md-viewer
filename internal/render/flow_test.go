@@ -2,6 +2,7 @@ package render
 
 import (
 	"image"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -1244,5 +1245,164 @@ func TestLinkPressOnInk(t *testing.T) {
 				t.Fatalf("a press on the ink at %v = %+v, %t; want the link's target and true", pt, got, ok)
 			}
 		})
+	}
+}
+
+// layoutDrawn is layoutAt that also returns the origin of each outline the flow drew, in draw
+// order, as the flow passed it to pushGlyphs.
+func (e *flowEnv) layoutDrawn(runs []doc.Run, dy int) (*Trace, []image.Point) {
+	e.t.Helper()
+	var drawn []image.Point
+	e.fp.drawn = func(p image.Point) { drawn = append(drawn, p) }
+	tr := e.layoutAt(runs, dy)
+	e.fp.drawn = nil
+	return tr, drawn
+}
+
+// TestGlyphDrawnAtOrigin: the outline of each fragment is drawn at the Origin its Glyphs mark
+// records, and its ink at that point lies inside the mark's glyph box (STYLE-TEXT-7). The point
+// is the one the flow passes to pushGlyphs, so a paint anywhere else fails here, whatever the mark
+// says. Each run is laid out alone at body and heading size, at 1, 1.25 and 2 px per dp.
+func TestGlyphDrawnAtOrigin(t *testing.T) {
+	const dy = 64
+	shift := image.Pt(0, dy)
+	h1 := heading1(t)
+	cases := []struct {
+		name    string
+		base    TextStyle
+		heading bool
+		run     doc.Run
+	}{
+		{"body", BodyStyle(Light), false, plain("Hxg")},
+		{"body code", BodyStyle(Light), false, codeRun("code")},
+		{"body bold", BodyStyle(Light), false, styledRun("bold", doc.Strong)},
+		{"heading", h1, true, plain("Title")},
+		{"heading code", h1, true, codeRun("code")},
+	}
+	for _, c := range cases {
+		for _, px := range []float32{1, 1.25, 2} {
+			e := newFlowEnvAt(t, 800, px)
+			e.fp.base = c.base
+			e.fp.inHeading = c.heading
+			tr, drawn := e.layoutDrawn([]doc.Run{c.run}, dy)
+			g := needMarks(t, tr, MarkGlyphs, "Glyphs")[0]
+			if len(drawn) != 1 {
+				t.Fatalf("%s at %v: %d outlines drawn, want 1", c.name, px, len(drawn))
+			}
+			if drawn[0] != g.Origin {
+				t.Errorf("%s at %v: %q drawn at %v, its mark's origin is %v", c.name, px, g.Text, drawn[0], g.Origin)
+			}
+			ts := RunStyle(c.base, c.run.Style, false, e.fp.palette, c.heading)
+			glyphs := e.fragmentGlyphs(ts, g.Text)
+			want := g.Rect.Add(shift)
+			ink := e.inkRect(glyphs, drawn[0].Add(shift), want.Inset(-24))
+			if ink.Empty() {
+				t.Fatalf("%s at %v: %q has no ink at the point it is drawn at, %v", c.name, px, g.Text, drawn[0])
+			}
+			if !within(want, ink) {
+				t.Errorf("%s at %v: %q ink %v at its drawn point not inside glyph rect %v", c.name, px, g.Text, ink, want)
+			}
+		}
+	}
+}
+
+// fragmentStyles returns the style of each Glyphs mark gs of a flow laid out from runs, in record
+// order. The fragments of a flow are the runs' text in order, and a non-code run's leading spaces
+// are dropped at a line start, so each mark takes the first run its text continues.
+func fragmentStyles(t *testing.T, fp flowParams, runs []doc.Run, gs []Mark) []TextStyle {
+	t.Helper()
+	styles := make([]TextStyle, 0, len(gs))
+	ri, rest := 0, runs[0].Text
+	for _, g := range gs {
+		for {
+			cand := rest
+			if runs[ri].Style&doc.Code == 0 {
+				cand = strings.TrimLeft(rest, " ")
+			}
+			if cand != "" && strings.HasPrefix(cand, g.Text) {
+				rest = cand[len(g.Text):]
+				break
+			}
+			if ri+1 == len(runs) {
+				t.Fatalf("glyph mark %q matches no run", g.Text)
+			}
+			ri++
+			rest = runs[ri].Text
+		}
+		styles = append(styles, RunStyle(fp.base, runs[ri].Style, false, fp.palette, fp.inHeading))
+	}
+	return styles
+}
+
+// TestGlyphInkMixedLine: in a wrapped flow of body, bold, code and plain text, each fragment's
+// outline is drawn at its Origin and its ink there lies inside its glyph box. The first line's
+// baseline is the one STYLE-TEXT-1 gives from the base face, every later line's is a whole line
+// box lower, and a fragment's box top plus its ceiled ascent is its Origin.Y (STYLE-TEXT-7). The
+// base is body and heading size, at 1, 1.25 and 2 px per dp.
+func TestGlyphInkMixedLine(t *testing.T) {
+	const dy = 64
+	shift := image.Pt(0, dy)
+	runs := []doc.Run{
+		plain("Hxg "),
+		styledRun("bold ", doc.Strong),
+		codeRun("code "),
+		plain("x and words that wrap onto more lines"),
+	}
+	cases := []struct {
+		name    string
+		base    TextStyle
+		heading bool
+	}{
+		{"body", BodyStyle(Light), false},
+		{"heading", heading1(t), true},
+	}
+	for _, c := range cases {
+		for _, px := range []float32{1, 1.25, 2} {
+			e := newFlowEnvAt(t, int(150*px), px)
+			e.fp.base = c.base
+			e.fp.inHeading = c.heading
+			tr, drawn := e.layoutDrawn(runs, dy)
+			gs := marks(tr, MarkGlyphs)
+			if len(drawn) != len(gs) {
+				t.Fatalf("%s at %v: %d outlines drawn for %d Glyphs marks", c.name, px, len(drawn), len(gs))
+			}
+			gtx := e.context()
+			ascent, descent, err := faceMetrics(gtx, e.fp)
+			if err != nil {
+				t.Fatalf("%s at %v: face metrics: %v", c.name, px, err)
+			}
+			lineH := int(math.Round(pxOf(gtx, c.base.Size) * float64(c.base.LineHeight)))
+			first := int(math.Round((float64(lineH)-(ascent+descent))/2 + ascent))
+			styles := fragmentStyles(t, e.fp, runs, gs)
+			lines := map[int]bool{}
+			for i, g := range gs {
+				glyphs := e.fragmentGlyphs(styles[i], g.Text)
+				if drawn[i] != g.Origin {
+					t.Errorf("%s at %v: %q drawn at %v, its mark's origin is %v", c.name, px, g.Text, drawn[i], g.Origin)
+				}
+				up := 0
+				for _, gl := range glyphs {
+					up = max(up, gl.Ascent.Ceil())
+				}
+				if g.Rect.Min.Y+up != g.Origin.Y {
+					t.Errorf("%s at %v: %q box top %d plus ascent %d is not its origin %d", c.name, px, g.Text, g.Rect.Min.Y, up, g.Origin.Y)
+				}
+				if d := g.Origin.Y - first; d < 0 || d%lineH != 0 {
+					t.Errorf("%s at %v: %q origin %d is not on a line box below the first baseline %d", c.name, px, g.Text, g.Origin.Y, first)
+				}
+				want := g.Rect.Add(shift)
+				ink := e.inkRect(glyphs, drawn[i].Add(shift), want.Inset(-24))
+				if ink.Empty() {
+					t.Fatalf("%s at %v: %q has no ink at the point it is drawn at, %v", c.name, px, g.Text, drawn[i])
+				}
+				if !within(want, ink) {
+					t.Errorf("%s at %v: %q ink %v not inside glyph rect %v", c.name, px, g.Text, ink, want)
+				}
+				lines[g.Origin.Y] = true
+			}
+			if len(lines) < 3 {
+				t.Fatalf("%s at %v: the flow has %d lines, want a wrapped line of at least 3", c.name, px, len(lines))
+			}
+		}
 	}
 }

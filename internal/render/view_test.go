@@ -679,6 +679,35 @@ func abs(x int) int {
 	return x
 }
 
+// TestNumberOriginIsInk: an ordered item's number is drawn at the Origin its Number mark records,
+// and the ink there lies inside the mark's rectangle (STYLE-LIST-3, STYLE-TEXT-7). drawNumber lays
+// the number out at the origin and then moves it to its place, so the origin moves with it.
+func TestNumberOriginIsInk(t *testing.T) {
+	const src = "1. first item\n2. second item\n\n10. tenth item\n"
+	for _, px := range []float32{1, 1.25, 2} {
+		e := newViewEnv(t, src, Light, metricAt(px))
+		probe := newFlowEnvAt(t, 800, px)
+		n := 0
+		for i := 0; i < e.view.Len(); i++ {
+			_, tr := e.layout(i, 800)
+			for _, m := range marks(tr, MarkNumber) {
+				n++
+				glyphs := probe.fragmentGlyphs(BodyStyle(Light), m.Text)
+				ink := probe.inkRect(glyphs, m.Origin, m.Rect.Inset(-24))
+				if ink.Empty() {
+					t.Fatalf("at %v: number %q has no ink at its origin %v", px, m.Text, m.Origin)
+				}
+				if !within(m.Rect, ink) {
+					t.Errorf("at %v: number %q ink %v at its origin not inside %v", px, m.Text, ink, m.Rect)
+				}
+			}
+		}
+		if n != 3 {
+			t.Fatalf("at %v: %d numbers, want 3", px, n)
+		}
+	}
+}
+
 // TestNoMarkPastContentEdge: no mark of a block reaches past the content edge, the width less the
 // content padding (DOC-LAYOUT-1), over the corpus and elements.md at 310, 600 and 970 dp and three
 // metrics. A table is skipped: STYLE-TABLE-5 clips it at the edge. The test guards against text
