@@ -172,7 +172,7 @@ func layoutFlow(gtx layout.Context, fp flowParams, runs []doc.Run, tr *Trace) (l
 		}
 	}
 	// A code block closes its last line even after a break, so text ending in a newline shows
-	// the empty line after it (STYLE-CODE-1, issue 4).
+	// the empty line after it (STYLE-CODE-2).
 	if f.hasContent || f.lines == 0 || f.fp.wrap == wrapCode {
 		f.closeLine()
 	}

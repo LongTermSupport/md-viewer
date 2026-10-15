@@ -829,7 +829,7 @@ func TestFlowCodeMode(t *testing.T) {
 		t.Fatalf("prose with leading spaces: marks %q, want \"x\"", markTexts(gs))
 	}
 
-	// A trailing break closes a second, empty line in code (issue 4); prose closes none.
+	// A trailing break closes a second, empty line in code (STYLE-CODE-2); prose closes none.
 	e = flowModeEnv(t, 800, wrapCode)
 	dims, tr := e.lay([]doc.Run{plain("a"), brk})
 	if dims.Size.Y != 42 {

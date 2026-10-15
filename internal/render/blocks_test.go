@@ -91,7 +91,7 @@ func TestHeadingRule(t *testing.T) {
 
 // TestCodeBlock: a code block is a background across the content width in BgMuted, with its text
 // inset 16 px on every side, in Fg (STYLE-CODE-1). A line wraps inside the box (STYLE-CODE-2).
-// Lines are 20 px, and a text with n newlines shows n + 1 lines (issue 4).
+// Lines are 20 px, and a text with n newlines shows n + 1 lines (STYLE-CODE-2).
 func TestCodeBlock(t *testing.T) {
 	t.Run("short", func(t *testing.T) {
 		e := newViewEnv(t, "```\nshort\n```", Light, metric1)
@@ -262,7 +262,7 @@ func TestQuote(t *testing.T) {
 		t.Fatalf("quote is %d px tall, want 154 (45 + 64 + 45)", dims.Size.Y)
 	}
 
-	// Inline code and links: the text is FgMuted, the link Accent, the code FgMuted (issue 7).
+	// Inline code and links: the text is FgMuted, the link Accent, the code FgMuted (STYLE-QUOTE-1).
 	e = newViewEnv(t, "> a [l](x.md) `c`", Light, metric1)
 	_, tr = e.layout(0, 800)
 	if c := glyphMark(t, tr, "a ").Colour; c != Light.FgMuted {

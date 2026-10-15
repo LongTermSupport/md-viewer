@@ -150,8 +150,8 @@ func layoutCodeBlock(gtx layout.Context, ctx blockCtx, c doc.CodeBlock, tr *Trac
 }
 
 // codeRuns is a code block's text as runs: a break before each line after the first, and a text
-// run for each line that is not empty. Text with n newlines has n + 1 lines (issue 4), so the
-// empty text is one empty line.
+// run for each line that is not empty. Text with n newlines has n + 1 lines (STYLE-CODE-2), so
+// the empty text is one empty line.
 func codeRuns(src string) []doc.Run {
 	var runs []doc.Run
 	for i, line := range strings.Split(src, "\n") {
@@ -195,6 +195,11 @@ func layoutQuote(gtx layout.Context, ctx blockCtx, q doc.Quote, tr *Trace) (layo
 	})
 	if err != nil {
 		return layout.Dimensions{}, err
+	}
+	if h := dims.Size.Y; h > 0 {
+		bar := image.Rect(0, 0, gtx.Dp(quoteBarWidth), h)
+		fillRect(gtx, bar, ctx.root.Border)
+		tr.add(Mark{Kind: MarkQuoteBar, Rect: bar, Colour: ctx.root.Border})
 	}
 	return layout.Dimensions{Size: image.Pt(width, dims.Size.Y)}, nil
 }
