@@ -46,7 +46,7 @@ func TestLoadNonRegular(t *testing.T) {
 	t.Run("fifo without a writer", func(t *testing.T) {
 		var d *Document
 		var err error
-		runBounded(t, fifo, func() { d, _, err = Load(fifo, clock.Now) })
+		runBounded(t, fifo, func() { d, _, err = Load(fifo, clock.Now) }, nil)
 		checkNotRegular(t, fifo, d, err)
 	})
 

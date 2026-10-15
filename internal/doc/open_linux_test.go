@@ -18,16 +18,22 @@ func openBounded(t *testing.T, fifo string, call func() (*os.File, error)) (*os.
 	t.Helper()
 	var f *os.File
 	var err error
-	runBounded(t, fifo, func() { f, err = call() })
+	late := func() {
+		if f != nil {
+			closeOpened(t, f)
+		}
+	}
+	runBounded(t, fifo, func() { f, err = call() }, late)
 	return f, err
 }
 
 // runBounded runs call, which opens fifo, in a goroutine and waits for it. Only a call that has not
 // returned after a minute reaches the bound, and that is a failure: the test then opens fifo for
 // reading and writing, which does not block on Linux and so releases the blocked open, waits for
-// call to return, and fails. On success call's result is set before the test goes on, and the
-// timer is not consulted. If the release fails, the call stays blocked until the test binary exits.
-func runBounded(t *testing.T, fifo string, call func()) {
+// call to return, runs late (nil, or a close of what call returned), and fails. On success call's
+// result is set before the test goes on, and the timer is not consulted. If the release fails, the
+// call stays blocked until the test binary exits.
+func runBounded(t *testing.T, fifo string, call func(), late func()) {
 	t.Helper()
 	done := make(chan struct{})
 	go func() {
@@ -45,6 +51,9 @@ func runBounded(t *testing.T, fifo string, call func()) {
 	}
 	<-done
 	closeOpened(t, release)
+	if late != nil {
+		late()
+	}
 	t.Fatalf("a call blocked on the FIFO %s with no writer", fifo)
 }
 
