@@ -29,6 +29,7 @@ const maxReferenceBytes = 34
 // Parse converts Markdown source into the document model (DOC-1 to DOC-3, DOC-6 to DOC-8,
 // DOC-12, DOC-14, DOC-15). dir is stored as Document.Dir.
 func Parse(src []byte, dir string) (*Document, error) {
+	src = normaliseLineEndings(src)
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	root := md.Parser().Parse(text.NewReader(src))
 	blocks, err := convertBlocks(root, src)
@@ -36,6 +37,14 @@ func Parse(src []byte, dir string) (*Document, error) {
 		return nil, err
 	}
 	return &Document{Dir: dir, Blocks: blocks}, nil
+}
+
+// normaliseLineEndings turns each CRLF and each lone CR into LF (DOC-7). It returns a new slice.
+func normaliseLineEndings(src []byte) []byte {
+	crlf := []byte("\r\n")
+	lf := []byte("\n")
+	src = bytes.ReplaceAll(src, crlf, lf)
+	return bytes.ReplaceAll(src, []byte("\r"), lf)
 }
 
 // unmappedKindError reports a goldmark node kind with no model mapping (DOC-2).
