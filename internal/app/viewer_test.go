@@ -499,6 +499,7 @@ func TestViewerZoomScalesContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := newEnv(t, parse(t, "---\n", t.TempDir()), image.Pt(tt.width, 600), io.Discard)
+			e.frame() // the window has laid out a frame before any key arrives
 			if tt.zoom == 200 {
 				// Five Ctrl+= presses: 110, 125, 150, 175, 200 (ZOOM-1).
 				e.press(keyZoomIn, keyZoomIn, keyZoomIn, keyZoomIn, keyZoomIn)
