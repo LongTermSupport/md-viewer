@@ -782,15 +782,23 @@ headed "container (Xvfb, information only)" and the desktop column left as "to b
 
 - `TestLargeFixtureIsCurrent`: `large.md` is exactly 100 copies of `elements.md` joined by
   one blank line; with `MDV_UPDATE_FIXTURES=1` it is rewritten.
-- `TestNoSystemFonts`: a shaper from `NewShaper` lays out a CJK character as a single
-  missing-glyph cluster, which proves no system font was consulted (STYLE-FONT-2, SPEED-4).
-- `TestFirstViewportLaysOutFewBlocks`: laying out a 980 × 900 dp viewport of `large.md` calls
-  `View.Layout` for fewer than 60 blocks (count with a wrapper around `View.Layout`), showing
-  that only the visible blocks are laid out (SCROLL-1).
+- `TestParseLargeDeterministic`: `large.md` parses to the same model twice (DOC-14) and has
+  2600 top-level blocks, 26 per copy, which pins the blank-line join.
+- `TestNoSystemFonts`: a shaper from `NewShaper` lays out "日" and "☃" as one missing-glyph
+  cluster each (glyph id 0; a control row "a" has a non-zero id). A subprocess, with `HOME`,
+  `XDG_CACHE_HOME` and `LocalAppData` set to one empty temporary directory, shapes text, and
+  the directory is still empty afterwards: no font cache file (STYLE-FONT-2, SPEED-4).
+- `TestFirstViewportLaysOutFewBlocks`: a 980 × 900 dp window of `large.md`, laid out at the
+  list's 970 dp width, calls `View.Layout` for at least one and fewer than 60 blocks (count with
+  a wrapper around `View.Layout`), and the blocks cover the 900 px height (SCROLL-1).
+- `TestNoPlannerLabels` (`cmd/md-viewer`): no Go file, README or doc holds a planner's label.
 
 **Verification:** the standard checks, the smoke run with `testdata/large.md`, and
 `go test -run '^$' -bench . -benchtime 20x ./internal/...`. Record the numbers in the README
 as above.
+
+The table's double layout (each cell is measured twice, and a whole flow is built for the
+offset) was measured in M11 and left as it is: no SPEED target needs a change.
 
 **Done when:** the standard checks pass, the benchmarks run, the README holds the container
 numbers, and the owner has been told the host measurement is theirs to run (README "Speed").

@@ -526,7 +526,11 @@ order, after DOC-9's line and before the window opens:
   not opened);
 - `image too large: WxH`, from the size rule of STYLE-IMG-1;
 - the text of the operating system's error after the path (`no such file or directory`,
-  `permission denied`), or the decoder's error for a PNG or JPEG whose header is unreadable.
+  `permission denied`), or the decoder's error for a PNG or JPEG whose header is unreadable;
+- the decoder's error, for a PNG or JPEG whose pixels fail to decode after the window has
+  opened (STYLE-IMG-5);
+- `decodes to no pixels`, for a decoder that returns an empty image (the standard decoders do
+  not).
 
 An image whose pixels fail to decode after the window has opened (SPEED-5) prints its line once,
 when it is first laid out, and is a placeholder from then on (STYLE-IMG-5).
@@ -697,8 +701,11 @@ two tenths is not specified. md-viewer then closes the window and exits 0. The t
 dynamic linking, Go runtime start) is not included; the wall-clock measurement (SPEED-7)
 includes it.
 
-**SPEED-3. Targets.** Release build (`go build -trimpath`), on the owner's desktop under
-GNOME on Wayland, median of 10 runs:
+**SPEED-3. Targets.** Each row is a median, measured on the owner's desktop under GNOME on
+Wayland: of 10 `--time` runs for the two `first_frame_ms` rows, of the 20 runs hyperfine times
+for the wall clock (the median in its JSON export, SPEED-7), and of 10 `go test -count` runs
+for the benchmarks. The binary rows use a release build (`go build -trimpath`); the benchmarks
+use `go test`:
 
 | Measure                                                      | Target     |
 | ------------------------------------------------------------ | ---------- |

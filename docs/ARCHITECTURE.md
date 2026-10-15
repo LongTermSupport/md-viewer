@@ -593,8 +593,12 @@ Markdown strings, not files.
 
 In `internal/doc`: `BenchmarkParseLarge` (Parse of `large.md`'s bytes, read once outside the
 loop). In `internal/render`: `BenchmarkLoadFonts` (`LoadFaces` plus `NewShaper`) and `BenchmarkFirstViewportLarge` (a new `View` of
-`large.md`, then the blocks that fill a 980 × 900 dp viewport at zoom 100). They report
+`large.md`, then the blocks that fill a 980 × 900 dp window at zoom 100, laid out at the list's
+970 dp width: the window less the 10 dp SCROLL-4 gutter). They report
 `b.ReportAllocs()`. Run with `go test -run '^$' -bench . -benchtime 20x ./internal/...`.
+`BenchmarkFirstViewportLarge` makes a fresh shaper in each iteration, because a shared shaper
+keeps its layout cache and would measure a warm frame; its images are probed once, outside the
+loop, as SPEED-5's preparation is.
 
 ## QA
 
