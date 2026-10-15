@@ -304,17 +304,17 @@ item has a top margin of 0; the last has a bottom margin of 0 (`.markdown-body>*
 
 **DOC-LAYOUT-4. Margins.**
 
-| Block                      | Top   | Bottom | Source                                                                   |
-| -------------------------- | ----- | ------ | ------------------------------------------------------------------------ |
-| Paragraph                  | 0     | 16 dp  | `p, blockquote, ul, ol, dl, table, pre, details { margin-bottom: 1rem }` |
-| Heading (all levels)       | 24 dp | 16 dp  | `h1, …, h6 { margin-top: 1.5rem; margin-bottom: 1rem }`                  |
-| Quote                      | 0     | 16 dp  | as Paragraph                                                             |
-| List (top level)           | 0     | 16 dp  | as Paragraph                                                             |
-| List nested in a list item | 0     | 0      | `ul ul, ul ol, ol ol, ol ul { margin-top: 0; margin-bottom: 0 }`         |
-| Code block                 | 0     | 16 dp  | as Paragraph                                                             |
-| Table                      | 0     | 16 dp  | as Paragraph                                                             |
-| Rule                       | 24 dp | 24 dp  | `hr { margin: 1.5rem 0 }`                                                |
-| Image                      | 0     | 16 dp  | it sits in a paragraph, so a paragraph's margins                         |
+| Block                                   | Top   | Bottom | Source                                                                   |
+| --------------------------------------- | ----- | ------ | ------------------------------------------------------------------------ |
+| Paragraph                               | 0     | 16 dp  | `p, blockquote, ul, ol, dl, table, pre, details { margin-bottom: 1rem }` |
+| Heading (all levels)                    | 24 dp | 16 dp  | `h1, …, h6 { margin-top: 1.5rem; margin-bottom: 1rem }`                  |
+| Quote                                   | 0     | 16 dp  | as Paragraph                                                             |
+| List (top level)                        | 0     | 16 dp  | as Paragraph                                                             |
+| List inside another list (at any depth) | 0     | 0      | `ul ul, ul ol, ol ol, ol ul { margin-top: 0; margin-bottom: 0 }`         |
+| Code block                              | 0     | 16 dp  | as Paragraph                                                             |
+| Table                                   | 0     | 16 dp  | as Paragraph                                                             |
+| Rule                                    | 24 dp | 24 dp  | `hr { margin: 1.5rem 0 }`                                                |
+| Image                                   | 0     | 16 dp  | it sits in a paragraph, so a paragraph's margins                         |
 
 `1rem` is 16 dp; it does not change with the element's own font size. Only the List row depends
 on `nested`.
@@ -378,11 +378,11 @@ no horizontal scrolling, so it wraps.
 
 **STYLE-QUOTE-1. Quotes** draw a 4 dp wide bar (`.25em` of 16) in `Border` down their full
 height at the left edge, and lay out their child blocks with 20 dp of left inset (the bar plus
-16 dp padding) and 16 dp of right inset. Text inside a quote is drawn in `FgMuted`, except
-links (`Accent`) and code blocks (`Fg`), which set their own colour. Inside a quote, headings
-levels 1 to 5 and inline code are `FgMuted` as well; heading rules keep `BorderMuted`, and rules
-and quote bars keep `Border`
-(`blockquote { padding: 0 1em; color; border-left: .25em solid }`). Nested quotes nest.
+16 dp padding) and 16 dp of right inset (`blockquote { padding: 0 1em; color; border-left:
+.25em solid }`). Text inside a quote is drawn in `FgMuted`, except links (`Accent`) and code
+blocks (`Fg`), which set their own colour. Inside a quote, headings of levels 1 to 5, inline
+code and list markers are `FgMuted` as well; heading rules keep `BorderMuted`, rules and quote
+bars keep `Border`, and task boxes keep their own colours (STYLE-LIST-5). Nested quotes nest.
 
 **STYLE-RULE-1. A rule** is a 4 dp tall bar (`.25em`) in `Border` across the full content
 width (`hr { height: .25em; background-color; border: 0 }`).
@@ -395,16 +395,24 @@ width (`hr { height: .25em; background-color; border: 0 }`).
 **STYLE-LIST-2. Unordered markers** are shapes drawn with clip operations, not glyphs. The
 shapes are drawn by choice: the Go fonts do have ◦ and ▪. They are centred horizontally 11 dp
 left of the item's content edge and vertically at the first line's baseline minus 0.27 × the
-item's font size:
+item's font size. The marker's rectangle has its top-left corner at the rounded centre minus
+half its size, so a 5 dp shape is centred to within half a pixel:
 
-| Nesting depth (lists around this one) | Marker                                           |
-| ------------------------------------- | ------------------------------------------------ |
-| 0                                     | filled circle, 5 dp diameter, colour `Fg`        |
-| 1                                     | circle outline, 5 dp diameter, 1 dp stroke, `Fg` |
-| 2 or more                             | filled square, 5 dp side, `Fg`                   |
+| Nesting depth (lists around this one) | Marker                                                                                    |
+| ------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 0                                     | filled circle, 5 dp diameter, colour the item's text colour (`Fg`; `FgMuted` inside a quote) |
+| 1                                     | circle outline, 5 dp outer diameter, 1 dp stroke inside it, colour the item's text colour (`Fg`; `FgMuted` inside a quote) |
+| 2 or more                             | filled square, 5 dp side, colour the item's text colour (`Fg`; `FgMuted` inside a quote)   |
 
 These are the browser defaults for `disc`, `circle`, `square`, which github-markdown-css does
 not change for unordered lists. Depth counts ordered and unordered lists alike.
+
+The first line's baseline in STYLE-LIST-2, 3 and 5 is that of the item's first text line. The
+font is the body style (STYLE-TEXT-1) whatever the first block is. The line is found
+recursively through quotes and nested lists, code block text included. When the first block has
+no text line (for example a rule, an image or a table), the baseline is that of an empty body
+line at the item's top, and the item's height is unchanged. An empty item (`-`) is one empty
+body line.
 
 **STYLE-LIST-3. Ordered markers** are text in the item's font and colour, the number followed
 by `.`, right-aligned so that the marker's right edge is 4 dp left of the item's content edge,
@@ -416,11 +424,13 @@ A number with no CSS style in that range prints in decimal: 0 or less at any dep
 roman numerals above 3999 (`4000.`).
 
 **STYLE-LIST-4. Item spacing.** In a tight list, consecutive items are 4 dp apart
-(`li+li { margin-top: .25em }`) and the paragraphs of an item have no margins. In a loose
+(`li+li { margin-top: .25em }`) and the paragraphs and images that are direct children of an
+item have no margins; a paragraph inside a quote in the item keeps its margins. In a loose
 list, consecutive items are 16 dp apart and paragraphs inside an item keep their 16 dp bottom
 margin (`li>p { margin-top: 1rem }`, collapsed with the paragraph margins).
 
-**STYLE-LIST-5. Task items** draw no bullet. A 13 dp square box sits with its left edge 22 dp
+**STYLE-LIST-5. Task items** draw no bullet or number, but they still count in the numbering. A
+13 dp square box sits with its left edge 22 dp
 left of the item's content edge, centred vertically on the first line's baseline minus 0.35 ×
 font size, with a 3 dp corner radius (`.task-list-item { list-style-type: none }`,
 `.task-list-item-checkbox { margin: 0 .2em .25em -1.4em }`; 13 dp is the browser's checkbox

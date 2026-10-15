@@ -215,7 +215,14 @@ func Gap(prevBottom, nextTop unit.Dp) unit.Dp                           // DOC-L
 func Padding(windowWidth unit.Dp) unit.Dp                               // DOC-LAYOUT-1
 // OrderedMarker: n below 1 or a roman numeral above 3999 prints decimal (F8).
 func OrderedMarker(n, depth int) string // STYLE-LIST-3
-func BulletShape(depth int) Bullet      // STYLE-LIST-2, M6 (F2)
+// Bullet is the shape of an unordered marker. Its String is the Mark text (disc, circle, square).
+type Bullet uint8
+const (
+	BulletDisc Bullet = iota
+	BulletCircle
+	BulletSquare
+)
+func BulletShape(depth int) Bullet // STYLE-LIST-2, M6 (F2); depth below 1 is disc
 // ColumnWidths: floor(N × W ÷ ΣN) with a minimum of minCol; "fits" is ΣN <= W; overflow is
 // clipped in M7 (F9).
 func ColumnWidths(natural []int, width int, minCol int) []int // STYLE-TABLE-5
@@ -232,7 +239,7 @@ type Mark struct {
 	                       // clash with the type names HeadingRule and Bullet (F2, from M4)
 	Rect   image.Rectangle
 	Colour color.NRGBA
-	Text   string          // for Glyphs and Number: the text drawn in Rect
+	Text   string          // Glyphs and Number: the text drawn in Rect; Bullet: the shape; TaskBox: open, done, border or check
 	Link   *doc.Target     // for LinkArea
 }
 
@@ -312,12 +319,15 @@ Flow rules:
   that link, in a fixed order. `clicked(gtx)` drains them once per frame and returns the first
   `KindClick`. M5's `View` owns the `links` and `View.Clicked` delegates to it.
 - **Dimensions.** `Size.X` is the widest line, at least `Constraints.Min.X`; `Baseline` is
-  `Size.Y` minus the first baseline.
+  `Size.Y` minus the first baseline. Every block layout sets `Baseline` the same way, to its first
+  text line; a block with none uses the rule of STYLE-LIST-2.
 - **Known limitation.** A run boundary can break a word (as in styledtext).
 
-**Lists, tables, images** are laid out by `list.go`, `table.go` and `image.go` from the same
-primitives. Until M6 to M8 each is a placeholder: height 0 content with its DOC-LAYOUT-4 margins,
-and no marks. Images use `paint.NewImageOp` with `op.Affine` scaling, or `widget.Image`
+**Lists** are laid out by `list.go` from the same primitives. Each item's content is laid out with
+a `blockCtx` whose `depth` counts the lists around the block and whose `tight` is set for a direct
+child of a tight list's item; `quoteCtx` clears `tight` and keeps `depth`. **Tables and images**
+are laid out by `table.go` and `image.go`. Until M7 and M8 each is a placeholder: height 0 content
+with its DOC-LAYOUT-4 margins, and no marks. Images use `paint.NewImageOp` with `op.Affine` scaling, or `widget.Image`
 with `Fit: widget.ScaleDown` and `Scale: 1` (one image pixel per dp before zoom).
 
 ### internal/app
