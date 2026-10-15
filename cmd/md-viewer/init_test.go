@@ -87,6 +87,51 @@ func goStatements(root string) ([]string, error) {
 	return found, err
 }
 
+// windowCreations lists the file of each place a non-test .go file under root creates an app.Window:
+// new(app.Window) or a composite literal app.Window{...}, once per creation. app is the local name
+// of gioui.org/app in that file.
+func windowCreations(root string) ([]string, error) {
+	var found []string
+	err := goFiles(root, func(rel string, f *ast.File) error {
+		local := ""
+		for _, imp := range f.Imports {
+			if imp.Path.Value != `"gioui.org/app"` {
+				continue
+			}
+			local = "app"
+			if imp.Name != nil {
+				local = imp.Name.Name
+			}
+		}
+		if local == "" {
+			return nil
+		}
+		isWindow := func(e ast.Expr) bool {
+			sel, ok := e.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Window" {
+				return false
+			}
+			x, ok := sel.X.(*ast.Ident)
+			return ok && x.Name == local
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CallExpr:
+				if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "new" && len(x.Args) == 1 && isWindow(x.Args[0]) {
+					found = append(found, rel)
+				}
+			case *ast.CompositeLit:
+				if isWindow(x.Type) {
+					found = append(found, rel)
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	return found, err
+}
+
 // writeTree writes files, a map of relative path to content, under a new temporary directory,
 // and returns that directory.
 func writeTree(t *testing.T, files map[string]string) string {
@@ -138,6 +183,34 @@ func TestNoInitFunctions(t *testing.T) {
 		}
 		if len(got) != 0 {
 			t.Errorf("initFuncs = %q, want none", got)
+		}
+	})
+}
+
+// TestOneWindow (WIN-3): the module creates exactly one app.Window, in gioapp.Run. The fixture
+// row shows the check counts each creation, both the call and the literal.
+func TestOneWindow(t *testing.T) {
+	t.Run("fixture with two windows", func(t *testing.T) {
+		dir := writeTree(t, map[string]string{
+			"x.go": "package x\n\nimport \"gioui.org/app\"\n\n" +
+				"func f() {\n\t_ = new(app.Window)\n\t_ = &app.Window{}\n}\n",
+		})
+		got, err := windowCreations(dir)
+		if err != nil {
+			t.Fatalf("windowCreations: %v", err)
+		}
+		if want := []string{"x.go", "x.go"}; !slices.Equal(got, want) {
+			t.Errorf("windowCreations = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("module", func(t *testing.T) {
+		got, err := windowCreations(moduleRoot(t))
+		if err != nil {
+			t.Fatalf("windowCreations: %v", err)
+		}
+		if want := []string{"internal/window/gioapp/gioapp.go"}; !slices.Equal(got, want) {
+			t.Errorf("windowCreations = %q, want %q", got, want)
 		}
 	})
 }

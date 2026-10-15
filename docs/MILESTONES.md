@@ -748,7 +748,9 @@ line is removed); in `.github/workflows/ci.yml`, after the `go build` step of th
 The window tests (`internal/window/window_test.go`) drive `Loop` through a fake `Source`, with
 no goroutines: a close, a frame error, the `--time` line, the canvas fill and the binding are
 each checked in the order the loop calls them (`TestLoop*`). `gioapp` has one unit test of the
-options it applies to `app.Config` (`TestWindowOptions`: WIN-1, WIN-2).
+options it applies to `app.Config` (`TestWindowOptions`: WIN-1, WIN-2). `TestOneWindow` pins WIN-3:
+the module creates one `app.Window`. WIN-6 has no test: it is Gio's default (the app ID is the base
+name of the executable), and the owner checks it on the desktop.
 
 **Verification:** the standard checks and the smoke run. Push and check that CI's `build` job
 runs the smoke step green and uploads the artifact; download it with
