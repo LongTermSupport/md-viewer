@@ -48,6 +48,7 @@ const (
 	reasonNotLocal  = "not a local file"             // STYLE-IMG-3
 	reasonDirectory = "is a directory"               // STYLE-IMG-3
 	reasonNotFile   = "not a regular file"           // STYLE-IMG-3
+	reasonNoPixels  = "decodes to no pixels"         // STYLE-IMG-3
 	// reasonTooLargeFmt is the REASON of an image past the size cap, with its size (STYLE-IMG-1).
 	reasonTooLargeFmt = "image too large: %dx%d" // STYLE-IMG-1, STYLE-IMG-3
 )
@@ -406,60 +407,97 @@ func layoutPlaceholder(gtx layout.Context, ctx blockCtx, img doc.Image, tr *Trac
 	return r, nil
 }
 
-// probeImage reads the size of the image at path from its header (SPEED-1). A file that cannot be
-// drawn gives the REASON its placeholder shows (STYLE-IMG-3), and a size of zero. A directory and a
-// non-regular file are judged by Stat and never opened, so a FIFO cannot block the probe (CLI-8).
-func probeImage(path string) (image.Point, string) {
+// openRegular opens the regular file at path. A directory and a non-regular file are judged by Stat
+// and never opened, so a FIFO cannot block the caller (CLI-8). For a file that is not opened, the
+// REASON is returned instead, and it names no path (STYLE-IMG-3).
+func openRegular(path string) (*os.File, string) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return image.Point{}, pathReason(err)
+		return nil, pathReason(err)
 	}
 	switch {
 	case fi.IsDir():
-		return image.Point{}, reasonDirectory
+		return nil, reasonDirectory
 	case !fi.Mode().IsRegular():
-		return image.Point{}, reasonNotFile
+		return nil, reasonNotFile
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return image.Point{}, pathReason(err)
+		return nil, pathReason(err)
 	}
-	cfg, format, derr := image.DecodeConfig(f)
+	return f, ""
+}
+
+// probeImage reads the size of the image at path from its header (SPEED-1). A file that cannot be
+// drawn gives the REASON its placeholder shows (STYLE-IMG-3), and a size of zero.
+func probeImage(path string) (image.Point, string) {
+	f, why := openRegular(path)
+	if why != "" {
+		return image.Point{}, why
+	}
+	cfg, format, err := image.DecodeConfig(f)
 	cerr := f.Close()
-	switch {
-	case errors.Is(derr, image.ErrFormat):
-		return image.Point{}, reasonFormat
-	case derr != nil:
-		return image.Point{}, derr.Error()
-	case cerr != nil:
-		return image.Point{}, cerr.Error()
-	case !supportedFormat(format):
-		return image.Point{}, reasonFormat
-	case tooLarge(cfg):
-		return image.Point{}, fmt.Sprintf(reasonTooLargeFmt, cfg.Width, cfg.Height)
+	if why := headerReason(cfg, format, err); why != "" {
+		return image.Point{}, why
+	}
+	if cerr != nil {
+		return image.Point{}, pathReason(cerr)
 	}
 	return image.Pt(cfg.Width, cfg.Height), ""
 }
 
+// headerReason is the REASON of an image whose header image.DecodeConfig read as cfg, format and err,
+// or "" when the image is drawn. A format that is not PNG or JPEG, and an image past the size cap, are
+// judged here (STYLE-IMG-1, STYLE-IMG-3). The text names no path (CLI-8).
+func headerReason(cfg image.Config, format string, err error) string {
+	switch {
+	case errors.Is(err, image.ErrFormat):
+		return reasonFormat
+	case err != nil:
+		return pathReason(err)
+	case !supportedFormat(format):
+		return reasonFormat
+	case tooLarge(cfg):
+		return fmt.Sprintf(reasonTooLargeFmt, cfg.Width, cfg.Height)
+	}
+	return ""
+}
+
 // decodeFile decodes the pixels of the image at path. It runs in the decode worker, never on the
-// frame path (SPEED-5). Its error is the decoder's, or the operating system's for a file that
-// cannot be opened, and a format other than PNG or JPEG is an error too (STYLE-IMG-1).
+// frame path (SPEED-5). The file may have changed since the probe, so it is judged again before any
+// pixel is decoded (STYLE-IMG-1). Its error text is a REASON, and names no path (CLI-8).
 func decodeFile(path string) (image.Image, error) {
-	f, err := os.Open(path)
+	f, why := openRegular(path)
+	if why != "" {
+		return nil, errors.New(why)
+	}
+	img, err := decodeOpened(f)
+	cerr := f.Close()
+	if err != nil {
+		return nil, err
+	}
+	if cerr != nil {
+		return nil, errors.New(pathReason(cerr))
+	}
+	return img, nil
+}
+
+// decodeOpened decodes the open file f: its header is judged first, and then its pixels are decoded
+// from the start of the file.
+func decodeOpened(f *os.File) (image.Image, error) {
+	cfg, format, err := image.DecodeConfig(f)
+	if why := headerReason(cfg, format, err); why != "" {
+		return nil, errors.New(why)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, errors.New(pathReason(err))
+	}
+	img, _, err := image.Decode(f)
 	if err != nil {
 		return nil, errors.New(pathReason(err))
 	}
-	img, format, derr := image.Decode(f)
-	cerr := f.Close()
-	switch {
-	case derr != nil:
-		return nil, derr
-	case cerr != nil:
-		return nil, cerr
-	case !supportedFormat(format):
-		return nil, errors.New(reasonFormat)
-	case img.Bounds().Empty():
-		return nil, fmt.Errorf("render: %s decodes to no pixels", path)
+	if why := noPixels(img); why != "" {
+		return nil, errors.New(why)
 	}
 	return img, nil
 }
@@ -497,6 +535,14 @@ func imageBox(gtx layout.Context, size image.Point) image.Point {
 		return image.Pt(w, int(math.Round(fh*float64(w)/fw)))
 	}
 	return image.Pt(int(math.Round(fw)), int(math.Round(fh)))
+}
+
+// noPixels is the REASON of a decoded image with no pixels, or "" when it has some (STYLE-IMG-3).
+func noPixels(img image.Image) string {
+	if img.Bounds().Empty() {
+		return reasonNoPixels
+	}
+	return ""
 }
 
 // goSpawn starts f in a goroutine.

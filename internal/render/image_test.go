@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -534,6 +535,64 @@ func TestDecodeFile(t *testing.T) {
 			t.Fatalf("decodeFile of a GIF gave image %v and error %v, want an error (not png or jpeg)", img != nil, err)
 		}
 	})
+	// The header is judged again at decode time, before any pixel is allocated: the file may have
+	// been replaced since the probe (STYLE-IMG-1). This header declares 8193 px and has no pixels.
+	huge := filepath.Join(tmp, "huge-header.png")
+	writeFile(t, huge, pngHeader(8193, 1))
+	t.Run("oversize header is refused before pixels", func(t *testing.T) {
+		img, err := decodeFile(huge)
+		checkRefused(t, img, err, "image too large: 8193x1")
+	})
+	t.Run("directory is never opened", func(t *testing.T) {
+		img, err := decodeFile(tmp)
+		checkRefused(t, img, err, "is a directory")
+	})
+	t.Run("character device is not a regular file", func(t *testing.T) {
+		fi, err := os.Stat("/dev/zero")
+		if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+			t.Skip("no character device /dev/zero")
+		}
+		img, err := decodeFile("/dev/zero")
+		checkRefused(t, img, err, "not a regular file")
+	})
+}
+
+// checkRefused fails the test unless decoding gave no image and the error text want, which names no
+// path (CLI-8).
+func checkRefused(t *testing.T, img image.Image, err error, want string) {
+	t.Helper()
+	if img != nil || err == nil || err.Error() != want {
+		t.Fatalf("decodeFile gave image %v and error %v, want no image and the error %q", img != nil, err, want)
+	}
+	if strings.Contains(err.Error(), "/") {
+		t.Fatalf("error %q names a path, want the reason alone", err)
+	}
+}
+
+// TestImageReadErrorPathFree: a read error on an image is the operating system's error text, without
+// the path (CLI-8, STYLE-IMG-3). A real read error cannot be made portably (/proc/self/mem reads as
+// end of file here), so the error is a PathError as the read would return it, and the probe's and
+// the decode's judgement of the header is given that error.
+func TestImageReadErrorPathFree(t *testing.T) {
+	const want = "input/output error"
+	readErr := &os.PathError{Op: "read", Path: "/abs/dir/image.png", Err: syscall.EIO}
+	if got := pathReason(readErr); got != want {
+		t.Fatalf("pathReason gave %q, want %q", got, want)
+	}
+	if got := headerReason(image.Config{}, "", readErr); got != want {
+		t.Fatalf("headerReason of a read error gave %q, want %q", got, want)
+	}
+}
+
+// TestImageNoPixels: a decoded image with no pixels is refused with a REASON that names no path
+// (CLI-8, STYLE-IMG-3). No decoder returns one, so the check is made on the image itself.
+func TestImageNoPixels(t *testing.T) {
+	if got := noPixels(image.NewRGBA(image.Rect(0, 0, 0, 0))); got != "decodes to no pixels" {
+		t.Fatalf("an empty image gives the reason %q, want %q", got, "decodes to no pixels")
+	}
+	if got := noPixels(solidImage(2, 2, color.RGBA{A: 0xff})); got != "" {
+		t.Fatalf("an image with pixels gives the reason %q, want none", got)
+	}
 }
 
 // TestNewImagesWarnings: NewImages prints one stderr line for each image occurrence that is not
