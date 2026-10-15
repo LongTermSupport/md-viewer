@@ -3,6 +3,7 @@ package render
 import (
 	"image"
 	"io"
+	"math"
 
 	"gioui.org/layout"
 
@@ -35,9 +36,17 @@ func decodeFile(path string) (image.Image, error) {
 	return nil, nil
 }
 
-// imageBox is a stub.
+// imageBox is the box an image of size (one pixel per dp at natural size) takes in the width gtx
+// gives it: its natural size, or scaled down to that width keeping its aspect ratio (STYLE-IMG-2).
+// Each side is rounded to whole pixels once, so a box may be 0 px tall.
 func imageBox(gtx layout.Context, size image.Point) image.Point {
-	return image.Point{}
+	w := max(gtx.Constraints.Max.X, 0)
+	fw := float64(size.X) * float64(gtx.Metric.PxPerDp)
+	fh := float64(size.Y) * float64(gtx.Metric.PxPerDp)
+	if fw > float64(w) {
+		return image.Pt(w, int(math.Round(fh*float64(w)/fw)))
+	}
+	return image.Pt(int(math.Round(fw)), int(math.Round(fh)))
 }
 
 // layoutImage is a stub: height 0 at the width given.
