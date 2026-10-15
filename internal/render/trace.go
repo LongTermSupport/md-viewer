@@ -61,6 +61,18 @@ func (t *Trace) add(m Mark) {
 	t.Marks = append(t.Marks, m)
 }
 
+// count is the number of marks recorded so far. A nil Trace has none.
+func (t *Trace) count() int {
+	if t == nil {
+		return 0
+	}
+	return len(t.Marks)
+}
+
+// shiftFrom moves the marks from index i on by d. It is a stub until the flow's alignment is
+// implemented.
+func (t *Trace) shiftFrom(i int, d image.Point) {}
+
 // push moves the origin by d, so that marks recorded inside a nested layout are in the outer
 // trace's coordinates, and returns the previous origin for pop. A nil Trace has no origin.
 func (t *Trace) push(d image.Point) image.Point {

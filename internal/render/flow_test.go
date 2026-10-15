@@ -854,6 +854,152 @@ func TestFlowCodeMode(t *testing.T) {
 	}
 }
 
+// TestFlowAlign: a centred or end-aligned line is moved within its box by its spare width
+// (STYLE-TABLE-4): centre by the spare pixels rounded down, end by all of them, and the marks it
+// recorded move with it. A line wider than the box is not moved, and start alignment is unchanged.
+// Each row is a subtest, so the rows that hold on start alignment are visible as passing.
+func TestFlowAlign(t *testing.T) {
+	alignedEnv := func(t *testing.T, width int, align textAlign) *flowEnv {
+		t.Helper()
+		e := newFlowEnv(t, width)
+		e.fp.align = align
+		return e
+	}
+	layoutDims := func(t *testing.T, e *flowEnv, runs []doc.Run) layout.Dimensions {
+		t.Helper()
+		dims, err := layoutFlow(e.context(), e.fp, runs, &Trace{})
+		if err != nil {
+			t.Fatalf("layoutFlow: %v", err)
+		}
+		return dims
+	}
+	t.Run("start", func(t *testing.T) {
+		e := alignedEnv(t, 200, alignStart)
+		tr := e.trace([]doc.Run{plain("aa")})
+		if g := glyphMark(t, tr, "aa"); g.Rect.Min.X != 0 {
+			t.Fatalf("start: aa at x=%d, want 0", g.Rect.Min.X)
+		}
+	})
+	t.Run("centre", func(t *testing.T) {
+		e := alignedEnv(t, 200, alignCentre)
+		tr := e.trace([]doc.Run{plain("aa")})
+		if g := glyphMark(t, tr, "aa"); g.Rect.Min.X != 91 {
+			t.Fatalf("centre: aa at x=%d, want 91 ((200 - 18) / 2)", g.Rect.Min.X)
+		}
+	})
+	t.Run("end", func(t *testing.T) {
+		e := alignedEnv(t, 200, alignEnd)
+		tr := e.trace([]doc.Run{plain("aa")})
+		g := glyphMark(t, tr, "aa")
+		if g.Rect.Min.X != 182 || g.Rect.Max.X != 200 {
+			t.Fatalf("end: aa spans x %d to %d, want 182 to 200", g.Rect.Min.X, g.Rect.Max.X)
+		}
+	})
+	t.Run("centre wrapped", func(t *testing.T) {
+		runs := []doc.Run{plain("aa"), brk, plain("bbbbbbbb")}
+		e := alignedEnv(t, 200, alignCentre)
+		tr := e.trace(runs)
+		if g := glyphMark(t, tr, "aa"); g.Rect.Min.X != 91 {
+			t.Fatalf("centre: first line at x=%d, want 91", g.Rect.Min.X)
+		}
+		if g := glyphMark(t, tr, "bbbbbbbb"); g.Rect.Min.X != 64 {
+			t.Fatalf("centre: second line at x=%d, want 64 ((200 - 72) / 2)", g.Rect.Min.X)
+		}
+	})
+	t.Run("end wrapped", func(t *testing.T) {
+		runs := []doc.Run{plain("aa"), brk, plain("bbbbbbbb")}
+		e := alignedEnv(t, 200, alignEnd)
+		tr := e.trace(runs)
+		if g := glyphMark(t, tr, "aa"); g.Rect.Max.X != 200 {
+			t.Fatalf("end: first line ends at x=%d, want 200", g.Rect.Max.X)
+		}
+		if g := glyphMark(t, tr, "bbbbbbbb"); g.Rect.Min.X != 128 || g.Rect.Max.X != 200 {
+			t.Fatalf("end: second line spans x %d to %d, want 128 to 200", g.Rect.Min.X, g.Rect.Max.X)
+		}
+	})
+	t.Run("centre code", func(t *testing.T) {
+		e := alignedEnv(t, 200, alignCentre)
+		tr := e.trace([]doc.Run{codeRun("e")})
+		bg := needMarks(t, tr, MarkCodeBg, "CodeBg")[0]
+		if bg.Rect.Min.X != 90 {
+			t.Fatalf("centre: code background at x=%d, want 90 ((200 - 19) / 2, rounded down)", bg.Rect.Min.X)
+		}
+		if g := glyphMark(t, tr, "e"); !within(bg.Rect, g.Rect) {
+			t.Fatalf("centre: code glyphs %v are outside their background %v", g.Rect, bg.Rect)
+		}
+	})
+	t.Run("end struck", func(t *testing.T) {
+		e := alignedEnv(t, 200, alignEnd)
+		struck := doc.Run{Kind: doc.TextRun, Text: "struck", Style: doc.Strike}
+		tr := e.trace([]doc.Run{struck})
+		if s := needMarks(t, tr, MarkStrike, "Strike")[0]; s.Rect.Max.X != 200 {
+			t.Fatalf("end: strike ends at x=%d, want 200", s.Rect.Max.X)
+		}
+	})
+	t.Run("end link", func(t *testing.T) {
+		tg := &doc.Target{Kind: doc.External, Value: "https://e.org/"}
+		runs := []doc.Run{linkRun("l", tg)}
+		e := alignedEnv(t, 200, alignEnd)
+		// As TestFlowLinkClick: a frame lays out, then a poll, then the frame whose area is clicked.
+		e.frame(runs)
+		if early, polled := e.poll(); polled {
+			t.Fatalf("a poll with no input reported %+v", early)
+		}
+		tr := e.frame(runs)
+		la := needMarks(t, tr, MarkLinkArea, "LinkArea")[0]
+		if la.Rect.Max.X != 200 {
+			t.Fatalf("end: link area ends at x=%d, want 200", la.Rect.Max.X)
+		}
+		e.router.Queue(move(centre(la.Rect)), press(centre(la.Rect)), release(centre(la.Rect)))
+		if got, ok := e.poll(); !ok || got != *tg {
+			t.Fatalf("end: click on the moved link = %+v, %t; want the link's target and true", got, ok)
+		}
+	})
+	t.Run("dims", func(t *testing.T) {
+		runs := []doc.Run{plain("aa"), brk, plain("bbbbbbbb")}
+		startDims := layoutDims(t, alignedEnv(t, 200, alignStart), runs)
+		for _, align := range []textAlign{alignCentre, alignEnd} {
+			if dims := layoutDims(t, alignedEnv(t, 200, align), runs); dims != startDims {
+				t.Fatalf("align %d: dimensions %+v, start gives %+v", align, dims, startDims)
+			}
+		}
+	})
+	t.Run("nil trace", func(t *testing.T) {
+		runs := []doc.Run{plain("aa"), brk, plain("bbbbbbbb")}
+		e := alignedEnv(t, 200, alignCentre)
+		withTrace := layoutDims(t, e, runs)
+		withNil, err := layoutFlow(e.context(), e.fp, runs, nil)
+		if err != nil {
+			t.Fatalf("centre with a nil trace: %v", err)
+		}
+		if withNil != withTrace {
+			t.Fatalf("centre: nil trace gives %+v, a recording trace gives %+v", withNil, withTrace)
+		}
+	})
+	t.Run("overflowing line", func(t *testing.T) {
+		e := alignedEnv(t, 1, alignEnd)
+		tr := e.trace([]doc.Run{plain("ab")})
+		for _, g := range needMarks(t, tr, MarkGlyphs, "Glyphs") {
+			if g.Rect.Min.X != 0 {
+				t.Fatalf("end at 1 px: %q starts at x=%d, want 0 (a line wider than its box is not moved)", g.Text, g.Rect.Min.X)
+			}
+		}
+	})
+}
+
+// TestFlowAlignUnknown: an alignment that is not one of the three is an error that names it.
+func TestFlowAlignUnknown(t *testing.T) {
+	e := newFlowEnv(t, 800)
+	e.fp.align = textAlign(9)
+	f, err := newFlow(e.context(), e.fp, &Trace{})
+	if err == nil || !strings.Contains(err.Error(), "9") {
+		t.Fatalf("alignment 9: error %v, want one naming 9", err)
+	}
+	if f != nil {
+		t.Fatal("alignment 9: a flow with an error")
+	}
+}
+
 // TestFlowZeroGlyphs: a fragment with no glyphs is an error, not a silent skip, so a rune that
 // shapes to nothing cannot stall textRun's loop. No input shapes to nothing in this font, so
 // the check is called directly.

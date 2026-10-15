@@ -225,13 +225,12 @@ func TestNoMaxWidth(t *testing.T) {
 	}
 }
 
-// TestViewPlaceholders: a table and an image are height 0 until M7 and M8, with their margins
-// (DOC-LAYOUT-4) and no marks.
+// TestViewPlaceholders: an image is height 0 until M8, with its margins (DOC-LAYOUT-4) and no
+// marks.
 func TestViewPlaceholders(t *testing.T) {
 	tests := []struct {
 		name, block string
 	}{
-		{"table", "| x |\n| - |\n| y |"},
 		{"image", "![alt](i.png)"},
 	}
 	for _, tt := range tests {
@@ -335,6 +334,7 @@ func TestViewClicked(t *testing.T) {
 		{"paragraph", "[l](https://e.org/)", 45},
 		{"quote", "> [l](https://e.org/)", 65},
 		{"list", "- [l](https://e.org/)", 77},
+		{"table", "| h |\n| - |\n| [l](https://e.org/) |", 59},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -390,8 +390,15 @@ func TestViewElements(t *testing.T) {
 			if got, want := len(markerMarks(tr)), countItems(t, b); got != want {
 				t.Fatalf("element %d: %d list markers, want %d (one per item)", i, got, want)
 			}
-		case doc.Table, doc.Image:
-			// Placeholders until M7 and M8: height 0 with their margins.
+		case doc.Table:
+			// Lines: m + 1 vertical and n + 2 horizontal (STYLE-TABLE-1). Fills: n + 1 (STYLE-TABLE-2, STYLE-TABLE-3).
+			if got, want := len(vlines(tr))+len(hlines(tr)), (len(b.Align)+1)+(len(b.Rows)+2); got != want {
+				t.Fatalf("element %d: %d table lines, want %d", i, got, want)
+			}
+			needCount(t, "row fills", fills(tr), len(b.Rows)+1)
+			needMarks(t, tr, MarkGlyphs, "Glyphs")
+		case doc.Image:
+			// A placeholder until M8: height 0 with its margins.
 		default:
 			t.Fatalf("element %d: no expectation for block %T", i, b)
 		}

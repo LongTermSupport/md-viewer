@@ -77,6 +77,15 @@ const (
 	wrapCode                  // STYLE-CODE-2: at the character that overflows, leading spaces kept
 )
 
+// textAlign is how each line of a flow sits in its box (STYLE-TABLE-4). The zero value is start.
+type textAlign uint8
+
+const (
+	alignStart  textAlign = iota // a line sits at the box's left edge
+	alignCentre                  // a line is centred in the box, the spare pixels rounded down on its right
+	alignEnd                     // a line sits at the box's right edge
+)
+
 // flowParams are the inputs to layoutFlow that do not change within one call.
 type flowParams struct {
 	shaper    *text.Shaper
@@ -84,7 +93,8 @@ type flowParams struct {
 	palette   Palette
 	inHeading bool // RunStyle's code rule (STYLE-TEXT-5)
 	links     *links
-	wrap      wrapMode // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
+	wrap      wrapMode  // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
+	align     textAlign // how each line sits in its box (STYLE-TABLE-4)
 }
 
 // Inline code padding in em of the run's size (STYLE-TEXT-5).

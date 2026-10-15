@@ -152,9 +152,9 @@ func numberNamed(t *testing.T, tr *Trace, s string) Mark {
 }
 
 // TestLeadsWithText: a block leads with a text line when its first line is text, found through
-// quotes and nested lists. An empty item is an empty line of text. A block whose first line is
-// not text (a rule, a table, an image, an empty quote or list) does not, and a block with no
-// layout is an error naming it (STYLE-LIST-2).
+// quotes and nested lists. An empty item is an empty line of text, and a table's first line is its
+// header row's. A block whose first line is not text (a rule, an image, an empty quote or list)
+// does not, and a block with no layout is an error naming it (STYLE-LIST-2).
 func TestLeadsWithText(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -167,7 +167,7 @@ func TestLeadsWithText(t *testing.T) {
 		{"quote of a paragraph", doc.Quote{Blocks: []doc.Block{doc.Paragraph{}}}, true},
 		{"list whose first item is empty", doc.List{Items: []doc.Item{{}}}, true},
 		{"rule", doc.Rule{}, false},
-		{"table", doc.Table{}, false},
+		{"table", doc.Table{Align: []doc.Align{doc.AlignNone}, Header: []doc.Cell{{}}}, true},
 		{"image", doc.Image{}, false},
 		{"empty quote", doc.Quote{}, false},
 		{"quote of a rule", doc.Quote{Blocks: []doc.Block{doc.Rule{}}}, false},
@@ -577,6 +577,12 @@ func TestListMarkerBaseline(t *testing.T) {
 		if dims.Size.Y != 114 {
 			t.Errorf("- is %d px tall, want 114", dims.Size.Y)
 		}
+	})
+
+	t.Run("table", func(t *testing.T) {
+		e := newViewEnv(t, "- | a |\n  | - |\n  | b |", Light, metric1)
+		_, tr := e.layout(0, 800)
+		markAt(t, tr, MarkBullet, "disc", image.Rect(64, 63, 69, 68))
 	})
 
 	t.Run("rule first", func(t *testing.T) {
