@@ -53,10 +53,11 @@ type BinaryError struct{ Path string }
 
 func (e *BinaryError) Error() string { return e.Path + " contains a NUL byte" }
 
-// Load reads and parses the file at path (DOC-13). It applies CLI-8's checks in order: stat,
-// directory, regular file, size, read, NUL byte. The errors of those checks are the typed errors above, as
-// pointers. now is called three times on success: before the stat, after the NUL check, and
-// after Parse. Document.Name is the base name of path and Document.Dir the absolute directory.
+// Load reads and parses the file at path (DOC-13). It applies CLI-8's checks in the order DOC-13
+// gives: stat, directory, regular file, open, directory and regular file again on the open file,
+// size, read, NUL byte. The errors of those checks are the typed errors above, as pointers. now is
+// called three times on success: before the stat, after the NUL check, and after Parse.
+// Document.Name is the base name of path and Document.Dir the absolute directory.
 func Load(path string, now func() time.Time) (*Document, LoadStats, error) {
 	t0 := now()
 	f, info, err := OpenRegular(path)
