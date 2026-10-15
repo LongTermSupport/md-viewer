@@ -19,6 +19,7 @@ import (
 	"gioui.org/op"
 	"gioui.org/unit"
 
+	"github.com/LongTermSupport/md-viewer/internal/doc"
 	"github.com/LongTermSupport/md-viewer/internal/render"
 )
 
@@ -439,6 +440,37 @@ func TestPrepareBindsInvalidate(t *testing.T) {
 	case <-invalidated:
 	case <-ctx.Done():
 		t.Fatal("the window was not invalidated when the image was ready")
+	}
+}
+
+// TestPrepareBindReachesViewer: Bind reaches the viewer, so a link whose opener fails and whose
+// error line cannot be written invalidates the window at once (LINK-2). The spawned function runs
+// in the test's own goroutine, so the count is read without a wait.
+func TestPrepareBindReachesViewer(t *testing.T) {
+	plain := filepath.Join(t.TempDir(), "plain.md")
+	writeFile(t, plain, "# a\n")
+	r := runPrepare(t, plain)
+	if !r.prep.OpenWindow {
+		t.Fatalf("OpenWindow is false, want true")
+	}
+	v := r.prep.viewer
+	v.opener = &fakeOpener{err: errors.New("no opener")}
+	v.stderr = failWriter{}
+	var spawned []func()
+	v.spawn = func(f func()) { spawned = append(spawned, f) }
+	invalidations := 0
+	r.prep.bind(func() { invalidations++ })
+
+	v.open(doc.Target{Kind: doc.External, Value: "https://e.org/"})
+	if len(spawned) != 1 {
+		t.Fatalf("spawned %d functions, want 1", len(spawned))
+	}
+	spawned[0]()
+	if invalidations != 1 {
+		t.Errorf("invalidations = %d, want 1", invalidations)
+	}
+	if err := v.takeAsyncErr(); err == nil {
+		t.Errorf("the failed write was not kept for the next frame")
 	}
 }
 
