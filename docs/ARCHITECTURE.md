@@ -164,6 +164,14 @@ plain values:
    layout functions that use the styles, shape text with a `*text.Shaper` and record what they
    drew into a `Trace`.
 
+The two open owner decisions (MILESTONES "Decisions for the owner", 01 and 02) are **awaiting the
+owner**. Both are built to the spec default, behind these seams:
+
+- 01 fonts and emoji: the face list in `fonts.go` and the options given to `NewShaper`. An emoji
+  or system font is one more source, or dropping `NoSystemFonts`.
+- 02 dark mode: only `--dark` (STYLE-PAL-2). The choice is made in one place, `app.Prepare`
+  (M10), from `Options.Dark`.
+
 ```go
 type Palette struct {
 	Fg, Canvas, FgMuted, Accent, Border, BorderMuted, BgMuted, CodeBg, OnAccent color.NRGBA
@@ -180,31 +188,46 @@ func NewShaper(f Faces) *text.Shaper            // text.NewShaper(text.NoSystemF
 
 // TextStyle is what a run is drawn with.
 type TextStyle struct {
-	Font       font.Font   // Typeface "Go" or "Go Mono", Style, Weight
+	Font       font.Font   // Typeface "Go" or "Go Mono", Style, Weight; Bold is font.SemiBold (F1)
 	Size       unit.Sp
 	LineHeight float32     // multiple of Size: 1.5, 1.25 or 1.45
 	Colour     color.NRGBA
 }
 
-// BlockBox is a block's margins and decoration, in dp.
-type BlockBox struct{ MarginTop, MarginBottom unit.Dp /* ... */ }
+// HeadingRule is the rule under a heading. The zero value is no padding and no rule.
+type HeadingRule struct {
+	PaddingBelow, Thickness unit.Dp
+	Colour                  color.NRGBA
+}
 
-func HeadingStyle(level int, p Palette) (TextStyle, HeadingRule)   // STYLE-TEXT-2
+// BodyStyle is the body text's style (STYLE-TEXT-1). A block's line height is its base style's
+// Size × LineHeight (F6).
+func BodyStyle(p Palette) TextStyle
+
+// HeadingStyle is the style of heading level 1 to 6; any other level is an error (F3). The sizes
+// are STYLE-TEXT-2's literal numbers in a per-level table, not em products (F4).
+func HeadingStyle(level int, p Palette) (TextStyle, HeadingRule, error) // STYLE-TEXT-2
+// RunStyle keeps base.LineHeight for every run, so a code run never changes the line (F6).
 func RunStyle(base TextStyle, s doc.Style, link bool, p Palette, inHeading bool) TextStyle
-func Margins(b doc.Block, nested bool) (top, bottom unit.Dp)        // DOC-LAYOUT-4
-func Gap(prevBottom, nextTop unit.Dp) unit.Dp                        // DOC-LAYOUT-3
-func Padding(windowWidth unit.Dp) unit.Dp                            // DOC-LAYOUT-1
-func OrderedMarker(n, depth int) string                              // STYLE-LIST-3
-func BulletShape(depth int) Bullet                                   // STYLE-LIST-2
-func ColumnWidths(natural []int, width int, minCol int) []int        // STYLE-TABLE-5
+// Margins: nested affects the List row only (F7); a block type with no row is an error (F3).
+func Margins(b doc.Block, nested bool) (top, bottom unit.Dp, err error) // DOC-LAYOUT-4
+func Gap(prevBottom, nextTop unit.Dp) unit.Dp                           // DOC-LAYOUT-3
+func Padding(windowWidth unit.Dp) unit.Dp                               // DOC-LAYOUT-1
+// OrderedMarker: n below 1 or a roman numeral above 3999 prints decimal (F8).
+func OrderedMarker(n, depth int) string // STYLE-LIST-3
+func BulletShape(depth int) Bullet      // STYLE-LIST-2, M6 (F2)
+// ColumnWidths: floor(N × W ÷ ΣN) with a minimum of minCol; "fits" is ΣN <= W; overflow is
+// clipped in M7 (F9).
+func ColumnWidths(natural []int, width int, minCol int) []int // STYLE-TABLE-5
 
 // Trace records what layout drew, in pixels relative to the block's top-left corner.
 // The view keeps one per visible block; tests read it to assert structure.
 type Trace struct{ Marks []Mark }
 type Mark struct {
-	Kind   MarkKind        // Glyphs, CodeBg, CodeBlockBg, HeadingRule, QuoteBar, RuleBar,
-	                       // Bullet, Number, TaskBox, TableLine, RowFill, ImageBox,
-	                       // ImagePixels, Placeholder, Strike, LinkArea
+	Kind   MarkKind        // MarkGlyphs, MarkCodeBg, MarkCodeBlockBg, MarkHeadingRule, MarkQuoteBar, MarkRuleBar,
+	                       // MarkBullet, MarkNumber, MarkTaskBox, MarkTableLine, MarkRowFill, MarkImageBox,
+	                       // MarkImagePixels, MarkPlaceholder, MarkStrike, MarkLinkArea. The Mark prefix avoids the
+                       // clash with the type names HeadingRule and Bullet (F2, from M4)
 	Rect   image.Rectangle
 	Colour color.NRGBA
 	Text   string          // for Glyphs and Number: the text drawn in Rect

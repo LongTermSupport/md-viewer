@@ -356,6 +356,8 @@ Add `gioui.org v0.10.3` and `golang.org/x/image v0.26.0` to `go.mod`.
 - `TestColumnWidths`: fits (natural kept), too wide (scaled), minimum 64 applied.
 - `TestLoadFaces`: six faces; the typefaces are `Go` and `Go Mono` with the weights and
   styles of STYLE-FONT-1; a `NewShaper` lays out `"Hello"` to a positive width.
+- `TestNewShaper`, "no system fonts" (SPEED-4): with an empty collection and `NoSystemFonts`,
+  `"Hello"` is not laid out from a system font. M11 keeps its CJK test (`TestNoSystemFonts`).
 - `BenchmarkLoadFonts`: `LoadFaces` then `NewShaper`, with `b.ReportAllocs()`.
 
 **Verification:** the standard checks, and
