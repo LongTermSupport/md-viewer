@@ -398,11 +398,11 @@ left of the item's content edge and vertically at the first line's baseline minu
 item's font size. The marker's rectangle has its top-left corner at the rounded centre minus
 half its size, so a 5 dp shape is centred to within half a pixel:
 
-| Nesting depth (lists around this one) | Marker                                                                                    |
-| ------------------------------------- | ----------------------------------------------------------------------------------------- |
-| 0                                     | filled circle, 5 dp diameter, colour the item's text colour (`Fg`; `FgMuted` inside a quote) |
+| Nesting depth (lists around this one) | Marker                                                                                                                     |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 0                                     | filled circle, 5 dp diameter, colour the item's text colour (`Fg`; `FgMuted` inside a quote)                               |
 | 1                                     | circle outline, 5 dp outer diameter, 1 dp stroke inside it, colour the item's text colour (`Fg`; `FgMuted` inside a quote) |
-| 2 or more                             | filled square, 5 dp side, colour the item's text colour (`Fg`; `FgMuted` inside a quote)   |
+| 2 or more                             | filled square, 5 dp side, colour the item's text colour (`Fg`; `FgMuted` inside a quote)                                   |
 
 These are the browser defaults for `disc`, `circle`, `square`, which github-markdown-css does
 not change for unordered lists. Depth counts ordered and unordered lists alike.
@@ -430,15 +430,14 @@ list, consecutive items are 16 dp apart and paragraphs inside an item keep their
 margin (`li>p { margin-top: 1rem }`, collapsed with the paragraph margins).
 
 **STYLE-LIST-5. Task items** draw no bullet or number, but they still count in the numbering. A
-13 dp square box sits with its left edge 22 dp
-left of the item's content edge, centred vertically on the first line's baseline minus 0.35 ×
-font size, with a 3 dp corner radius (`.task-list-item { list-style-type: none }`,
-`.task-list-item-checkbox { margin: 0 .2em .25em -1.4em }`; 13 dp is the browser's checkbox
-size). An `Open` box is filled `Canvas` with a 1 dp `FgMuted` border. A `Done` box is filled
-`Accent` with no border and a check mark in `OnAccent`: a 1.5 dp stroked polyline through the
-points (3, 6.5), (5.5, 9), (10, 4) dp relative to the box's top-left corner. Boxes are not
-interactive. A list item that is a task in a list that also has non-task items is still drawn
-as a task item, and the others keep their bullets.
+13 dp square box sits with its left edge 22 dp left of the item's content edge, centred
+vertically on the first line's baseline minus 0.35 × font size, with a 3 dp corner radius
+(`.task-list-item { list-style-type: none }`, `.task-list-item-checkbox { margin: 0 .2em .25em -1.4em }`;
+13 dp is the browser's checkbox size). An `Open` box is filled `Canvas` with a 1 dp
+`FgMuted` border. A `Done` box is filled `Accent` with no border and a check mark in `OnAccent`:
+a 1.5 dp stroked polyline through the points (3, 6.5), (5.5, 9), (10, 4) dp relative to the
+box's top-left corner. Boxes are not interactive. A list item that is a task in a list that also
+has non-task items is still drawn as a task item, and the others keep their bullets.
 
 ### 3.7 Tables
 
