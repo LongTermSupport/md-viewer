@@ -85,7 +85,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M5 The view and simple blocks
 - [x] M6 Lists
 - [x] M7 Tables
-- [ ] M8 Images
+- [x] M8 Images
 - [ ] M9 The viewer: scroll, zoom, links, quit
 - [ ] M10 The window and the binary
 - [ ] M11 Speed: fixtures, benchmarks, measurement
