@@ -412,9 +412,8 @@ The first line's baseline in STYLE-LIST-2, 3 and 5 is that of the item's first t
 font is the body style (STYLE-TEXT-1) whatever the first block is. The line is found
 recursively through quotes and nested lists, code block text included. A table's first line is
 its header row's. When the first block has no text line (for example a rule or an image), the
-baseline is that of an empty body
-line at the item's top, and the item's height is unchanged. An empty item (`-`) is one empty
-body line.
+baseline is that of an empty body line at the item's top, and the item's height is unchanged. An
+empty item (`-`) is one empty body line.
 
 **STYLE-LIST-3. Ordered markers** are text in the item's font and colour, the number followed
 by `.`, right-aligned so that the marker's right edge is 4 dp left of the item's content edge,
