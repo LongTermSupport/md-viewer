@@ -81,7 +81,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M2 Document model: links, tables, images, HTML, loading
 - [x] M3 Render styles, palettes and fonts
 - [x] M4 Inline text flow
-- [ ] M5 The view and simple blocks
+- [x] M5 The view and simple blocks
 - [ ] M6 Lists
 - [ ] M7 Tables
 - [ ] M8 Images
@@ -463,7 +463,8 @@ proves it).
 - `TestNoMaxWidth`: at 2000 px wide a long paragraph's glyphs reach past 980 px.
 - Also: `TestTraceShift` (trace origin), `TestCodeBlockStyle`, `TestFlowCodeMode` (code wrapping
   and trailing lines), `TestViewPlaceholders`, `TestViewLayoutError` (`Err`), `TestViewNilTrace`,
-  `TestViewClicked`, `TestViewElements` (every block of `elements.md`).
+  `TestViewClicked`, `TestViewElements` (every block of `elements.md`), `TestViewTinyWidth`
+  (no error at zero, negative and tiny widths).
 
 **Verification:** the standard checks.
 
@@ -532,7 +533,8 @@ is removed.
 
 **Files:** `internal/render/image.go` and `image_test.go`; the fixtures of ARCHITECTURE.md
 under `testdata/img/`, written by `TestImageFixtures`; the M5 placeholder for `doc.Image` is
-removed. `NewImages` is called by `app.Prepare` (add it there with a test).
+removed. `NewImages` is called by `app.Prepare` (add it there with a test), and `NewView`
+gains its `img *Images` parameter (M5 built `NewView(d, sh, p)`).
 
 **Tests first:**
 
@@ -597,8 +599,8 @@ started with `Start`; the wait runs in a goroutine.
 
 ## M10 The window and the binary
 
-**Covers:** WIN-1, WIN-2, WIN-3, WIN-6, CLI-6, CLI-9, STYLE-PAL-2, SPEED-1, SPEED-2,
-SPEED-6.
+**Covers:** WIN-1, WIN-2, WIN-3, WIN-6, CLI-6, CLI-9, STYLE-PAL-2, STYLE-PAL-3 (the window
+fills `Canvas`; the view paints none), SPEED-1, SPEED-2, SPEED-6.
 
 **Files:** `internal/window/window.go`; `internal/app/prepare.go` completed (fonts, images,
 view, viewer, timings, `Prepared.Window`); `internal/app/timing.go`; `cmd/md-viewer/main.go`
