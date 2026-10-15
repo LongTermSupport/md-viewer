@@ -102,7 +102,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M7 Tables
 - [x] M8 Images
 - [x] M9 The viewer: scroll, zoom, links, quit
-- [ ] M10 The window and the binary
+- [x] M10 The window and the binary
 - [ ] M11 Speed: fixtures, benchmarks, measurement
 
 ---
@@ -825,8 +825,8 @@ decides otherwise.
 11. **Installing md-viewer on the desktop** (a play, a `.desktop` file, the default for
     `text/markdown`) is fedora-desktop's Plan 00199 Phase 2, not part of this repository.
 12. **SPEED-6 carve-out, the new indirect modules, and the SPEED-1 reading.** (Awaiting the
-    owner; built to the suggested reading.) SPEED-6 already leaves Gio's own platform work to
-    Gio, which on X11 includes its IBus connection over D-Bus. md-viewer's code starts only the
+    owner; built to the suggested reading.) M10 reworded SPEED-6 to leave Gio's own platform work
+    to Gio, which on X11 includes its IBus connection over D-Bus. md-viewer's code starts only the
     window loop, the image-decoding spawn and the opener's wait (`TestGoStatements` pins them),
     and does no D-Bus itself. Importing `gioui.org/app` adds four indirect modules:
     `gioui.org/shader`, `github.com/godbus/dbus/v5`, `golang.org/x/net` and `golang.org/x/sys`.
