@@ -296,7 +296,7 @@ func TestUnmappedKindIsError(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := convertBlock(c.node, nil)
+			_, err := (&converter{}).convertBlock(c.node)
 			if err == nil {
 				t.Fatalf("convertBlock(%s) error = nil, want an error naming %q", c.name, c.kind)
 			}
