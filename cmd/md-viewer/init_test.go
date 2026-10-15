@@ -264,8 +264,8 @@ func TestTrackedFiles(t *testing.T) {
 	t.Run("not a git checkout", func(t *testing.T) {
 		dir := writeTree(t, map[string]string{"go.mod": "module x\n"})
 		_, err := trackedFiles(ctx, dir)
-		if err == nil || !strings.Contains(err.Error(), "git ls-files") {
-			t.Errorf("trackedFiles error = %v, want one naming git ls-files", err)
+		if err == nil || !strings.Contains(err.Error(), "not a git repository") {
+			t.Errorf("trackedFiles error = %v, want git's own \"not a git repository\"", err)
 		}
 	})
 
