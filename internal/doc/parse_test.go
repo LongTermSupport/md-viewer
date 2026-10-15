@@ -419,5 +419,17 @@ func TestParseDeterministic(t *testing.T) {
 func TestInvalidUTF8(t *testing.T) {
 	checkCases(t, []blockCase{
 		{"a\xffb", []Block{para(txt("a\xffb", 0))}},
+		{"`a\xff`", []Block{para(txt("a\xff", Code))}},
+		{"```\n\xffa\tb\n```", []Block{CodeBlock{Text: "\xffa" + strings.Repeat(" ", 6) + "b"}}},
+	})
+}
+
+// TestLineEndings: CRLF and a lone CR become LF before goldmark sees the source (DOC-7), so
+// no text carries a CR.
+func TestLineEndings(t *testing.T) {
+	checkCases(t, []blockCase{
+		{"```\r\na\tb\r\n```", []Block{CodeBlock{Text: "a" + strings.Repeat(" ", 7) + "b"}}},
+		{"a  \r\nb", []Block{para(txt("a", 0), brk(), txt("b", 0))}},
+		{"a\rb", []Block{para(txt("a b", 0))}},
 	})
 }
