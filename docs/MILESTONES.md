@@ -104,7 +104,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M9 The viewer: scroll, zoom, links, quit
 - [x] M10 The window and the binary
 - [x] M11 Speed: fixtures, benchmarks, measurement
-- [ ] M12 Hardening: the label gate on tracked files, non-blocking opens
+- [x] M12 Hardening: the label gate on tracked files, non-blocking opens
 
 ---
 
