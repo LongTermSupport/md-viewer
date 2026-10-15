@@ -348,10 +348,10 @@ hover.
 0.3 em above the baseline, max(1 dp, size ÷ 16) thick, across the run's width.
 
 **STYLE-TEXT-5. Inline code** is Go Mono at 85% of the surrounding font size (13.6 sp in body
-text), colour unchanged, on a `CodeBg` rounded rectangle with a 6 dp corner radius. A code run keeps
-the line height of its block (the run does not change it). The
-rectangle extends 0.2 em above and below the glyph line box without changing the line height,
-and 0.4 em to the left and right, and this horizontal padding is part of the run's width
+text), colour unchanged, on a `CodeBg` rounded rectangle with a 6 dp corner radius. A code run
+keeps the line height of its block (the run does not change it). The rectangle extends 0.2 em
+above and below the glyph line box without changing the line height, and 0.4 em to the left and
+right, and this horizontal padding is part of the run's width
 (`code, tt { padding: .2em .4em; font-size: 85%; background-color; border-radius: 6px }`).
 Inside a heading the code is 100% of the heading size with 0.2 em horizontal padding and none
 vertical (`h1 code, … { padding: 0 .2em; font-size: inherit }`). When a code run wraps across
@@ -385,10 +385,10 @@ width (`hr { height: .25em; background-color; border: 0 }`).
 **STYLE-LIST-1.** A list indents its items' content by 32 dp from the list's left edge
 (`ul, ol { padding-left: 2em }`); nested lists indent again from their item's content edge.
 
-**STYLE-LIST-2. Unordered markers** are shapes drawn with clip operations, not glyphs. The shapes are drawn by choice: the Go
-fonts do have ◦ and ▪. They are centred horizontally
-11 dp left of the item's content edge and vertically
-at the first line's baseline minus 0.27 × the item's font size:
+**STYLE-LIST-2. Unordered markers** are shapes drawn with clip operations, not glyphs. The
+shapes are drawn by choice: the Go fonts do have ◦ and ▪. They are centred horizontally 11 dp
+left of the item's content edge and vertically at the first line's baseline minus 0.27 × the
+item's font size:
 
 | Nesting depth (lists around this one) | Marker                                           |
 | ------------------------------------- | ------------------------------------------------ |
@@ -444,8 +444,8 @@ natural width: the widest of its cells laid out on one line, plus 26 dp padding 
 border. If the sum of N fits in W, each column is N wide and the table is that sum wide,
 left-aligned (`table { width: max-content; max-width: 100% }`). Otherwise each column is
 max(64 dp, ⌊N × W ÷ ΣN⌋) wide, in whole dp, and cell text wraps. "Fits" means ΣN ≤ W. If the
-64 dp minimums still exceed W, the table is clipped at the content's right edge. GitHub scrolls a too-wide table sideways;
-md-viewer has no horizontal scrolling.
+64 dp minimums still exceed W, the table is clipped at the content's right edge. GitHub scrolls a
+too-wide table sideways; md-viewer has no horizontal scrolling.
 
 **STYLE-TABLE-6.** A row's height is its tallest cell. Cell text is vertically aligned to the
 top of the cell.
