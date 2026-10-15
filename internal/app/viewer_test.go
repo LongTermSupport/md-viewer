@@ -842,12 +842,32 @@ func TestViewerLinks(t *testing.T) {
 	}
 }
 
-// TestViewerLinkControls checks that a link is not opened without a click: a hover over it, and
-// a frame with no input, do nothing. (A release away from a pressed link is not pinned here: the
-// click gesture's behaviour under synthetic events is not yet verified; see the M9 report.)
+// TestViewerLinkControls checks that a link is not opened without a click: a hover over it, a
+// frame with no input, and a press on the link released away from it (LINK-1: press and release
+// on the same link). The press-and-release-away sequence settles the layout first, and sends the
+// pointer's moves a frame apart, as the window does; Gio then cancels the gesture.
 func TestViewerLinkControls(t *testing.T) {
 	d := linkDoc(t, "[e](https://e.org/x)")
 	p := linkCentre(t, d, imagesOf(t, d), defaultSize.X-10)
+	away := f32.Pt(p.X+200, p.Y)
+	t.Run("press on the link and release away", func(t *testing.T) {
+		var stderr bytes.Buffer
+		e := newEnv(t, d, defaultSize, &stderr)
+		e.frame()
+		e.frame()
+		e.router.Queue(pointer.Event{Kind: pointer.Move, Position: p, Source: pointer.Mouse})
+		e.frame()
+		e.router.Queue(pointer.Event{Kind: pointer.Press, Position: p, Buttons: pointer.ButtonPrimary, Source: pointer.Mouse})
+		e.frame()
+		e.router.Queue(pointer.Event{Kind: pointer.Move, Position: away, Buttons: pointer.ButtonPrimary, Source: pointer.Mouse})
+		e.frame()
+		e.router.Queue(pointer.Event{Kind: pointer.Release, Position: away, Buttons: pointer.ButtonPrimary, Source: pointer.Mouse})
+		e.frame()
+		e.runSpawned()
+		if len(e.opener.calls) != 0 || stderr.Len() != 0 {
+			t.Errorf("opener calls %q and stderr %q, want none", e.opener.calls, stderr.String())
+		}
+	})
 	t.Run("hover over the link", func(t *testing.T) {
 		var stderr bytes.Buffer
 		e := newEnv(t, d, defaultSize, &stderr)
