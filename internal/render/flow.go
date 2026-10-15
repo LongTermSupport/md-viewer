@@ -99,7 +99,7 @@ const (
 // truncator is the text shaping puts where a line was cut. It is U+200B, a zero-width space, so
 // it takes no room (a shaper with the default truncator reserves room for it, and the glyph of
 // the truncator is skipped). It is written as an escape so that it is visible in the source.
-const truncator = "​"
+const truncator = "\u200b"
 
 // unboundedWidth is a shaping width that no line reaches, so that a call with no limit can
 // measure a single rune. It is internal: no spec value depends on it.
