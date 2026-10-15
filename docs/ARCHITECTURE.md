@@ -410,7 +410,7 @@ type Action uint8 // None, LineDown, LineUp, PageDown, PageUp, Top, Bottom,
                   // ZoomIn, ZoomOut, ZoomReset, Quit
 func ActionFor(e key.Event) Action                // SCROLL-2, ZOOM-2, WIN-4 as a pure table
 
-type Zoom struct{ /* level index */ }
+type Zoom struct{ /* steps from 100% in zoomLevels; the zero value is 100% (ZOOM-1) */ }
 func (z Zoom) Percent() int
 func (z Zoom) In() Zoom; func (z Zoom) Out() Zoom; func (z Zoom) Reset() Zoom
 func (z Zoom) Metric(m unit.Metric) unit.Metric   // STYLE-ZOOM-3
