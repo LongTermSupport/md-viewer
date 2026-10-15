@@ -41,8 +41,8 @@ testdata/               fixtures shared by the packages' tests and benchmarks
 ```
 
 Dependencies point one way: `cmd -> app, window, window/gioapp`; `gioapp -> window`;
-`app -> window, render, doc`; `render -> doc`; `window` imports only Gio's `layout`, `op`, `unit`
-and `image/color` packages, not `gioui.org/app`; `doc` imports neither. Nothing below `cmd` calls
+`app -> window, render, doc`; `render -> doc`; `window` imports only Gio's `layout`, `op`,
+`op/paint`, `unit` and `image/color` packages, not `gioui.org/app`; `doc` imports neither. Nothing below `cmd` calls
 `os.Exit` (go-qa's `gqaci_exit_outside_main` enforces it).
 
 Only `internal/window/gioapp` and `cmd/md-viewer` need a display at run time. Everything else is
