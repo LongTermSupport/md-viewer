@@ -12,8 +12,8 @@ FROM ${BASE_IMAGE}
 # Build and test tools.
 # - gcc, libc6-dev: Gio's window code is cgo, and `go test -race` needs cgo.
 # - pkg-config: Gio's cgo files find their libraries with `#cgo linux pkg-config:`.
-# - git, curl, wget, ca-certificates, xz-utils: scripts/install-qa-tools.sh clones go-qa-ci,
-#   and go-qa-ci's install-tools.sh downloads release archives and unpacks them.
+# - git, curl, wget, ca-certificates, xz-utils: fetching go-qa-ci and the release archives
+#   go-qa downloads and unpacks.
 # - jq: reading `go list -json` and GitHub API output while working.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -80,7 +80,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI: pushes, pull requests, and the authenticated clone of go-qa-ci while it is
-# private (scripts/install-qa-tools.sh uses git, which `gh auth setup-git` authenticates).
+# private (git and go install use `gh auth setup-git` for its credentials).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -105,18 +105,9 @@ RUN wget -qO /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" 
 ENV GOTOOLCHAIN=local
 
 # go-qa-ci's tools (go-qa, golangci-lint, ast-grep, deadcode, govulncheck, gremlins) are NOT
-# installed here. Their versions and checksums are pinned in go-qa-ci's own tools.lock, at the
-# commit in qa/go-qa-ci.ref, and scripts/install-qa-tools.sh installs exactly those into the
-# checkout's .tools/bin, the same way CI does. Copying the pins into this file would make a
-# second source that drifts; and while go-qa-ci is private an image build has no credentials
-# to read it.
-#
-# .tools/bin goes on PATH for every process in the container, so the one go-qa-ci install is
-# what a shell, scripts/qa.sh and the hooks daemon's lint_on_edit (which finds golangci-lint
-# on PATH) all use. There is no second copy of any tool. The directory does not exist until
-# scripts/install-qa-tools.sh has run, and a missing PATH entry is harmless. ccy mounts the
-# project at /workspace.
-ENV PATH="/workspace/.tools/bin:${PATH}"
+# installed here. The gate is the plain Go toolchain above; go-qa is an add-on that installs
+# its own checksum-verified tools from go-qa-ci's tools.lock. Copying those pins into this
+# file would make a second source that drifts.
 
 # Verify the toolchain, and that every pkg-config module Gio's cgo lines name resolves.
 RUN go version \

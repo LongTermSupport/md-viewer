@@ -114,15 +114,17 @@ an image's pixels only when the image scrolls into view, off the drawing path.
 
 ## Development
 
-QA is [go-qa-ci](https://github.com/LongTermSupport/go-qa-ci), pinned to the commit in
-`qa/go-qa-ci.ref`:
+The gate is the plain Go toolchain:
 
 ```bash
-scripts/install-qa-tools.sh   # once, and after the pin changes
-scripts/qa.sh                 # the full gate
+gofmt -l .        # must print nothing
+go vet ./...
+go test -race -count=1 ./...
 ```
 
-go-qa-ci is private for now, so CI's `go-qa` job fails, saying so, until it is published.
+[go-qa-ci](https://github.com/LongTermSupport/go-qa-ci), pinned in `qa/go-qa-ci.ref`, adds
+more checks in CI. It is private for now, so CI's `go-qa` job fails at its install step until
+it is published.
 
 ## Licence
 

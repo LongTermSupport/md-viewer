@@ -45,23 +45,22 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) repeats the build, the 
 smoke run on `ubuntu-24.04` and uploads the binary as an artifact. That run is the proof that
 the code builds from a clean checkout.
 
-go-qa-ci is private. In the container, `scripts/install-qa-tools.sh` works when `gh` is logged
-in and has been set up as git's credential helper (`gh auth setup-git`). In CI it cannot work
-until go-qa-ci is public, so the `go-qa` job fails with a message saying why; that red job is
-expected and is not a reason to change the workflow.
+The gate is the plain Go toolchain; go-qa-ci is an add-on, never a requirement. go-qa-ci is
+private, so in CI its `go-qa` job cannot install go-qa until it is public and fails at that
+step; that red job is expected and is not a reason to change the workflow.
 
 ## Verification commands
 
 Every milestone runs the **standard checks**, from the repository root:
 
 ```bash
+gofmt -l .        # must print nothing
 go vet ./...
 go test -race -count=1 ./...
-scripts/qa.sh
 ```
 
-Once M0 has created them, `scripts/install-qa-tools.sh` must have been run once in the
-container (it is re-run only when `qa/go-qa-ci.ref` changes). From M10, also the **smoke run**:
+Where `go-qa` is installed it adds to these (`go-qa run`); it is never required. From M10,
+also the **smoke run**:
 
 ```bash
 go build -trimpath -o dist/md-viewer ./cmd/md-viewer
@@ -72,8 +71,8 @@ which must exit 0 and print one line matching
 `^read_ms=[0-9]+\.[0-9] parse_ms=[0-9]+\.[0-9] fonts_ms=[0-9]+\.[0-9] first_frame_ms=[0-9]+\.[0-9]$`.
 
 After pushing, check the CI run with `gh run list --limit 3` and `gh run view <id>`: the
-`build` job must be green. The `go-qa` job is red only for the private-repository reason
-while go-qa-ci is private; any other failure in it is a real failure.
+`build` job must be green. The `go-qa` job is red only at its install step, for the
+private-repository reason, while go-qa-ci is private; any other failure in it is a real failure.
 
 ## Status
 
@@ -105,12 +104,13 @@ is in `.claude/ccy/Dockerfile` and a rebuild by the owner, not an install by han
 
 - `go.mod`: `module github.com/LongTermSupport/md-viewer`, `go 1.26.9`. No requirements yet
   beyond what the code imports (`go mod tidy`).
-- `.gitignore`: `/.tools/`, `/dist/`, `*.test`, `*.out`, `/untracked/`.
-- `qa/go-qa-ci.ref`: the single line `803b122ce5266d58c5fa296985a4e1fde206cd0f`.
+- `.gitignore`: `/dist/`, `*.test`, `*.out`, `/untracked/`.
+- `qa/go-qa-ci.ref`: the single line `803b122ce5266d58c5fa296985a4e1fde206cd0f`; it is bumped
+  to the commit where go-qa installs its own tools. No installer script and no tool
+  directory live in this repository: the Go gate needs only the Go toolchain.
 - `qa/go-qa.toml`: only these comment lines (the defaults apply):
   `# go-qa configuration; see go-qa-ci's README, "Configuration".` and
   `# Empty on purpose: go-qa's defaults apply. A change to them is a reviewed diff here.`
-- `scripts/install-qa-tools.sh` and `scripts/qa.sh`, exactly as below, mode 0755.
 - `.github/workflows/ci.yml`, exactly as below.
 - `internal/app/cli.go`: `Options`, `UsageError`, `ParseArgs`, `Usage`, `ExitCode` and its
   constants.
@@ -120,58 +120,6 @@ is in `.claude/ccy/Dockerfile` and a rebuild by the owner, not an install by han
   `md-viewer: not implemented yet` to stderr and exits 1; M2 and M10 replace that line.
 - `README.md` already exists; change nothing in it except to correct an error you find.
 
-`scripts/install-qa-tools.sh`:
-
-```bash
-#!/usr/bin/env bash
-# Installs go-qa and the tools it runs into .tools/bin, at the go-qa-ci commit pinned in
-# qa/go-qa-ci.ref, the way go-qa-ci's README ("Installing") describes. CI and the container
-# both use it, so the tool versions are pinned in one place: go-qa-ci's tools.lock.
-set -euo pipefail
-
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ref="$(tr -d '[:space:]' < "${root}/qa/go-qa-ci.ref")"
-repo="https://github.com/LongTermSupport/go-qa-ci.git"
-src="${root}/.tools/go-qa-ci"
-tools=(golangci-lint ast-grep deadcode govulncheck gremlins)
-export GOBIN="${root}/.tools/bin"
-
-if ! GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "${repo}" HEAD >/dev/null 2>&1; then
-    msg="cannot read ${repo}. go-qa-ci is private, so it can only be fetched with GitHub credentials that can read it (gh auth login, then gh auth setup-git). Public CI has none, so the go-qa check fails until go-qa-ci is made public."
-    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-        echo "::error title=go-qa-ci is not reachable::${msg}"
-    fi
-    echo "install-qa-tools: ${msg}" >&2
-    exit 1
-fi
-
-rm -rf "${src}"
-GIT_TERMINAL_PROMPT=0 git clone --quiet "${repo}" "${src}"
-git -C "${src}" checkout --quiet --detach "${ref}"
-mkdir -p "${GOBIN}"
-(cd "${src}" && go install ./cmd/go-qa)
-PATH="${GOBIN}:${PATH}" "${src}/scripts/install-tools.sh" "${tools[@]}"
-PATH="${GOBIN}:${PATH}" "${src}/scripts/install-tools.sh" --check "${tools[@]}"
-"${GOBIN}/go-qa" --version
-```
-
-`scripts/qa.sh`:
-
-```bash
-#!/usr/bin/env bash
-# Runs go-qa over this module, with the tools scripts/install-qa-tools.sh installed.
-set -euo pipefail
-
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [[ ! -x "${root}/.tools/bin/go-qa" ]]; then
-    echo "qa: ${root}/.tools/bin/go-qa is missing; run scripts/install-qa-tools.sh first" >&2
-    exit 1
-fi
-export PATH="${root}/.tools/bin:${PATH}"
-cd "${root}"
-exec go-qa run "$@"
-```
-
 `.github/workflows/ci.yml`:
 
 ```yaml
@@ -179,8 +127,9 @@ name: CI
 
 # build: vet, race tests and a release build on Ubuntu with Gio's build dependencies; the
 #   binary is uploaded as an artifact. From M10 it also runs the binary under Xvfb.
-# go-qa: go-qa-ci over the module. go-qa-ci is private, so until it is public this job fails
-#   at its first step with a message saying so. It must not be skipped or made optional.
+# go-qa: go-qa-ci over the module, an add-on to the plain Go gate in `build`. go-qa installs
+#   its own pinned tools. go-qa-ci is private, so until it is public this job fails at its
+#   install step. It must not be skipped or made optional.
 on:
   push:
     branches: ["**"]
@@ -220,6 +169,8 @@ jobs:
           read -ra pkgs <<< "${APT_PACKAGES}"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+      - name: gofmt -l prints nothing
+        run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       - run: go build -trimpath -o dist/md-viewer ./cmd/md-viewer
@@ -248,9 +199,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
       - name: Install go-qa at the pinned go-qa-ci commit (fails while go-qa-ci is private)
-        run: scripts/install-qa-tools.sh
+        env:
+          GOPRIVATE: github.com/LongTermSupport/go-qa-ci
+        run: go install "github.com/LongTermSupport/go-qa-ci/cmd/go-qa@$(tr -d '[:space:]' < qa/go-qa-ci.ref)"
       - name: go-qa run --ci
-        run: scripts/qa.sh --ci
+        run: go-qa run --ci
 ```
 
 **Tests first** (`internal/app/cli_test.go`, `version_test.go`), table-driven:
@@ -274,12 +227,11 @@ jobs:
   stdout is the usage), no arguments (exit 2, stderr is CLI-7's two lines) and `--version`
   (exit 0, stdout starts with `md-viewer `).
 
-**Verification:** the environment check above, `scripts/install-qa-tools.sh`, then the
-standard checks. Push, and check the CI run: `build` green, `go-qa` red with the
-"go-qa-ci is not reachable" annotation.
+**Verification:** the environment check above, then the standard checks. Push, and check the
+CI run: `build` green, `go-qa` red only at its install step (go-qa-ci is private).
 
 **Done when:** the standard checks pass in the container, CI's `build` job is green, and CI's
-`go-qa` job fails only at its install step with the private-repository message.
+`go-qa` job fails only at its install step with the private-repository error.
 
 ---
 
@@ -691,6 +643,6 @@ decides otherwise.
 08. **Files over 64 MiB are refused.**
 09. **The wheel scrolls by what Gio reports**: 100 px a notch on Wayland, 10 on X11.
 10. **go-qa-ci is private**, so CI's `go-qa` job is red until it is public. The alternative is
-    a read-only token as a repository secret.
+    a read-only token as a repository secret. The plain Go toolchain gate does not depend on it.
 11. **Installing md-viewer on the desktop** (a play, a `.desktop` file, the default for
     `text/markdown`) is fedora-desktop's Plan 00199 Phase 2, not part of this repository.

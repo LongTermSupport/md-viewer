@@ -377,17 +377,14 @@ loop). In `internal/render`: `BenchmarkLoadFonts` (`LoadFaces` plus `NewShaper`)
 
 ## QA
 
-QA is go-qa-ci at the commit in `qa/go-qa-ci.ref`. `scripts/install-qa-tools.sh` clones
-go-qa-ci at that commit into `.tools/go-qa-ci`, builds `go-qa` into `.tools/bin`, and runs
-go-qa-ci's own `scripts/install-tools.sh` for the tools go-qa runs (golangci-lint, ast-grep,
-deadcode, govulncheck, gremlins) at the versions in go-qa-ci's `tools.lock`, verified by
-go-qa-ci's own checksums. `scripts/qa.sh` puts `.tools/bin` first on `PATH` and runs
-`go-qa run "$@"`. Both CI and the container use these two scripts, so the pins live in one
-place (go-qa-ci itself) and the image does not repeat them. `qa/go-qa.toml` holds only
+The gate is the plain Go toolchain: `gofmt -l .` printing nothing, `go vet ./...` and
+`go test -race -count=1 ./...`. go-qa-ci is an add-on, never a requirement. CI's `go-qa` job
+runs `go install` of go-qa at the commit in `qa/go-qa-ci.ref`, then `go-qa run --ci`; go-qa
+installs and runs its own checksum-verified tools, pinned in go-qa-ci's `tools.lock`, so
+neither this repository nor the image repeats those pins. `qa/go-qa.toml` holds only
 `modules = []` with a comment; go-qa's defaults (coverage 80%, mutants off) apply.
 
-While go-qa-ci is private, `scripts/install-qa-tools.sh` fails with a message naming the
-cause when the clone is refused. In CI this makes the `go-qa` job red on purpose.
+While go-qa-ci is private, the install step fails and the `go-qa` job is red on purpose.
 
 ## Cross-platform seams
 
