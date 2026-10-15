@@ -23,12 +23,29 @@ type blockCtx struct {
 	root   Palette
 	shaper *text.Shaper
 	links  *links
+	depth  int  // the number of lists around this block (STYLE-LIST-2, STYLE-LIST-3)
+	tight  bool // this block is a direct child of a tight list's item (STYLE-LIST-4)
 }
 
-// quoteCtx is the context of a quote's children: their text is FgMuted (STYLE-QUOTE-1).
+// quoteCtx is the context of a quote's children: their text is FgMuted (STYLE-QUOTE-1). A quote is
+// not an item of a tight list, so its children are not tight, but it does not end a list's
+// nesting, so its depth is kept.
 func quoteCtx(c blockCtx) blockCtx {
 	c.text.Fg = c.root.FgMuted
+	c.tight = false
 	return c
+}
+
+// stackMargins are a block's top and bottom margins in a stack. In a tight list item a paragraph
+// or an image has none (STYLE-LIST-4). Any other block has its DOC-LAYOUT-4 margins, with a list
+// nested when it is inside a list at any depth.
+func stackMargins(ctx blockCtx, b doc.Block) (top, bottom unit.Dp, err error) {
+	_, para := b.(doc.Paragraph)
+	_, img := b.(doc.Image)
+	if ctx.tight && (para || img) {
+		return 0, 0, nil
+	}
+	return Margins(b, ctx.depth > 0)
 }
 
 // flow is the flow parameters for text laid out in this context.
@@ -92,7 +109,9 @@ func layoutBlock(gtx layout.Context, ctx blockCtx, b doc.Block, tr *Trace) (layo
 		return layoutCodeBlock(gtx, ctx, b, tr)
 	case doc.Rule:
 		return layoutRule(gtx, ctx, tr)
-	case doc.List, doc.Table, doc.Image:
+	case doc.List:
+		return layoutList(gtx, ctx, b, tr)
+	case doc.Table, doc.Image:
 		// Placeholders until their milestones: height 0, with the margins the caller gives.
 		return layout.Dimensions{Size: image.Pt(width, 0)}, nil
 	default:
@@ -117,7 +136,10 @@ func layoutHeading(gtx layout.Context, ctx blockCtx, h doc.Heading, tr *Trace) (
 		fillRect(gtx, r, rule.Colour)
 		tr.add(Mark{Kind: MarkHeadingRule, Rect: r, Colour: rule.Colour})
 	}
-	return layout.Dimensions{Size: image.Pt(dims.Size.X, ruleTop+thick)}, nil
+	total := ruleTop + thick
+	// The first baseline is the text's, so its distance from the bottom is the total less the text's
+	// distance from the top of the flow.
+	return layout.Dimensions{Size: image.Pt(dims.Size.X, total), Baseline: total - (dims.Size.Y - dims.Baseline)}, nil
 }
 
 // layoutCodeBlock lays out a code block: its lines in Go Mono, wrapped at the character that
@@ -146,7 +168,8 @@ func layoutCodeBlock(gtx layout.Context, ctx blockCtx, c doc.CodeBlock, tr *Trac
 	fillRoundRect(gtx, bg, codeBlockRadius, ctx.root.BgMuted)
 	tr.add(Mark{Kind: MarkCodeBlockBg, Rect: bg, Colour: ctx.root.BgMuted})
 	call.Add(gtx.Ops)
-	return layout.Dimensions{Size: image.Pt(width, h)}, nil
+	// The first baseline is the padding and the flow's first baseline below the top.
+	return layout.Dimensions{Size: image.Pt(width, h), Baseline: h - (pad + (dims.Size.Y - dims.Baseline))}, nil
 }
 
 // codeRuns is a code block's text as runs: a break before each line after the first, and a text
@@ -201,7 +224,7 @@ func layoutQuote(gtx layout.Context, ctx blockCtx, q doc.Quote, tr *Trace) (layo
 		fillRect(gtx, bar, ctx.root.Border)
 		tr.add(Mark{Kind: MarkQuoteBar, Rect: bar, Colour: ctx.root.Border})
 	}
-	return layout.Dimensions{Size: image.Pt(width, dims.Size.Y)}, nil
+	return layout.Dimensions{Size: image.Pt(width, dims.Size.Y), Baseline: dims.Baseline}, nil
 }
 
 // layoutStack lays out blocks one under another, with the gaps between them (DOC-LAYOUT-3). The
@@ -210,8 +233,9 @@ func layoutQuote(gtx layout.Context, ctx blockCtx, q doc.Quote, tr *Trace) (layo
 func layoutStack(gtx layout.Context, ctx blockCtx, blocks []doc.Block, tr *Trace) (layout.Dimensions, error) {
 	y := 0
 	var prevBottom unit.Dp
+	firstTop := 0 // the first block's first baseline, from the top of the first block
 	for i, b := range blocks {
-		top, bottom, err := Margins(b, false)
+		top, bottom, err := stackMargins(ctx, b)
 		if err != nil {
 			return layout.Dimensions{}, err
 		}
@@ -224,8 +248,11 @@ func layoutStack(gtx layout.Context, ctx blockCtx, blocks []doc.Block, tr *Trace
 		if err != nil {
 			return layout.Dimensions{}, err
 		}
+		if i == 0 {
+			firstTop = dims.Size.Y - dims.Baseline
+		}
 		y += dims.Size.Y
 		prevBottom = bottom
 	}
-	return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, y)}, nil
+	return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, y), Baseline: y - firstTop}, nil
 }

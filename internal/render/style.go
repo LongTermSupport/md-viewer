@@ -149,7 +149,8 @@ const (
 )
 
 // Margins gives a block's top and bottom margins (DOC-LAYOUT-4). nested is true for a list
-// inside a list item, the only block whose margins depend on nesting (F7). A block with no row
+// inside a list at any depth, through quotes too: the only block whose margins depend on
+// nesting (F7). A block with no row
 // is an error (F3). Margins does not check Heading.Level: HeadingStyle rejects levels outside
 // 1 to 6.
 func Margins(b doc.Block, nested bool) (top, bottom unit.Dp, err error) {
@@ -242,6 +243,45 @@ func toAlpha(n int) string {
 		n /= 26
 	}
 	return string(buf)
+}
+
+// Bullet is the shape of an unordered list marker (STYLE-LIST-2). Its String is the text of the
+// marker's mark. The zero value is BulletDisc.
+type Bullet uint8
+
+// The shapes of an unordered marker, by nesting depth (STYLE-LIST-2).
+const (
+	BulletDisc   Bullet = iota // filled circle, 5 dp across, at depth 0
+	BulletCircle               // circle outline, 5 dp across with a 1 dp stroke inside, at depth 1
+	BulletSquare               // filled square, 5 dp on a side, at depth 2 or more
+)
+
+// BulletShape is the shape of a marker at a nesting depth: the number of lists around the item's
+// list (STYLE-LIST-2). A depth below 1 is a disc, as OrderedMarker's default is decimal.
+func BulletShape(depth int) Bullet {
+	switch {
+	case depth == 1:
+		return BulletCircle
+	case depth >= 2:
+		return BulletSquare
+	default:
+		return BulletDisc
+	}
+}
+
+// String is the name of the shape, which is the text of its mark. A value with no name is written
+// with its number.
+func (b Bullet) String() string {
+	switch b {
+	case BulletDisc:
+		return "disc"
+	case BulletCircle:
+		return "circle"
+	case BulletSquare:
+		return "square"
+	default:
+		return fmt.Sprintf("Bullet(%d)", uint8(b))
+	}
 }
 
 // ColumnWidths gives each table column's width (STYLE-TABLE-5). When the natural widths sum to

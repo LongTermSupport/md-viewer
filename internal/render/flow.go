@@ -205,6 +205,12 @@ func pxOf(gtx layout.Context, s unit.Sp) float64 {
 	return float64(s) * float64(gtx.Metric.PxPerSp)
 }
 
+// dpPx is a length in dp in px before any rounding, as pxOf is for sizes in sp. The unit package
+// has no float conversion from dp, so the marker geometry uses this.
+func dpPx(gtx layout.Context, d unit.Dp) float64 {
+	return float64(d) * float64(gtx.Metric.PxPerDp)
+}
+
 // pxPerEm is the size the shaper draws a style at: the size in px, rounded up to a whole pixel
 // (ARCHITECTURE "internal/render", text flow rules).
 func pxPerEm(gtx layout.Context, s unit.Sp) fixed.Int26_6 {

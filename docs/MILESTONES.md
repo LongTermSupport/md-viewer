@@ -476,11 +476,16 @@ proves it).
 
 **Covers:** STYLE-LIST-1, STYLE-LIST-2, STYLE-LIST-3, STYLE-LIST-4, STYLE-LIST-5.
 
-**Files:** `internal/render/list.go` and `list_test.go`; the M5 placeholder for `doc.List` is
-removed.
+**Files:** `internal/render/list.go` and `list_test.go`; `style.go` (the `Bullet` type) and
+`blocks.go` (the list dispatch and the baselines of every text block); the M5 placeholder for
+`doc.List` is removed.
 
 **Tests first:**
 
+- `TestBulletShape`: depths 0 to 3 and 9 give disc, circle, square, square, square; -1 and 0
+  give disc; the shapes' texts are `disc`, `circle`, `square`.
+- `TestLeadsWithText`: which first blocks start with a text line (an empty item counts), and
+  the errors for a nil block and for a pointer block.
 - `TestListIndent`: item glyphs start 32 px right of the list's left edge; a nested list's
   items 64 px.
 - `TestBullets`: depths 0, 1, 2 give `Bullet` marks of the three shapes (record the shape in
@@ -488,10 +493,22 @@ removed.
   edge.
 - `TestOrderedNumbers`: `Number` marks with texts `3.`, `4.` for `Start: 3`; nested `i.`,
   then `a.`; right edge 4 px left of the content edge.
-- `TestTightAndLooseSpacing`: tight items 4 px apart; loose items 16 px apart.
-- `TestTaskBoxes`: an `Open` item has a 13 px `TaskBox` mark with `Canvas` fill and no
-  bullet; a `Done` item's box is `Accent`; the box's left edge is 22 px left of the content
-  edge.
+- `TestTightAndLooseSpacing`: tight items 4 px apart; loose items 16 px apart; a tight
+  item's paragraph and image have no margins.
+- `TestTaskBoxes`: an `Open` item has a 13 px `TaskBox` mark `open` (`Canvas` fill) and a
+  `border` mark (`FgMuted`, the same rect); a `Done` item has a `done` mark (`Accent`) and a
+  `check` mark (`OnAccent`); the box's left edge is 22 px left of the content edge. A task item
+  draws no bullet or number, and still counts in the numbering.
+- `TestBlockBaseline`: every text block's `Baseline` is its first text line's distance from
+  the bottom (heading, code block, quote, paragraph).
+- `TestListMarkerBaseline`: a marker sits on its item's first text line, found through
+  headings, quotes, nested lists and code blocks; with no text line it sits on an empty body
+  line at the item's top.
+- `TestListInQuote`: markers and numbers in a quote are `FgMuted`, task boxes keep their own
+  colours, and a list in a quote in an item is nested (no margins).
+- `TestListTinyWidth`: no error and one marker per item at widths from negative to 77 px.
+- `TestViewElements` also counts one marker per list item; `TestViewClicked` has a list row
+  (the link's area starts at the content edge). `TestViewPlaceholders` loses its list row.
 
 **Verification:** the standard checks.
 

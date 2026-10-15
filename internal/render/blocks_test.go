@@ -344,3 +344,37 @@ func TestQuote(t *testing.T) {
 		t.Fatalf("dark quoted text colour %v, want FgMuted %v", g.Colour, Dark.FgMuted)
 	}
 }
+
+// TestBlockBaseline: a text block's Baseline is its first text line's distance from the bottom,
+// so Size.Y less Baseline is the first baseline from the top. A heading's rule and padding are
+// below that line; a code block's padding is above it; a quote's first line is its first child's
+// (STYLE-TEXT-1, STYLE-TEXT-2, STYLE-CODE-1, STYLE-QUOTE-1).
+func TestBlockBaseline(t *testing.T) {
+	tests := []struct {
+		name   string
+		src    string
+		height int // Size.Y, or 0 for no check
+		first  int // the first baseline from the top
+	}{
+		{name: "paragraph", src: "a", first: 18},
+		{name: "heading 1", src: "# h", height: 51, first: 32},
+		{name: "code block", src: "```\nx\n```", height: 52, first: 31},
+		{name: "quote of a paragraph", src: "> a", first: 18},
+		{name: "quote of a heading", src: "> # h\n>\n> b", height: 91, first: 32},
+	}
+	ctx := newBlockCtx(t, Light)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dims, tr := layBlock(t, ctx, firstBlock(t, tt.src), 800)
+			if len(tr.Marks) == 0 {
+				t.Errorf("%q draws no marks", tt.src)
+			}
+			if tt.height != 0 && dims.Size.Y != tt.height {
+				t.Errorf("%q is %d px tall, want %d", tt.src, dims.Size.Y, tt.height)
+			}
+			if got := dims.Size.Y - dims.Baseline; got != tt.first {
+				t.Errorf("%q has its first baseline %d px from the top, want %d", tt.src, got, tt.first)
+			}
+		})
+	}
+}
