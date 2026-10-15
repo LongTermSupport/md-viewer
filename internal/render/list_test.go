@@ -482,7 +482,9 @@ func TestTaskBoxes(t *testing.T) {
 		e := newViewEnv(t, "- a\n- [x] b", Light, metric1)
 		_, tr := e.layout(0, 800)
 		onlyMark(t, tr, MarkBullet)
-		onlyMark(t, tr, MarkTaskBox)
+		if n := len(textMarks(tr, MarkTaskBox, "done")); n != 1 {
+			t.Errorf("%d done boxes, want 1", n)
+		}
 	})
 
 	t.Run("number beside a task", func(t *testing.T) {

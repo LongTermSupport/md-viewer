@@ -18,12 +18,26 @@ import (
 
 // Markers (STYLE-LIST-2, STYLE-LIST-3, STYLE-LIST-5).
 const (
-	bulletSize   unit.Dp = 5   // STYLE-LIST-2: 5 dp across
-	bulletOffset unit.Dp = 11  // STYLE-LIST-2: the centre is 11 dp left of the content edge
+	bulletSize   unit.Dp = 5    // STYLE-LIST-2: 5 dp across
+	bulletOffset unit.Dp = 11   // STYLE-LIST-2: the centre is 11 dp left of the content edge
 	bulletRise   float64 = 0.27 // STYLE-LIST-2: the centre is 0.27 em above the baseline
-	bulletStroke unit.Dp = 1   // STYLE-LIST-2: the outline of a circle, 1 dp inside its diameter
-	numberGap    unit.Dp = 4   // STYLE-LIST-3: the number's right edge is 4 dp left of the content edge
+	bulletStroke unit.Dp = 1    // STYLE-LIST-2: the outline of a circle, 1 dp inside its diameter
+	numberGap    unit.Dp = 4    // STYLE-LIST-3: the number's right edge is 4 dp left of the content edge
 )
+
+// Task boxes (STYLE-LIST-5).
+const (
+	taskBoxSize   unit.Dp = 13   // STYLE-LIST-5: a 13 dp square
+	taskBoxOffset unit.Dp = 22   // STYLE-LIST-5: its left edge is 22 dp left of the content edge
+	taskBoxRise   float64 = 0.35 // STYLE-LIST-5: its centre is 0.35 em above the baseline
+	taskBoxRadius unit.Dp = 3    // STYLE-LIST-5: a 3 dp corner radius
+	taskBoxBorder unit.Dp = 1    // STYLE-LIST-5: an open box has a 1 dp border inside its square
+	checkStroke   unit.Dp = 1.5  // STYLE-LIST-5: the check mark is a 1.5 dp stroke
+)
+
+// checkPoints is the check mark's polyline, in dp from the box's top-left corner (STYLE-LIST-5). It
+// is a variable, because Go has no constant arrays.
+var checkPoints = [3]f32.Point{{X: 3, Y: 6.5}, {X: 5.5, Y: 9}, {X: 10, Y: 4}}
 
 // clipArea is an area that a clip operation can push, such as a rectangle, an ellipse or a stroke.
 type clipArea interface {
@@ -121,9 +135,9 @@ func markerBaseline(gtx layout.Context, ctx blockCtx, first doc.Block, stack lay
 }
 
 // drawMarker draws the marker of item n of list l, whose first baseline is base from the item's
-// top. The marker sits at the content edge's left, in the list's text colour (STYLE-LIST-2). An
-// ordered or unordered item is marked with its number or bullet, and a task item with its box
-// only (STYLE-LIST-5).
+// top. Its position is set from the content edge, and a number or bullet takes the item's text
+// colour (STYLE-LIST-2, STYLE-LIST-3). An ordered or unordered item is marked with its number or
+// bullet, and a task item with its box only (STYLE-LIST-5).
 func drawMarker(gtx layout.Context, ctx blockCtx, l doc.List, n, base int, tr *Trace) error {
 	switch task := l.Items[n].Task; task {
 	case doc.NotTask:
@@ -132,7 +146,7 @@ func drawMarker(gtx layout.Context, ctx blockCtx, l doc.List, n, base int, tr *T
 		}
 		return drawBullet(gtx, ctx, gtx.Dp(listIndent), base, BulletShape(ctx.depth), tr)
 	case doc.Open, doc.Done:
-		return nil
+		return drawTaskBox(gtx, ctx, gtx.Dp(listIndent), base, task, tr)
 	default:
 		return fmt.Errorf("render: no marker for task state %d", task)
 	}
@@ -207,6 +221,64 @@ func fillClip(gtx layout.Context, a clipArea, c color.NRGBA) {
 	paint.ColorOp{Color: c}.Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
 	stack.Pop()
+}
+
+// drawTaskBox draws the box of a task item (STYLE-LIST-5). Its left edge is taskBoxOffset left of
+// the content edge at edge, and it is centred on the baseline at base less taskBoxRise em. An open
+// box is a Canvas fill with a FgMuted border inside its square. A done box is an Accent fill with
+// an OnAccent check mark. The colours are the palette's own, not the item text's (STYLE-QUOTE-1).
+// The box is recorded as open with its fill and border, or done with its fill and check (Mark).
+func drawTaskBox(gtx layout.Context, ctx blockCtx, edge, base int, task doc.Task, tr *Trace) error {
+	size := gtx.Dp(taskBoxSize)
+	left := edge - gtx.Dp(taskBoxOffset)
+	top := int(math.Round(float64(base) - taskBoxRise*pxOf(gtx, bodySize) - float64(size)/2))
+	box := image.Rect(left, top, left+size, top+size)
+	rad := gtx.Dp(taskBoxRadius)
+	switch task {
+	case doc.Open:
+		border := gtx.Dp(taskBoxBorder)
+		fillClip(gtx, clip.UniformRRect(box, rad), ctx.root.FgMuted)
+		fillClip(gtx, clip.UniformRRect(box.Inset(border), rad-border), ctx.root.Canvas)
+		tr.add(Mark{Kind: MarkTaskBox, Rect: box, Colour: ctx.root.Canvas, Text: "open"})
+		tr.add(Mark{Kind: MarkTaskBox, Rect: box, Colour: ctx.root.FgMuted, Text: "border"})
+	case doc.Done:
+		fillClip(gtx, clip.UniformRRect(box, rad), ctx.root.Accent)
+		tr.add(Mark{Kind: MarkTaskBox, Rect: box, Colour: ctx.root.Accent, Text: "done"})
+		drawCheck(gtx, ctx, box, tr)
+	default:
+		return fmt.Errorf("render: no task box for state %d", task)
+	}
+	return nil
+}
+
+// drawCheck draws the check mark of a done box in OnAccent: a checkStroke polyline through
+// checkPoints, relative to the box's top-left corner (STYLE-LIST-5). Its mark is the polyline's
+// bounds, grown by half the stroke and rounded outward to whole pixels.
+func drawCheck(gtx layout.Context, ctx blockCtx, box image.Rectangle, tr *Trace) {
+	per := float64(gtx.Metric.PxPerDp)
+	var pts [len(checkPoints)]f32.Point
+	minX, minY := math.Inf(1), math.Inf(1)
+	maxX, maxY := math.Inf(-1), math.Inf(-1)
+	for i, p := range checkPoints {
+		x := float64(box.Min.X) + float64(p.X)*per
+		y := float64(box.Min.Y) + float64(p.Y)*per
+		pts[i] = f32.Pt(float32(x), float32(y))
+		minX, minY = math.Min(minX, x), math.Min(minY, y)
+		maxX, maxY = math.Max(maxX, x), math.Max(maxY, y)
+	}
+	var path clip.Path
+	path.Begin(gtx.Ops)
+	path.MoveTo(pts[0])
+	path.LineTo(pts[1])
+	path.LineTo(pts[2])
+	w := dpPx(gtx, checkStroke)
+	fillClip(gtx, clip.Stroke{Path: path.End(), Width: float32(w)}.Op(), ctx.root.OnAccent)
+	half := w / 2
+	r := image.Rect(
+		int(math.Floor(minX-half)), int(math.Floor(minY-half)),
+		int(math.Ceil(maxX+half)), int(math.Ceil(maxY+half)),
+	)
+	tr.add(Mark{Kind: MarkTaskBox, Rect: r, Colour: ctx.root.OnAccent, Text: "check"})
 }
 
 // leadsWithText reports whether a block's first line is text, found through quotes and nested
