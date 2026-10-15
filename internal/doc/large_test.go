@@ -3,6 +3,7 @@ package doc
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -10,8 +11,11 @@ import (
 // (ARCHITECTURE "Fixtures").
 const largeCopies = 100
 
+// testdataDir is the shared fixtures directory, relative to this package's directory.
+const testdataDir = "../../testdata"
+
 // largePath is the benchmark and --time fixture, relative to this package's directory.
-const largePath = "../../testdata/large.md"
+const largePath = testdataDir + "/large.md"
 
 // updateFixturesEnv names the variable that makes TestLargeFixtureIsCurrent rewrite large.md.
 const updateFixturesEnv = "MDV_UPDATE_FIXTURES"
@@ -66,4 +70,60 @@ func TestLargeFixtureIsCurrent(t *testing.T) {
 	}
 	t.Fatalf("%s is not %d copies of elements.md: %d bytes, want %d, first difference at byte %d (regenerate with %s=1)",
 		largePath, largeCopies, len(got), len(want), firstDiff(got, want), updateFixturesEnv)
+}
+
+// readLarge reads large.md, failing the test on error.
+func readLarge(t testing.TB) []byte {
+	t.Helper()
+	src, err := os.ReadFile(largePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", largePath, err)
+	}
+	return src
+}
+
+// TestParseLargeDeterministic: large.md parses to the same model twice (DOC-14), and to 2600
+// top-level blocks, 26 per copy. A join without its blank line would merge blocks across copies
+// and change that count.
+func TestParseLargeDeterministic(t *testing.T) {
+	src := readLarge(t)
+	checkDeterministic(t, string(src))
+	dir, err := filepath.Abs(testdataDir)
+	if err != nil {
+		t.Fatalf("Abs of the testdata directory: %v", err)
+	}
+	d, err := Parse(src, dir)
+	if err != nil {
+		t.Fatalf("Parse(large.md): %v", err)
+	}
+	if n := len(d.Blocks); n != 2600 {
+		t.Errorf("large.md has %d top-level blocks, want 2600 (26 per copy)", n)
+	}
+	// The count alone does not pin the join: a heading interrupts a paragraph, so a copy that
+	// follows "The end." without a blank line still parses to the same blocks.
+	if n := bytes.Count(src, []byte("The end.\n\n# Heading level 1")); n != largeCopies-1 {
+		t.Errorf("large.md has %d blank-line joins between copies, want %d", n, largeCopies-1)
+	}
+}
+
+// sinkDocument keeps BenchmarkParseLarge's result alive, so the parse is not optimised away.
+var sinkDocument *Document
+
+// BenchmarkParseLarge measures Parse of large.md's bytes, read once outside the loop (SPEED-3).
+// Its numbers are reported, never asserted.
+func BenchmarkParseLarge(b *testing.B) {
+	src := readLarge(b)
+	dir, err := filepath.Abs(testdataDir)
+	if err != nil {
+		b.Fatalf("Abs of the testdata directory: %v", err)
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(src)))
+	for b.Loop() {
+		d, err := Parse(src, dir)
+		if err != nil {
+			b.Fatal(err)
+		}
+		sinkDocument = d
+	}
 }
