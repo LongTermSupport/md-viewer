@@ -32,14 +32,47 @@ const (
 )
 
 // Prepared is what Prepare leaves for the window. OpenWindow is set when a file loaded; the
-// other fields are what the window will need (M10).
+// other fields are what the window needs.
 type Prepared struct {
 	OpenWindow bool
 	opts       Options
 	document   *doc.Document
-	stats      doc.LoadStats
 	images     *render.Images
+	palette    render.Palette
 	viewer     *Viewer
+	timings    Timings // Read, Parse and Fonts; FirstFrame is taken in OnFirst
+	clock      Clock
+	stdout     io.Writer
+}
+
+// titleSuffix ends the window's title: NAME - md-viewer (WIN-1).
+const titleSuffix = " - " + progName
+
+// Window is the window's configuration (WIN-1, STYLE-PAL-3, SPEED-2). start is the first statement
+// of main. OnFirst is set only with --time, and then writes the timings line to stdout after the
+// first frame; its error is a frame failure (CLI-6).
+func (p Prepared) Window(start time.Time) window.Config {
+	cfg := window.Config{
+		Title:          p.document.Name + titleSuffix,
+		Canvas:         p.palette.Canvas,
+		Frame:          p.viewer.Frame,
+		Bind:           p.bind,
+		ExitAfterFirst: p.opts.Time,
+	}
+	if p.opts.Time {
+		cfg.OnFirst = func() error {
+			t := p.timings
+			t.FirstFrame = p.clock.Now().Sub(start)
+			return write(p.stdout, t.Line()+"\n")
+		}
+	}
+	return cfg
+}
+
+// bind passes the window's invalidate to the images and to the viewer (SPEED-5, LINK-2).
+func (p Prepared) bind(invalidate func()) {
+	p.images.Bind(invalidate)
+	p.viewer.Bind(invalidate)
 }
 
 // Prepare handles the command line and the file before any window opens (SPEED-1). A usage
@@ -63,12 +96,9 @@ func prepareWith(args []string, stdout, stderr io.Writer, c Clock, loadFaces fun
 	return p, code
 }
 
-// Window is the window's configuration (WIN-1, STYLE-PAL-3, SPEED-2). Stub.
-func (p Prepared) Window(start time.Time) window.Config { return window.Config{} }
-
-// prepare does the work of Prepare. Its error is a failed write, or an argument error that is not
-// a usage error; the code is ignored when the error is not nil. ParseArgs returns only a
-// *UsageError, so the other case is a fallback for a later change to ParseArgs.
+// prepare does the work of Prepare. Its error is a failed write, a font error, or an argument error
+// that is not a usage error; the code is ignored when the error is not nil. ParseArgs returns only
+// a *UsageError, so the other case is a fallback for a later change to ParseArgs.
 func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() (render.Faces, error)) (Prepared, ExitCode, error) {
 	opts, err := ParseArgs(args)
 	if err != nil {
@@ -103,7 +133,31 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() 
 	if err != nil {
 		return Prepared{}, ExitFailure, err
 	}
-	return Prepared{OpenWindow: true, opts: opts, document: d, stats: stats, images: images}, ExitOK, nil
+	// The palette is chosen here and nowhere else (STYLE-PAL-2). The faces and the shaper are timed
+	// from two readings, which is what fonts_ms measures (SPEC SPEED-2).
+	pal := render.Light
+	if opts.Dark {
+		pal = render.Dark
+	}
+	fontsStart := c.Now()
+	faces, err := loadFaces()
+	if err != nil {
+		return Prepared{}, ExitFailure, err
+	}
+	sh := render.NewShaper(faces)
+	fonts := c.Now().Sub(fontsStart)
+	view := render.NewView(d, sh, pal, images)
+	return Prepared{
+		OpenWindow: true,
+		opts:       opts,
+		document:   d,
+		images:     images,
+		palette:    pal,
+		viewer:     NewViewer(view, pal, SystemOpener(), stderr),
+		timings:    Timings{Read: stats.Read, Parse: stats.Parse, Fonts: fonts},
+		clock:      c,
+		stdout:     stdout,
+	}, ExitOK, nil
 }
 
 // loadMessage is the stderr line for a file that cannot be loaded: CLI-8's wording for each typed

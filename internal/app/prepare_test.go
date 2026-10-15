@@ -445,13 +445,14 @@ func TestPrepareBindsInvalidate(t *testing.T) {
 // TestPrepareFontError: a font error is a preparation error: its line is printed to stderr with
 // the program's prefix, the exit code is 1, and no window opens (P10).
 func TestPrepareFontError(t *testing.T) {
-	elements := filepath.Join(testdataDir(t), "elements.md")
+	plain := filepath.Join(t.TempDir(), "plain.md")
+	writeFile(t, plain, "# a\n")
 	loadFaces := func() (render.Faces, error) {
 		return render.Faces{}, errors.New("fonts broke")
 	}
 	var stdout, stderr bytes.Buffer
 	clock := &stepClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	prep, code := prepareWith([]string{elements}, &stdout, &stderr, clock, loadFaces)
+	prep, code := prepareWith([]string{plain}, &stdout, &stderr, clock, loadFaces)
 	checkRun(t, prepareRun{prep: prep, code: code, stdout: stdout.String(), stderr: stderr.String()},
 		"", "md-viewer: fonts broke\n", 1, false)
 }
