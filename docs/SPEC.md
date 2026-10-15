@@ -71,8 +71,11 @@ no build info.
 | Code | Meaning                                                                        |
 | ---- | ------------------------------------------------------------------------------ |
 | 0    | success: the window was closed by the user, or `--help`, `--version`, `--time` |
-| 1    | a runtime failure: the file cannot be read or is refused, or no window opened  |
+| 1    | a runtime failure: the file cannot be read or is refused, no window opened, or a frame failed (below) |
 | 2    | a usage error: missing or extra FILE, an unknown flag                          |
+
+A frame failure is a layout error (`View.Err`) or a failed write to stderr during a frame. The
+window closes, md-viewer prints `md-viewer: ` followed by the error to stderr, and exits 1.
 
 **CLI-7. Usage errors** print one line to stderr, then the line
 `Run 'md-viewer --help' for usage.`, and exit 2. The first line is exactly:
@@ -290,7 +293,10 @@ with `Emphasis` is upright).
 four sides when the window is at least 768 dp wide (after zoom, STYLE-ZOOM-3), and 15 dp when
 it is narrower. Source: github-markdown-css's README recommends
 `.markdown-body { padding: 45px }` with `padding: 15px` under `max-width: 767px`. The width
-tested is the width the view is given (its constraints), which M9 settles for any scrollbar.
+tested is the list's width, the window less the 10 dp scrollbar gutter (SCROLL-4), read in
+zoomed dp (STYLE-ZOOM-3). So at zoom 100 a window 778 dp wide is tested at 768 dp and gets 45 dp
+of padding, and a window 777 dp wide is tested at 767 dp and gets 15 dp. The gutter is kept even
+when the content fits and no bar is drawn.
 
 **DOC-LAYOUT-2. No maximum width.** The content fills the window's width minus the padding.
 GitHub caps the column at 980 px; md-viewer does not, because it wraps to the window
@@ -539,18 +545,29 @@ target (DOC-5):
 | `Fragment`  | nothing is opened; print `md-viewer: in-page links are not followed: DEST`                                        |
 | `Refused`   | nothing is opened; print `md-viewer: link not opened: DEST: only http, https, mailto and local files are allowed` |
 
+A `LocalFile` target exists when `os.Stat` succeeds. A directory counts (`[a]()` opens the
+document's directory), and a symbolic link is followed, so a link to a missing file is not found.
+When the stat fails for another reason (for example permission denied), nothing is opened and
+md-viewer prints `md-viewer: cannot open link: PATH: REASON`, with REASON the operating-system
+error text.
+
 **LINK-2.** The opener is started with `exec.CommandContext`, with the target as a separate
 argument and no shell. md-viewer does not wait for it before drawing the next frame; it waits
 in a goroutine and, if the opener cannot start or exits non-zero, prints
-`md-viewer: cannot open link: TARGET: REASON` to stderr. A failed link never ends the program.
+`md-viewer: cannot open link: TARGET: REASON` to stderr. REASON is the text of the error from
+starting or waiting (for example `exec: "xdg-open": executable file not found in $PATH`, or
+`exit status 4`). The opener's own stdout and stderr are discarded, so only md-viewer's lines
+appear. md-viewer never kills the opener, on a click or on exit. A failed link never ends the
+program. If the line cannot be written, the next frame fails with that error, and the window
+closes as CLI-6 describes.
 
 **LINK-3.** A `LocalFile` Markdown link opens through the opener like any other file, so the
 desktop's default application for Markdown handles it (which may be md-viewer itself).
 
 ## 5. Scrolling
 
-**SCROLL-1.** The document scrolls vertically only. Only the blocks visible in the window are
-laid out in a frame (`layout.List`).
+**SCROLL-1.** The document scrolls vertically only. In a frame only the visible blocks are laid out,
+and the one block beyond each edge of the view that `layout.List` lays out too (`layout.List`).
 
 **SCROLL-2. Keys.** A key acts on press, not release.
 
@@ -564,12 +581,20 @@ laid out in a frame (`layout.List`).
 The distances are in dp, so they scale with the zoom. Scrolling stops at the top and at the
 bottom; it cannot move past either.
 
-**SCROLL-3. Wheel.** A vertical scroll event without Ctrl moves the view by the event's
-`Scroll.Y` in pixels, as Gio reports it (Gio reports 100 px per wheel notch on Wayland and
-10 px on X11). Horizontal scroll events are ignored.
+Modifiers: the arrows, Page Up/Down, Home and End act only with no modifier, so Shift+↓ or Ctrl+End
+does nothing. Space acts with no modifier or with Shift. The keypad keys with the same names
+(keypad arrows, Home and End) act like the main keys. Gio does not report keypad Page Up and Page
+Down with NumLock off, so those never reach md-viewer (a Gio limit).
 
-**SCROLL-4. Scrollbar.** A vertical scrollbar is drawn at the right edge (`material.List`
-with `material.Scrollbar`), and dragging its indicator scrolls the document.
+**SCROLL-3. Wheel.** A vertical scroll event without Ctrl moves the view by the event's
+`Scroll.Y` in pixels, rounded to the nearest pixel, as Gio reports it (Gio reports 100 px per
+wheel notch on Wayland and 10 px on X11). Horizontal scroll events are ignored.
+
+**SCROLL-4. Scrollbar.** A vertical scrollbar is drawn at the right edge of the window (`material.List`
+with `material.Scrollbar`, which reserves its gutter, not zoomed, 10 dp at the window's scale).
+Dragging its indicator scrolls the document. A primary click on the track outside the indicator
+centres the view on the click point. The indicator is drawn in `Fg` at alpha 150, and at alpha 200
+while the pointer is over the bar (the material defaults).
 
 ## 6. Zoom
 
@@ -590,15 +615,19 @@ At 300 a further zoom in, and at 50 a further zoom out, does nothing.
 **STYLE-ZOOM-3. Zoom scales everything inside the content area**: every dp and sp of the
 document, including the padding (DOC-LAYOUT-1), the scroll distances (SCROLL-2) and images. It
 is applied by multiplying the frame's `unit.Metric` (`PxPerDp` and `PxPerSp`) by the zoom
-factor. Gio's window decorations are not zoomed.
+factor. Gio's window decorations and the scrollbar gutter (SCROLL-4) are not zoomed.
 
 **ZOOM-4. Ctrl+wheel.** Each vertical scroll event with Ctrl held adds its `Scroll.Y` to an
 accumulator. When the accumulator reaches −10 px or less the zoom goes one level up; at +10 px
 or more, one level down; the accumulator is then reset to 0. One event changes the zoom by at
-most one level. Ctrl+wheel never scrolls.
+most one level. Ctrl+wheel never scrolls. The accumulator is reset whenever a threshold is
+reached, even when the zoom is already at its limit and does not change. Nothing else resets it
+(not releasing Ctrl, not a keyboard zoom).
 
 **ZOOM-5. Reading position.** A zoom change keeps the block at the top of the view at the top,
-and scales its offset into that block by the ratio of the new zoom to the old.
+and scales its offset into that block by the ratio of the new zoom to the old, rounded to the
+nearest pixel. The list's top and bottom limits then apply, so near the end of the document the
+block at the top can change (the view never moves past the end).
 
 ## 7. Word wrap
 
@@ -622,8 +651,8 @@ or scrolled sideways, except a too-wide table (STYLE-TABLE-5).
 **WIN-3. One window, one file.** md-viewer opens exactly one window showing exactly the one
 FILE. It never opens another window or another file itself (LINK-3 hands files to the opener).
 
-**WIN-4. Quit.** `q` (no Ctrl, Alt or Super; with or without Shift) and `Esc` close the window
-and exit 0. Closing the window by the window manager exits 0.
+**WIN-4. Quit.** `q` (no Ctrl, Alt or Super; with or without Shift) and `Esc` (the same modifier
+rule) close the window and exit 0. Closing the window by the window manager exits 0.
 
 **WIN-5. No editing.** Nothing in the window changes the file, and there is no text cursor,
 selection or clipboard.
@@ -675,7 +704,8 @@ moved.
 faces only (STYLE-FONT-1).
 
 **SPEED-5. Images.** An image's pixels are decoded only when the top-level block that holds it
-first becomes visible, in a goroutine, one image at a time, in the order the images are first
+first becomes visible, which includes the one block beyond each edge of the view that `layout.List`
+lays out (SCROLL-1), in a goroutine, one image at a time, in the order the images are first
 laid out. The window is invalidated when each is ready. The goroutine exits when no image is
 waiting, and the next request starts it again. The first frame never waits for image pixels.
 

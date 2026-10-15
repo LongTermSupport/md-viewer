@@ -608,22 +608,64 @@ started with `Start`; the wait runs in a goroutine.
   modifiers; `q` with Ctrl is `None`; a key release is `None`.
 - `TestZoomLevels`: `In` from 100 is 110, from 300 is 300; `Out` from 50 is 50; `Reset` is
   100; `Metric` multiplies `PxPerDp` and `PxPerSp`.
+- `TestActionFor` also covers the modifier rules of SCROLL-2 and WIN-4 (Shift on arrows and
+  Ctrl on Home are no action; Shift+Space is Page Up).
+- `TestActionString`: each action's name, and an out-of-range value.
 - `TestViewerKeysScroll` (router): after a frame, Down moves `Position.Offset` by 40 px at
-  zoom 100 and 80 px at zoom 200; Page Down by the viewport height minus 40; Home returns to
-  `Position{}`; End shows the last block at the bottom; Up at the top does not move.
+  zoom 100 and 80 px at zoom 200; Page Down by the viewport height minus 40; Home sets `First`
+  and `Offset` to 0 (layout fills `Count`, `Length` and `BeforeEnd`, so they are not compared);
+  End shows the last block at the bottom; Up at the top does not move.
+- `TestViewerEveryKeyRoutes`: each key of `TestActionFor` reaches the viewer through the router
+  and has its effect (keys with the router's filters).
+- `TestViewerZoomKeys`: Ctrl+`=`, Ctrl+Shift+`+`, Ctrl+`-` and Ctrl+`0` move the zoom through
+  ZOOM-1's levels, and stop at 300 and at 50.
+- `TestViewerZoomScalesContent`: a rule-only document's frame height at several window widths
+  and zooms (DOC-LAYOUT-1 and STYLE-ZOOM-3).
 - `TestViewerWheel`: a `pointer.Scroll` event with `Scroll.Y = 100` moves 100 px; with Ctrl
   held it does not scroll.
 - `TestViewerCtrlWheelZoom`: Ctrl+wheel `-100` zooms in one level; `-4` twice does nothing,
   a third `-4` zooms in (accumulator); `+100` zooms out.
 - `TestViewerZoomKeepsPosition`: zooming keeps `Position.First` and scales `Offset`.
-- `TestViewerScrollbarDrag`: a press-drag on the scrollbar area moves the list (the wheel
-  area's `PassOp` lets it through).
-- `TestViewerLinks`: clicks on an `External` link call the fake opener with the URL; on an
-  existing `LocalFile` with the path; on a missing file, a `Fragment` and a `Refused` link,
-  no call and LINK-1's stderr line.
-- `TestOpenerFailureReported`: a fake opener whose wait fails prints LINK-2's line.
-- `TestViewerQuit`: `q` and Esc make `Frame` return true.
-- `TestViewerRewraps`: the same frame at 800 then 300 px gives a taller first block.
+- `TestViewerScrollbarDrag`: a press on the indicator, then two `pointer.Move` events with the
+  primary button held (the first drag event only anchors), then a release, moves the list (the
+  wheel area's `PassOp` lets it through). A press and release without a move does not.
+- `TestViewerLinks`: a table of clicks: an `External` link calls the fake opener with the URL;
+  an existing `LocalFile` (and a directory, and a file with a fragment) with its path; a missing
+  file, a `Fragment` and a `Refused` link give no call and LINK-1's stderr line, byte for byte.
+- `TestViewerLinkCursor`: the hand cursor over a link, and the default cursor over plain text.
+- `TestViewerOpensOffFrame`: the opener runs only in the spawned function, after the frame.
+- `TestOpenerFailureReported`: a fake opener whose wait fails prints LINK-2's line, and the next
+  frame does not fail.
+- `TestExecOpenerStartError`: a missing opener program gives an error that matches
+  `fs.ErrNotExist`.
+- `TestSystemOpenerCommand` (Linux): the command is `xdg-open` with the target as one argument,
+  built without a shell (LINK-2). It does not start the command.
+- `TestSystemOpenerOther` (not Linux, compiled by the cross-platform vet): an error naming the OS.
+- `TestViewerQuit`: `q`, Shift+`q` and Esc make `Frame` return true; the modifier controls do not.
+- `TestViewerNoEditing` (WIN-5): a control-only pin. Ctrl+C, Ctrl+A, Ctrl+V and text input do
+  nothing: no clipboard request, no text input state, no scroll or zoom change.
+- `TestViewerEmptyDocument`: a document with no blocks takes the keys and the wheel without
+  an error or a panic.
+- `TestViewerElements`: `testdata/elements.md` at 980 × 900 dp, with Home, End and a wheel
+  scroll, lays out without an error.
+- `TestViewerRewraps`: the same frame at 800 then 300 px gives a taller first block (WRAP-2).
+- `TestViewerLayoutError`: a layout error ends a frame with that error (the window closes); a
+  failed stderr write in a frame does too; an ordinary document gives no error.
+- `TestViewerHomeEnd`: End puts the last block at the bottom, Down there does not move, and
+  Home is the top.
+- `TestViewerCtrlWheelKeepsFirst`: a Ctrl+wheel zoom keeps `First` and scales the offset.
+- `TestViewerLinkControls`: a press on the link released away, a hover and no input open nothing.
+- `TestZoomMetric`: `Metric` multiplies both scales, at 100, 200, 125 and 67%.
+- `TestOpenerFailureNextFrame`: a failed stderr write from the opener's function fails the next
+  frame, and the frame after it does not.
+- `TestViewerGoSpawnWrites`: the real `goSpawn`, with a writer that is not safe for concurrent
+  use, writes the opener's line and a frame's line; `-race` finds no conflict.
+- `TestViewerLinkStatErrors` (Linux): a path under a regular file gives "cannot open link", and a
+  broken symbolic link is not found.
+- `TestExecOpenerWait`, with its helper `TestOpenerHelperProcess`: exit 3 is an error, exit 0 is
+  nil.
+- `TestFrameErrors`: a link write error and a layout error in one frame give one line.
+- `TestViewerLocalLinksAbsolute`: every local link reaches the opener as an absolute path.
 
 **Verification:** the standard checks.
 
@@ -636,7 +678,8 @@ started with `Start`; the wait runs in a goroutine.
 **Covers:** WIN-1, WIN-2, WIN-3, WIN-6, CLI-6, CLI-9, STYLE-PAL-2, STYLE-PAL-3 (the window
 fills `Canvas`; the view paints none), SPEED-1, SPEED-2, SPEED-6.
 
-**Files:** `internal/window/window.go`; `internal/app/prepare.go` completed (fonts, images,
+**Files:** `internal/window/window.go` (with `FrameError` and `Run`'s error, ARCHITECTURE
+"internal/window"); `internal/app/prepare.go` completed (fonts, images,
 view, viewer, timings, `Prepared.Window`); `internal/app/timing.go`; `cmd/md-viewer/main.go`
 in the shape of ARCHITECTURE.md (the `not implemented yet` line is removed); in
 `.github/workflows/ci.yml`, after the `go build` step of the `build` job, add:
@@ -664,6 +707,9 @@ in the shape of ARCHITECTURE.md (the `not implemented yet` line is removed); in
   `xvfb-run -a <binary> --time testdata/elements.md`: exit 0 and stdout matching the smoke
   regular expression. When `xvfb-run` is not on `PATH` the test fails with a message saying
   the image lacks it (the container and CI both have it, so it must never skip).
+- `TestFrameErrorMapping` (`internal/window`, `cmd/md-viewer`): a `Config.Frame` error comes out
+  of `Run` as a `*FrameError` that unwraps to it, and `main` prints `md-viewer: ` and that
+  error's text and exits 1 (CLI-6). Without a failed frame, `Run` returns nil on close.
 
 **Verification:** the standard checks and the smoke run. Push and check that CI's `build` job
 runs the smoke step green and uploads the artifact; download it with
