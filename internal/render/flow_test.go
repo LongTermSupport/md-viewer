@@ -87,7 +87,7 @@ func (e *flowEnv) hits(glyphs []text.Glyph, origin, p image.Point) bool {
 	frame := func() {
 		e.ops.Reset()
 		gtx := e.context()
-		pop := pushGlyphs(gtx, e.fp.shaper, glyphs, origin)
+		pop := pushGlyphs(gtx, e.fp.shaper, glyphs, origin, nil)
 		event.Op(gtx.Ops, tag)
 		pop()
 		e.router.Frame(&e.ops)

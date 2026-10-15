@@ -93,8 +93,9 @@ type flowParams struct {
 	palette   Palette
 	inHeading bool // RunStyle's code rule (STYLE-TEXT-5)
 	links     *links
-	wrap      wrapMode  // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
-	align     textAlign // how each line sits in its box (STYLE-TABLE-4)
+	wrap      wrapMode                 // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
+	align     textAlign                // how each line sits in its box (STYLE-TABLE-4)
+	drawn     func(origin image.Point) // tests only: told each outline's origin as it is drawn; nil otherwise
 }
 
 // Inline code padding in em of the run's size (STYLE-TEXT-5).
@@ -431,7 +432,7 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 		f.tr.add(Mark{Kind: MarkCodeBg, Rect: bg, Colour: f.fp.palette.CodeBg})
 	}
 
-	pop := pushGlyphs(f.gtx, f.fp.shaper, glyphs, origin)
+	pop := pushGlyphs(f.gtx, f.fp.shaper, glyphs, origin, f.fp.drawn)
 	paint.ColorOp{Color: ts.Colour}.Add(f.gtx.Ops)
 	paint.PaintOp{}.Add(f.gtx.Ops)
 	pop()
@@ -453,8 +454,12 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 // pushGlyphs makes the outline of glyphs the clip of what is drawn until the returned pop is
 // called, with the outline's origin at origin (STYLE-TEXT-7). Shape's outline has its baseline at
 // y = 0 and x from the first glyph, and Glyph.Y is not in it (gioui.org/text, Shape), so origin
-// is the fragment's left edge on its baseline. The paint and the ink probes both use it.
-func pushGlyphs(gtx layout.Context, sh *text.Shaper, glyphs []text.Glyph, origin image.Point) (pop func()) {
+// is the fragment's left edge on its baseline. The paint and the ink probes both use it. If drawn
+// is not nil, it is told origin, the point the outline is drawn at.
+func pushGlyphs(gtx layout.Context, sh *text.Shaper, glyphs []text.Glyph, origin image.Point, drawn func(image.Point)) (pop func()) {
+	if drawn != nil {
+		drawn(origin)
+	}
 	offset := op.Offset(origin).Push(gtx.Ops)
 	outline := clip.Outline{Path: sh.Shape(glyphs)}.Op().Push(gtx.Ops)
 	return func() {
