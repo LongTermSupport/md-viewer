@@ -537,6 +537,25 @@ func TestViewerWheel(t *testing.T) {
 		{"one X11 notch of 10 px moves 10", func(e *viewerEnv) {
 			e.wheel(10, 0)
 		}, 10},
+		{"wheel 10.4 moves 10 px", func(e *viewerEnv) {
+			e.wheel(10.4, 0)
+		}, 10},
+		{"wheel 10.5 moves 11 px (half rounds away from zero)", func(e *viewerEnv) {
+			e.wheel(10.5, 0)
+		}, 11},
+		{"wheel 10.6 moves 11 px", func(e *viewerEnv) {
+			e.wheel(10.6, 0)
+		}, 11},
+		{"wheel -10.4 from 100 ends at 90", func(e *viewerEnv) {
+			e.wheel(100, 0)
+			e.frame()
+			e.wheel(-10.4, 0)
+		}, 90},
+		{"wheel -10.5 from 100 ends at 89 (half rounds away from zero)", func(e *viewerEnv) {
+			e.wheel(100, 0)
+			e.frame()
+			e.wheel(-10.5, 0)
+		}, 89},
 		{"wheel over the scrollbar scrolls", func(e *viewerEnv) {
 			e.scroll(scrollbar, 0, 100, 0)
 		}, 100},
@@ -675,6 +694,13 @@ func TestViewerZoomKeepsPosition(t *testing.T) {
 		setPosition(e, 10, 30)
 		e.press(keyZoom0)
 		assertPosition(t, e, 10, 15)
+	})
+	t.Run("ctrl equals scales 15 to 17 (16.5 rounds up)", func(t *testing.T) {
+		e := newEnv(t, longDoc(t), defaultSize, io.Discard)
+		e.frame()
+		setPosition(e, 10, 15)
+		e.press(keyZoomIn)
+		assertPosition(t, e, 10, 17)
 	})
 	t.Run("ctrl wheel -100 scales 20 to 22", func(t *testing.T) {
 		e := newEnv(t, longDoc(t), defaultSize, io.Discard)
