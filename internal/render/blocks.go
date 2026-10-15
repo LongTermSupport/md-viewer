@@ -23,6 +23,8 @@ type blockCtx struct {
 	root   Palette
 	shaper *text.Shaper
 	links  *links
+	depth  int  // the number of lists around this block (STYLE-LIST-2, STYLE-LIST-3)
+	tight  bool // this block is a direct child of a tight list's item (STYLE-LIST-4)
 }
 
 // quoteCtx is the context of a quote's children: their text is FgMuted (STYLE-QUOTE-1).
@@ -92,7 +94,9 @@ func layoutBlock(gtx layout.Context, ctx blockCtx, b doc.Block, tr *Trace) (layo
 		return layoutCodeBlock(gtx, ctx, b, tr)
 	case doc.Rule:
 		return layoutRule(gtx, ctx, tr)
-	case doc.List, doc.Table, doc.Image:
+	case doc.List:
+		return layoutList(gtx, ctx, b, tr)
+	case doc.Table, doc.Image:
 		// Placeholders until their milestones: height 0, with the margins the caller gives.
 		return layout.Dimensions{Size: image.Pt(width, 0)}, nil
 	default:

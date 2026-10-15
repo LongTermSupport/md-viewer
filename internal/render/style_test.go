@@ -301,6 +301,44 @@ func TestOrderedMarker(t *testing.T) {
 	}
 }
 
+// TestBulletShape checks the marker of each nesting depth (STYLE-LIST-2): a disc at depth 0, a
+// circle outline at depth 1, a square at depth 2 or more, and a disc below depth 0. Each shape's
+// mark text is its name, and an unknown shape names its value.
+func TestBulletShape(t *testing.T) {
+	depths := []struct {
+		depth int
+		want  Bullet
+	}{
+		{-1, BulletDisc},
+		{0, BulletDisc},
+		{1, BulletCircle},
+		{2, BulletSquare},
+		{3, BulletSquare},
+		{9, BulletSquare},
+	}
+	for _, tt := range depths {
+		if got := BulletShape(tt.depth); got != tt.want {
+			t.Errorf("BulletShape(%d) = %v, want %v", tt.depth, got, tt.want)
+		}
+	}
+	names := []struct {
+		shape Bullet
+		want  string
+	}{
+		{BulletDisc, "disc"},
+		{BulletCircle, "circle"},
+		{BulletSquare, "square"},
+	}
+	for _, tt := range names {
+		if got := tt.shape.String(); got != tt.want {
+			t.Errorf("Bullet %d String() = %q, want %q", tt.shape, got, tt.want)
+		}
+	}
+	if got := Bullet(7).String(); !strings.Contains(got, "7") {
+		t.Errorf("Bullet(7).String() = %q, want it to name the value 7", got)
+	}
+}
+
 // TestColumnWidths checks STYLE-TABLE-5: natural widths kept when they fit, scaled when not,
 // the 64 dp minimum, zero natural widths, a negative width and the empty table. The input is not
 // modified.

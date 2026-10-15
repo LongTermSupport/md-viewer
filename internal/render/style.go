@@ -244,6 +244,29 @@ func toAlpha(n int) string {
 	return string(buf)
 }
 
+// Bullet is the shape of an unordered list marker (STYLE-LIST-2). Its String is the text of the
+// marker's mark. The zero value is BulletDisc.
+type Bullet uint8
+
+// The shapes of an unordered marker, by nesting depth (STYLE-LIST-2).
+const (
+	BulletDisc   Bullet = iota // filled circle, 5 dp across, at depth 0
+	BulletCircle               // circle outline, 5 dp across with a 1 dp stroke inside, at depth 1
+	BulletSquare               // filled square, 5 dp on a side, at depth 2 or more
+)
+
+// BulletShape is the shape of a marker at a nesting depth: the number of lists around the item's
+// list (STYLE-LIST-2). A depth below 1 is a disc, as OrderedMarker's default is decimal.
+func BulletShape(depth int) Bullet {
+	return BulletDisc
+}
+
+// String is the name of the shape, which is the text of its mark. A value with no name is written
+// with its number.
+func (b Bullet) String() string {
+	return ""
+}
+
 // ColumnWidths gives each table column's width (STYLE-TABLE-5). When the natural widths sum to
 // at most width, each keeps its width. Otherwise each is floor(N × width ÷ ΣN), and at least
 // minCol. The minimums can push the sum above width; the caller clips that (M7). A negative width
