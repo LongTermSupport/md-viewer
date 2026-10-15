@@ -9,6 +9,7 @@ import (
 
 	"github.com/LongTermSupport/md-viewer/internal/doc"
 	"github.com/LongTermSupport/md-viewer/internal/render"
+	"github.com/LongTermSupport/md-viewer/internal/window"
 )
 
 // Clock gives the current time. Load takes its readings from it, so tests use a fake clock.
@@ -38,6 +39,7 @@ type Prepared struct {
 	document   *doc.Document
 	stats      doc.LoadStats
 	images     *render.Images
+	viewer     *Viewer
 }
 
 // Prepare handles the command line and the file before any window opens (SPEED-1). A usage
@@ -46,7 +48,12 @@ type Prepared struct {
 // ExitFailure. A file that loads prints DOC-9's line when HTML was dropped, and gives
 // OpenWindow with ExitOK (P14). A failed write gives ExitFailure (P12).
 func Prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode) {
-	p, code, err := prepare(args, stdout, stderr, c)
+	return prepareWith(args, stdout, stderr, c, render.LoadFaces)
+}
+
+// prepareWith is Prepare with the font loader given, so that a test can make the load fail.
+func prepareWith(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() (render.Faces, error)) (Prepared, ExitCode) {
+	p, code, err := prepare(args, stdout, stderr, c, loadFaces)
 	if err != nil {
 		// P12: best effort. A write error cannot be reported on the stream that failed, and the
 		// exit code is ExitFailure whether or not this line lands.
@@ -56,10 +63,13 @@ func Prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCo
 	return p, code
 }
 
+// Window is the window's configuration (WIN-1, STYLE-PAL-3, SPEED-2). Stub.
+func (p Prepared) Window(start time.Time) window.Config { return window.Config{} }
+
 // prepare does the work of Prepare. Its error is a failed write, or an argument error that is not
 // a usage error; the code is ignored when the error is not nil. ParseArgs returns only a
 // *UsageError, so the other case is a fallback for a later change to ParseArgs.
-func prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode, error) {
+func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() (render.Faces, error)) (Prepared, ExitCode, error) {
 	opts, err := ParseArgs(args)
 	if err != nil {
 		var ue *UsageError
