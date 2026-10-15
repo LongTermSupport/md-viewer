@@ -13,6 +13,10 @@ to that file. The order of work is in [MILESTONES.md](MILESTONES.md).
 | `golang.org/x/image`       | v0.26.0                                           | the Go font files (`font/gofont/...`); the version Gio v0.10.3 requires    |
 | go-qa-ci                   | commit `7fc4547e92f2fb0cf67c0c91f1f2068774be5d5a` | QA; no tag is published yet, so the pin is a commit (`qa/go-qa-ci.ref`)    |
 
+`widget/material` (the scrollbar, SCROLL-4) imports `golang.org/x/exp/shiny`, which Gio v0.10.3's
+`go.mod` pins at `v0.0.0-20250408133849-7e4ce0ab07d0`. `go.mod` therefore names that module as an
+indirect requirement. It is not a direct dependency, and nothing in md-viewer imports it.
+
 No other direct dependency is added without the owner's agreement: no `gioui.org/x`, no test
 assertion library (tests use the standard library), no CLI flag library.
 
@@ -51,7 +55,12 @@ func main() {
 	}
 	go func() {
 		if err := window.Run(prep.Window(start)); err != nil {
-			fmt.Fprintf(os.Stderr, "md-viewer: cannot open a window: %v\n", err) // CLI-9
+			var fe *window.FrameError
+			if errors.As(err, &fe) {
+				fmt.Fprintf(os.Stderr, "md-viewer: %v\n", fe.Err) // CLI-6
+			} else {
+				fmt.Fprintf(os.Stderr, "md-viewer: cannot open a window: %v\n", err) // CLI-9
+			}
 			os.Exit(int(app.ExitFailure))
 		}
 		os.Exit(int(app.ExitOK))
@@ -255,8 +264,8 @@ func (v *View) Layout(gtx layout.Context, i int, tr *Trace) layout.Dimensions //
 func (v *View) Err() error                                           // the first layout error (M5)
 // Layout draws block i, including the gap above it (and the content padding for the first
 // and last block), at gtx.Constraints.Max.X wide. tr may be nil, and its origin is the list
-// element's top-left. Padding is chosen from that width (Metric.PxToDp of Max.X), so M9 decides
-// what width a scrollbar leaves. A failing element returns Dimensions{} and records the error
+// element's top-left. Padding is chosen from that width (Metric.PxToDp of Max.X); the viewer passes
+// the list width less the scrollbar gutter (SPEC SCROLL-4). A failing element returns Dimensions{} and records the error
 // in Err; the first error is kept and never cleared. The View paints no background: the window
 // fills Canvas (STYLE-PAL-3, tested in M10).
 func (v *View) Clicked(gtx layout.Context) (doc.Target, bool)        // LINK-1, polled once per frame
@@ -341,7 +350,7 @@ out by `table.go` (below). **Images** are laid out by `image.go`: a box at the p
 down to the available width, STYLE-IMG-2), then the pixels or a placeholder (STYLE-IMG-3). Pixels
 are drawn with `paint.NewImageOp` and `op.Affine`, scaled into the probed box, so a decoded size
 that differs from the probed one (the file changed) does not move the layout. `widget.Image` is
-not used: it imports `golang.org/x/exp`, which the module does not name. `golang.org/x/image/webp` is
+not used: `image.go` lays out the probed box itself (STYLE-IMG-2) and draws into it. `golang.org/x/image/webp` is
 not used either: STYLE-IMG-1 names PNG and JPEG only. The decode worker is one
 goroutine over a FIFO queue of images, started when the queue gets its first request and exiting
 when it is empty (SPEED-5, SPEED-6). It calls the window's invalidate, bound by `Images.Bind`,
@@ -395,7 +404,7 @@ func (p Prepared) Window(start time.Time) window.Config
 // Viewer is the per-window state: list position, zoom, accumulators, opener.
 type Viewer struct{ /* unexported */ }
 func NewViewer(v *render.View, p render.Palette, o Opener, stderr io.Writer) *Viewer
-func (vw *Viewer) Frame(gtx layout.Context) (quit bool) // handle input, lay out, report quit
+func (vw *Viewer) Frame(gtx layout.Context) (quit bool, err error) // handle input, lay out; err is View.Err or a failed stderr write (CLI-6)
 
 type Action uint8 // None, LineDown, LineUp, PageDown, PageUp, Top, Bottom,
                   // ZoomIn, ZoomOut, ZoomReset, Quit
@@ -434,8 +443,12 @@ change `Position` directly: lines and pages add to `Offset`; Home sets `Position
 `Position{First: v.Len()}`, which `layout.List` clamps so the last block ends at the bottom.
 
 The list is a `widget.List{List: layout.List{Axis: layout.Vertical}}` drawn with
-`material.List(th, &list).Layout(gtx, view.Len(), view.Layout)`, where `th` is a
-`material.Theme` whose `Palette.Fg` is the palette's `Fg` (the scrollbar indicator colour).
+`material.List(th, &list).Layout(gtx, view.Len(), elem)` in the default `Occupy` mode: the
+scrollbar takes a gutter of 10 dp at the window's metric (SCROLL-4), so the list is the window
+less the gutter, and the gutter is not zoomed. `elem` sets `gtx.Metric` to `zoom.Metric(gtx.Metric)`
+(STYLE-ZOOM-3) and calls `view.Layout`. The distances of the keys and wheel (SCROLL-2, SCROLL-3) are
+read at the same zoomed metric. `th` is `material.NewTheme()` with `Palette.Fg` set to the palette's
+`Fg` (the scrollbar indicator colour), built once in `NewViewer`.
 
 ### internal/window
 
@@ -446,12 +459,18 @@ smoke run (CI and the container, under Xvfb) and by the owner on the desktop.
 type Config struct {
 	Title    string                         // WIN-1
 	Canvas   color.NRGBA                    // painted under every frame
-	Frame    func(gtx layout.Context) bool  // the viewer; true means quit
+	Frame    func(gtx layout.Context) (quit bool, err error) // the viewer; true means quit; an error closes the window
 	Bind     func(invalidate func())        // called once with the window's Invalidate
 	OnFirst  func()                         // called once, after the first Frame call returns
 	ExitAfterFirst bool                     // --time
 }
-func Run(c Config) error // returns when the window is gone: nil when closed, else Gio's error
+
+// FrameError is the error of a failed frame (CLI-6). Err is the error Config.Frame returned.
+type FrameError struct{ Err error }
+func (e *FrameError) Error() string
+func (e *FrameError) Unwrap() error
+
+func Run(c Config) error // nil when closed; a *FrameError when Frame failed; else Gio's error
 func Main()              // gioui.org/app.Main
 ```
 
@@ -459,12 +478,15 @@ func Main()              // gioui.org/app.Main
 `app.MinSize(320, 240)`, calls `Bind(w.Invalidate)`, and loops on `w.Event()`:
 
 - `app.FrameEvent`: `gtx := app.NewContext(&ops, e)`, `paint.Fill(gtx.Ops, Canvas)`,
-  `quit := c.Frame(gtx)`, `e.Frame(gtx.Ops)`; after the first frame call `OnFirst`; if `quit`
-  or `ExitAfterFirst`, call `w.Perform(system.ActionClose)`;
-- `app.DestroyEvent`: return `e.Err` (nil when the window was closed normally).
+  `quit, err := c.Frame(gtx)`, `e.Frame(gtx.Ops)`; after the first frame call `OnFirst`; if `err`
+  is not nil, keep it as a `*FrameError`; if `err` is not nil, `quit` or `ExitAfterFirst`, call
+  `w.Perform(system.ActionClose)`;
+- `app.DestroyEvent`: return the kept `*FrameError` if there is one, else `e.Err` (nil when the
+  window was closed normally).
 
 `internal/window` cannot import `internal/app` (that would be a cycle), so it reports with an
-error and `main` turns it into CLI-9's message and exit code.
+error. `main` turns a `*FrameError` into `md-viewer: ` and its error, exit 1 (CLI-6), and any other
+error into CLI-9's message and exit code.
 
 ## Headless render tests
 

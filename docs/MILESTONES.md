@@ -608,22 +608,49 @@ started with `Start`; the wait runs in a goroutine.
   modifiers; `q` with Ctrl is `None`; a key release is `None`.
 - `TestZoomLevels`: `In` from 100 is 110, from 300 is 300; `Out` from 50 is 50; `Reset` is
   100; `Metric` multiplies `PxPerDp` and `PxPerSp`.
+- `TestActionFor` also covers the modifier rules of SCROLL-2 and WIN-4 (Shift on arrows and
+  Ctrl on Home are no action; Shift+Space is Page Up).
+- `TestActionString`: each action's name, and an out-of-range value.
 - `TestViewerKeysScroll` (router): after a frame, Down moves `Position.Offset` by 40 px at
-  zoom 100 and 80 px at zoom 200; Page Down by the viewport height minus 40; Home returns to
-  `Position{}`; End shows the last block at the bottom; Up at the top does not move.
+  zoom 100 and 80 px at zoom 200; Page Down by the viewport height minus 40; Home sets `First`
+  and `Offset` to 0 (layout fills `Count`, `Length` and `BeforeEnd`, so they are not compared);
+  End shows the last block at the bottom; Up at the top does not move.
+- `TestViewerEveryKeyRoutes`: each key of `TestActionFor` reaches the viewer through the router
+  and has its effect (keys with the router's filters).
+- `TestViewerZoomKeys`: Ctrl+`=`, Ctrl+Shift+`+`, Ctrl+`-` and Ctrl+`0` move the zoom through
+  ZOOM-1's levels, and stop at 300 and at 50.
+- `TestViewerZoomScalesContent`: a rule-only document's frame height at several window widths
+  and zooms (DOC-LAYOUT-1 and STYLE-ZOOM-3).
 - `TestViewerWheel`: a `pointer.Scroll` event with `Scroll.Y = 100` moves 100 px; with Ctrl
   held it does not scroll.
 - `TestViewerCtrlWheelZoom`: Ctrl+wheel `-100` zooms in one level; `-4` twice does nothing,
   a third `-4` zooms in (accumulator); `+100` zooms out.
 - `TestViewerZoomKeepsPosition`: zooming keeps `Position.First` and scales `Offset`.
-- `TestViewerScrollbarDrag`: a press-drag on the scrollbar area moves the list (the wheel
-  area's `PassOp` lets it through).
-- `TestViewerLinks`: clicks on an `External` link call the fake opener with the URL; on an
-  existing `LocalFile` with the path; on a missing file, a `Fragment` and a `Refused` link,
-  no call and LINK-1's stderr line.
-- `TestOpenerFailureReported`: a fake opener whose wait fails prints LINK-2's line.
-- `TestViewerQuit`: `q` and Esc make `Frame` return true.
-- `TestViewerRewraps`: the same frame at 800 then 300 px gives a taller first block.
+- `TestViewerScrollbarDrag`: a press on the indicator, then two `pointer.Move` events with the
+  primary button held (the first drag event only anchors), then a release, moves the list (the
+  wheel area's `PassOp` lets it through). A press and release without a move does not.
+- `TestViewerLinks`: a table of clicks: an `External` link calls the fake opener with the URL;
+  an existing `LocalFile` (and a directory, and a file with a fragment) with its path; a missing
+  file, a `Fragment` and a `Refused` link give no call and LINK-1's stderr line, byte for byte.
+- `TestViewerLinkCursor`: the hand cursor over a link, and the default cursor over plain text.
+- `TestViewerOpensOffFrame`: the opener runs only in the spawned function, after the frame.
+- `TestOpenerFailureReported`: a fake opener whose wait fails prints LINK-2's line, and the next
+  frame does not fail.
+- `TestExecOpenerStartError`: a missing opener program gives an error that matches
+  `fs.ErrNotExist`.
+- `TestSystemOpenerCommand` (Linux): the command is `xdg-open` with the target as one argument,
+  built without a shell (LINK-2). It does not start the command.
+- `TestSystemOpenerOther` (not Linux, compiled by the cross-platform vet): an error naming the OS.
+- `TestViewerQuit`: `q`, Shift+`q` and Esc make `Frame` return true; the modifier controls do not.
+- `TestViewerNoEditing` (WIN-5): a control-only pin. Ctrl+C, Ctrl+A, Ctrl+V and text input do
+  nothing: no clipboard request, no text input state, no scroll or zoom change.
+- `TestViewerEmptyDocument`: a document with no blocks takes the keys and the wheel without
+  an error or a panic.
+- `TestViewerElements`: `testdata/elements.md` at 980 × 900 dp, with Home, End and a wheel
+  scroll, lays out without an error.
+- `TestViewerRewraps`: the same frame at 800 then 300 px gives a taller first block (WRAP-2).
+- `TestViewerLayoutError`: a layout error ends a frame with that error (the window closes); a
+  failed stderr write in a frame does too; an ordinary document gives no error.
 
 **Verification:** the standard checks.
 
