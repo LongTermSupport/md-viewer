@@ -103,7 +103,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M8 Images
 - [x] M9 The viewer: scroll, zoom, links, quit
 - [x] M10 The window and the binary
-- [ ] M11 Speed: fixtures, benchmarks, measurement
+- [x] M11 Speed: fixtures, benchmarks, measurement
 
 ---
 
