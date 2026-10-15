@@ -87,7 +87,13 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCo
 			return Prepared{}, ExitFailure, werr
 		}
 	}
-	return Prepared{OpenWindow: true, opts: opts, document: d, stats: stats}, ExitOK, nil
+	// The image lines follow DOC-9's line, in document order (STYLE-IMG-3). Their write error is a
+	// failed write like any other (P12).
+	images, err := render.NewImages(d, stderr)
+	if err != nil {
+		return Prepared{}, ExitFailure, err
+	}
+	return Prepared{OpenWindow: true, opts: opts, document: d, stats: stats, images: images}, ExitOK, nil
 }
 
 // loadMessage is the stderr line for a file that cannot be loaded: CLI-8's wording for each typed
