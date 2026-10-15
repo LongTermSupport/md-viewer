@@ -69,6 +69,14 @@ func (l *links) clicked(gtx layout.Context) (doc.Target, bool) {
 	return first, found
 }
 
+// wrapMode is how a flow wraps its lines. The zero value is prose.
+type wrapMode uint8
+
+const (
+	wrapProse wrapMode = iota // WRAP-1: at word breaks, then at characters
+	wrapCode                  // STYLE-CODE-2: at the character that overflows, leading spaces kept
+)
+
 // flowParams are the inputs to layoutFlow that do not change within one call.
 type flowParams struct {
 	shaper    *text.Shaper
@@ -76,6 +84,7 @@ type flowParams struct {
 	palette   Palette
 	inHeading bool // RunStyle's code rule (STYLE-TEXT-5)
 	links     *links
+	wrap      wrapMode // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
 }
 
 // Inline code padding in em of the run's size (STYLE-TEXT-5).

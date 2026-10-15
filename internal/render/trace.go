@@ -34,7 +34,10 @@ const (
 
 // Trace records what layout drew, in pixels relative to the block's top-left corner. The view
 // keeps one per visible block; tests read it to assert structure.
-type Trace struct{ Marks []Mark }
+type Trace struct {
+	Marks  []Mark
+	origin image.Point // added to every mark's Rect as it is recorded (M5)
+}
 
 // Mark is one thing layout drew. Rect is in pixels relative to the flow's top-left corner
 // (ARCHITECTURE "internal/render", mark rectangles).
@@ -54,3 +57,11 @@ func (t *Trace) add(m Mark) {
 	}
 	t.Marks = append(t.Marks, m)
 }
+
+// push moves the origin by d and returns the previous origin, for pop. Stub: not yet implemented.
+func (t *Trace) push(d image.Point) image.Point {
+	return image.Point{}
+}
+
+// pop restores the origin that push returned. Stub: not yet implemented.
+func (t *Trace) pop(prev image.Point) {}

@@ -2,6 +2,7 @@ package render
 
 import (
 	"image"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -777,6 +778,78 @@ func TestFlowBidi(t *testing.T) {
 		after := glyphMark(t, tr, " x")
 		if after.Rect.Min.X != c.width {
 			t.Fatalf("text after %q starts at x=%d, want %d", c.text, after.Rect.Min.X, c.width)
+		}
+	}
+}
+
+// markTexts is the text of each mark, in order.
+func markTexts(ms []Mark) []string {
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, m.Text)
+	}
+	return out
+}
+
+// flowModeEnv is a flow in a monospaced 14 px style with 21 px lines, in the given wrap mode.
+// Each character is 8.40625 px wide (Go Mono advance), so 45 px holds five.
+func flowModeEnv(t *testing.T, width int, wrap wrapMode) *flowEnv {
+	t.Helper()
+	e := newFlowEnv(t, width)
+	e.fp.base = TextStyle{Font: monoRegular, Size: 14, LineHeight: 1.5, Colour: Light.Fg}
+	e.fp.wrap = wrap
+	return e
+}
+
+// TestFlowCodeMode: code mode wraps at the character that overflows (STYLE-CODE-2), keeps leading
+// spaces, and closes the last line after a trailing break; prose mode does none of these.
+func TestFlowCodeMode(t *testing.T) {
+	// A line of 45 px: code takes five characters, prose takes the word break "ab ".
+	e := flowModeEnv(t, 45, wrapCode)
+	_, tr := e.lay([]doc.Run{plain("ab cdefgh")})
+	if got, want := markTexts(lineStarts(needMarks(t, tr, MarkGlyphs, "Glyphs"))), []string{"ab cd", "efgh"}; !slices.Equal(got, want) {
+		t.Fatalf("code at 45 px: line starts %q, want %q", got, want)
+	}
+	e = flowModeEnv(t, 45, wrapProse)
+	_, tr = e.lay([]doc.Run{plain("ab cdefgh")})
+	if first := needMarks(t, tr, MarkGlyphs, "Glyphs")[0]; first.Text != "ab " {
+		t.Fatalf("prose at 45 px: first line %q, want %q", first.Text, "ab ")
+	}
+
+	// Leading spaces are shaped and kept in code: one mark, "   x", at the left edge.
+	e = flowModeEnv(t, 800, wrapCode)
+	_, tr = e.lay([]doc.Run{plain("   x")})
+	gs := needMarks(t, tr, MarkGlyphs, "Glyphs")
+	if len(gs) != 1 || gs[0].Text != "   x" || gs[0].Rect.Min.X != 0 {
+		t.Fatalf("code with leading spaces: marks %q, want one mark \"   x\" at x 0", markTexts(gs))
+	}
+	e = flowModeEnv(t, 800, wrapProse)
+	_, tr = e.lay([]doc.Run{plain("   x")})
+	if gs := needMarks(t, tr, MarkGlyphs, "Glyphs"); len(gs) != 1 || gs[0].Text != "x" {
+		t.Fatalf("prose with leading spaces: marks %q, want \"x\"", markTexts(gs))
+	}
+
+	// A trailing break closes a second, empty line in code (issue 4); prose closes none.
+	e = flowModeEnv(t, 800, wrapCode)
+	dims, tr := e.lay([]doc.Run{plain("a"), brk})
+	if dims.Size.Y != 42 {
+		t.Fatalf("code, text then break: Size.Y = %d, want 42 (two lines)", dims.Size.Y)
+	}
+	if n := len(marks(tr, MarkGlyphs)); n != 1 {
+		t.Fatalf("code, text then break: %d Glyphs marks, want 1", n)
+	}
+	e = flowModeEnv(t, 800, wrapProse)
+	dims, tr = e.lay([]doc.Run{plain("a"), brk})
+	if dims.Size.Y != 21 {
+		t.Fatalf("prose, text then break: Size.Y = %d, want 21", dims.Size.Y)
+	}
+
+	// No runs give one empty line, with nothing drawn, in both modes.
+	for _, wrap := range []wrapMode{wrapProse, wrapCode} {
+		e = flowModeEnv(t, 800, wrap)
+		dims, tr = e.lay(nil)
+		if dims.Size.Y != 21 || len(tr.Marks) != 0 {
+			t.Fatalf("wrap %d, no runs: Size.Y = %d with %d marks, want 21 and none", wrap, dims.Size.Y, len(tr.Marks))
 		}
 	}
 }

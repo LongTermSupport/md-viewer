@@ -29,6 +29,18 @@ var bodyBase = TextStyle{Font: font.Font{Typeface: "Go"}, Size: 16, LineHeight: 
 // h1Base is heading level 1's style, written out.
 var h1Base = TextStyle{Font: goBold, Size: 32, LineHeight: 1.25, Colour: Light.Fg}
 
+// TestCodeBlockStyle checks a code block's text against STYLE-CODE-1: Go Mono at 13.6 sp (85% of
+// 16), line height 1.45, in Fg.
+func TestCodeBlockStyle(t *testing.T) {
+	want := TextStyle{Font: monoRegular, Size: 13.6, LineHeight: 1.45, Colour: Light.Fg}
+	if got := codeBlockStyle(Light); got != want {
+		t.Errorf("codeBlockStyle(Light):\n got %#v\nwant %#v", got, want)
+	}
+	if got := codeBlockStyle(Dark).Colour; got != Dark.Fg {
+		t.Errorf("codeBlockStyle(Dark).Colour = %#v, want Dark.Fg %#v", got, Dark.Fg)
+	}
+}
+
 // TestBodyStyle checks the body text of STYLE-TEXT-1 in both palettes.
 func TestBodyStyle(t *testing.T) {
 	want := TextStyle{Font: goRegular, Size: 16, LineHeight: 1.5, Colour: Light.Fg}
