@@ -153,11 +153,21 @@ func fixedPx(v fixed.Int26_6) float64 {
 	return float64(v) / 64
 }
 
-// textRun places the text of one run, breaking it across lines as needed.
+// textRun places the text of one run, breaking it across lines as needed (WRAP-1). A word that
+// does not fit the rest of its line moves to the next line (WrapWords, words first). A word
+// wider than a whole line breaks at a character (WrapHeuristically), and only then. A non-code
+// run drops its leading spaces where it starts a line.
 func (f *flow) textRun(r doc.Run) error {
 	ts := RunStyle(f.fp.base, r.Style, r.Link != nil, f.fp.palette, f.fp.inHeading)
+	code := r.Style&doc.Code != 0
 	rest := r.Text
 	for rest != "" {
+		if !f.hasContent && !code {
+			rest = strings.TrimLeft(rest, " ")
+			if rest == "" {
+				break
+			}
+		}
 		glyphs, n, err := f.shape(ts, rest, text.WrapWords, f.width-f.cursor)
 		if err != nil {
 			return err
@@ -167,8 +177,17 @@ func (f *flow) textRun(r doc.Run) error {
 				f.closeLine()
 				continue
 			}
-			// Step 2 has no line-start policy: the word is placed whole.
-			glyphs, n, err = f.shape(ts, rest, text.WrapWords, unboundedWidth)
+			// The first word is wider than a whole line: break it at a character.
+			glyphs, n, err = f.shape(ts, rest, text.WrapHeuristically, f.width-f.cursor)
+			if err != nil {
+				return err
+			}
+		}
+		if n == 0 {
+			// Not even one grapheme fits the line: place the first rune alone, past the
+			// line's end, so that the loop always advances.
+			_, size := utf8.DecodeRuneInString(rest)
+			glyphs, n, err = f.shape(ts, rest[:size], text.WrapWords, unboundedWidth)
 			if err != nil {
 				return err
 			}
