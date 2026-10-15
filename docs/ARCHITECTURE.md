@@ -249,7 +249,7 @@ type Mark struct {
 // View lays out one document. It owns the per-link click state and the image cache,
 // so it lives as long as the window.
 type View struct{ /* unexported */ }
-func NewView(d *doc.Document, sh *text.Shaper, p Palette) *View // M5; M8 adds img *Images
+func NewView(d *doc.Document, sh *text.Shaper, p Palette, img *Images) *View // img: the document's images (M8)
 func (v *View) Len() int                                             // number of top-level blocks
 func (v *View) Layout(gtx layout.Context, i int, tr *Trace) layout.Dimensions // a layout.ListElement
 func (v *View) Err() error                                           // the first layout error (M5)
@@ -263,8 +263,8 @@ func (v *View) Clicked(gtx layout.Context) (doc.Target, bool)        // LINK-1, 
 
 // Images probes headers before the window and decodes pixels lazily (SPEED-5).
 type Images struct{ /* unexported */ }
-func NewImages(d *doc.Document, warn io.Writer) *Images // reads headers now, warns per STYLE-IMG-3
-func (im *Images) Bind(invalidate func())               // the window's Invalidate, set once it exists
+func NewImages(d *doc.Document, warn io.Writer) (*Images, error) // reads headers now, warns per STYLE-IMG-3; an error is a failed write or an unknown block type
+func (im *Images) Bind(invalidate func())                          // the window's Invalidate, set once it exists
 ```
 
 **Text flow** (`flow.go`). Paragraph, heading and cell runs are laid out by md-viewer's own
@@ -337,10 +337,15 @@ Flow rules:
 **Lists** are laid out by `list.go` from the same primitives. Each item's content is laid out with
 a `blockCtx` whose `depth` counts the lists around the block and whose `tight` is set for a direct
 child of a tight list's item; `quoteCtx` clears `tight` and keeps `depth`. **Tables** are laid
-out by `table.go` (below). **Images** are laid out by `image.go`; until M8 each is a placeholder:
-height 0 content with its DOC-LAYOUT-4 margins, and no marks. Images use `paint.NewImageOp` with `op.Affine`
-scaling, or `widget.Image` with `Fit: widget.ScaleDown` and `Scale: 1` (one image pixel per dp
-before zoom).
+out by `table.go` (below). **Images** are laid out by `image.go`: a box at the probed size (scaled
+down to the available width, STYLE-IMG-2), then the pixels or a placeholder (STYLE-IMG-3). Pixels
+are drawn with `paint.NewImageOp` and `op.Affine`, scaled into the probed box, so a decoded size
+that differs from the probed one (the file changed) does not move the layout. `widget.Image` is
+not used: it imports `golang.org/x/exp`, which the module does not name. `golang.org/x/image/webp` is
+not used either: STYLE-IMG-1 names PNG and JPEG only. The decode worker is one
+goroutine over a FIFO queue of images, started when the queue gets its first request and exiting
+when it is empty (SPEED-5, SPEED-6). It calls the window's invalidate, bound by `Images.Bind`,
+which is safe to call from any goroutine. Layout never waits for it.
 
 **Tables** (`table.go`). `checkTable` first: no columns, a count of alignments other than the
 header's, a body row whose length is not the header's, or an alignment that is not one of the four
@@ -498,13 +503,15 @@ relations (taller, narrower, inside) so a Gio upgrade breaks fewer tests.
 | `elements.md`      | every supported element once, including a linked image and a reference-style link (committed with the plan); the smoke run's input                                                                                                                       |
 | `large.md`         | `elements.md` repeated 100 times, separated by a blank line; for benchmarks and `--time`; `TestLargeFixtureIsCurrent` fails if it is not exactly that, and rewrites it when `MDV_UPDATE_FIXTURES=1` |
 | `img/red-4x3.png`  | a 4 × 3 PNG, every pixel `#ff0000`                                                                                                                                                                  |
-| `img/blue-8x8.jpg` | an 8 × 8 JPEG, every pixel near `#0000ff`, quality 90                                                                                                                                               |
-| `img/notes.gif`    | a 1 × 1 GIF, for the unsupported-format placeholder                                                                                                                                                 |
-| `img/broken.png`   | the bytes `not a png`, for the decode-error placeholder                                                                                                                                             |
+| `img/blue-8x8.jpg` | an 8 × 8 JPEG, quality 90, each channel of every pixel within 4 of `00 00 ff`                                                                                                                      |
+| `img/notes.gif`    | a 1 × 1 GIF, for the unsupported-format placeholder (a GIF is not PNG or JPEG)                                                                                                                      |
+| `img/broken.png`   | the bytes `not a png`, for the unsupported-format placeholder (the header sniff fails: `image.ErrFormat`)                                                                                           |
 
 The images are written by `TestImageFixtures` in `internal/render` when `MDV_UPDATE_FIXTURES=1`
-and otherwise checked to decode to exactly those sizes and colours. Unit tests of single
-elements use inline Markdown strings, not files.
+and otherwise checked to decode to exactly those sizes and colours. The decoder-error cases (a
+header cut short, a valid header with pixel data cut short) and the size-cap cases are generated
+by the tests in `t.TempDir()`, not kept as fixtures. Unit tests of single elements use inline
+Markdown strings, not files.
 
 ## Benchmarks
 

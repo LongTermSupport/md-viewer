@@ -481,24 +481,49 @@ padding counts in its width.
 ### 3.8 Images
 
 **STYLE-IMG-1. Local PNG and JPEG images** are shown. The destination is resolved with DOC-5;
-only `LocalFile` targets whose decoded format is `png` or `jpeg` are drawn.
+only `LocalFile` targets whose decoded format is `png` or `jpeg` are drawn. An image wider or
+taller than 8192 px, or of more than 40 million pixels, is not drawn: a texture that size can
+exceed the GPU's limit, and the graphics layer panics when the GPU refuses one. Its header is
+read before the window and gives its size, so such an image is a placeholder with REASON
+`image too large: WxH` (STYLE-IMG-3).
 
 **STYLE-IMG-2. Size.** One image pixel is one dp, so the image follows the zoom. An image wider
-than the content width is scaled down, keeping its aspect ratio, to the content width
-(`img { max-width: 100% }`). Images are never scaled up. An image is left-aligned.
+than the width available to it is scaled down, keeping its aspect ratio, to that width
+(`img { max-width: 100% }`). The available width is the window's content width less any list
+indent or quote inset around the image. Images are never scaled up. An image is left-aligned.
+Each side of its box is rounded to whole pixels once, so a box may be 0 px tall.
 
 **STYLE-IMG-3. Placeholder.** An image that is not drawn (remote, missing, unreadable, another
-format, or failed to decode) is shown as its alt text, or its destination when the alt text is
-empty, in Italic `FgMuted` body text inside a 1 dp `Border` rectangle with 8 dp padding.
-md-viewer prints one line per such image to stderr:
-`md-viewer: image not shown: DEST: REASON`, where REASON is `remote images are not loaded`,
-`unsupported format`, or the operating system or decoder error.
+format, too large, or failed to decode) is shown as its alt text, or its destination when the alt
+text is empty, in Italic `FgMuted` body text inside a 1 dp `Border` rectangle with 8 dp padding.
+The rectangle hugs its text: its width is the widest line plus 2 × 9 dp, and its height is the
+text's height plus 2 × 9 dp (the padding and the border on each side). Its text is not a text
+link, so it stays `FgMuted` even inside a link (STYLE-IMG-4).
+
+md-viewer prints one line to stderr for each such image occurrence in the Markdown, in document
+order, after DOC-9's line and before the window opens:
+`md-viewer: image not shown: DEST: REASON`. REASON is:
+
+- `remote images are not loaded`, for an External target, or a Refused one with a host;
+- `not a local file`, for a fragment (`#x`) or another Refused target;
+- `unsupported format`, for a file that is not a PNG or JPEG, including one the header sniff
+  does not recognise;
+- `is a directory`, or `not a regular file`, for a path that is not a regular file (the file is
+  not opened);
+- `image too large: WxH`, from the size rule of STYLE-IMG-1;
+- the text of the operating system's error after the path (`no such file or directory`,
+  `permission denied`), or the decoder's error for a PNG or JPEG whose header is unreadable.
+
+An image whose pixels fail to decode after the window has opened (SPEED-5) prints its line once,
+when it is first laid out, and is a placeholder from then on (STYLE-IMG-5).
 
 **STYLE-IMG-4. Linked images.** An image that is a link's content is clickable like a link
-(LINK-1), and shows the hand cursor.
+(LINK-1), and shows the hand cursor. The whole placeholder or box is the clickable area.
 
 **STYLE-IMG-5.** Before an image's pixels are decoded (SPEED-5) its box is drawn at its final
-size, filled `BgMuted`, so the layout does not move when the pixels arrive.
+size, filled `BgMuted`, so the layout does not move when the pixels arrive. The one exception is
+an image whose pixels fail to decode: it becomes a placeholder when it is laid out, so its layout
+moves once.
 
 ## 4. Links
 
@@ -647,9 +672,10 @@ moved.
 **SPEED-4. Fonts.** No system font scan, no font cache file, no fontconfig: the six embedded
 faces only (STYLE-FONT-1).
 
-**SPEED-5. Images.** An image's pixels are decoded only when its block first becomes visible,
-in a goroutine, one image at a time; the window is invalidated when it is ready. The first
-frame never waits for image pixels.
+**SPEED-5. Images.** An image's pixels are decoded only when the top-level block that holds it
+first becomes visible, in a goroutine, one image at a time, in the order the images are first
+laid out. The window is invalidated when each is ready. The goroutine exits when no image is
+waiting, and the next request starts it again. The first frame never waits for image pixels.
 
 **SPEED-6. Nothing else.** No `init` functions with work in md-viewer's packages, no
 background goroutines other than image decoding and the link opener's wait, no network, no
