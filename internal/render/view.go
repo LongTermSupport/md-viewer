@@ -17,12 +17,14 @@ type View struct {
 	shaper  *text.Shaper
 	palette Palette
 	links   *links
+	images  *Images
 	err     error // the first layout error; kept, never cleared
 }
 
-// NewView makes a View of d, shaped by sh and painted in palette p. M8 adds the image cache.
-func NewView(d *doc.Document, sh *text.Shaper, p Palette) *View {
-	return &View{doc: d, shaper: sh, palette: p, links: newLinks()}
+// NewView makes a View of d, shaped by sh and painted in palette p. Its images are img, which
+// NewImages made for d (STYLE-IMG-1).
+func NewView(d *doc.Document, sh *text.Shaper, p Palette, img *Images) *View {
+	return &View{doc: d, shaper: sh, palette: p, links: newLinks(), images: img}
 }
 
 // Len is the number of top-level blocks.
@@ -67,7 +69,7 @@ func (v *View) layoutElement(gtx layout.Context, i int, tr *Trace) (layout.Dimen
 	}
 
 	b := v.doc.Blocks[i]
-	ctx := blockCtx{text: v.palette, root: v.palette, shaper: v.shaper, links: v.links}
+	ctx := blockCtx{text: v.palette, root: v.palette, shaper: v.shaper, links: v.links, images: v.images}
 	bgtx := gtx
 	bgtx.Constraints = layout.Constraints{Max: image.Pt(max(width-2*pad, 0), gtx.Constraints.Max.Y)}
 	dims, err := at(gtx, tr, image.Pt(pad, top), func() (layout.Dimensions, error) {

@@ -436,7 +436,8 @@ func TestTightAndLooseSpacing(t *testing.T) {
 		{"loose item with a nested list", "- a\n\n  - b\n- c", []string{"a", "b", "c"}, []int{40, 40}, 0, 0},
 		{"loose list then paragraph", "- a\n- b\n\nc", nil, nil, 1, 85},
 		{"paragraph then list", "a\n\n- b", nil, nil, 1, 85},
-		{"image in a tight item", "- a ![i](x.png) b", []string{"a", "b"}, []int{24}, 0, 0},
+		// The image is a placeholder of 42 px (STYLE-IMG-3), with no margins in a tight item (STYLE-LIST-4).
+		{"image in a tight item", "- a ![i](x.png) b", []string{"a", "b"}, []int{66}, 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

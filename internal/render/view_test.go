@@ -1,8 +1,11 @@
 package render
 
 import (
+	"bytes"
 	"image"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +18,8 @@ import (
 )
 
 // viewEnv is a headless View (ARCHITECTURE "Headless render tests"): one op list and one input
-// router, at one metric. Each call makes its own context at the width it is given.
+// router, at one metric. Each call makes its own context at the width it is given. warn holds what
+// the images printed to stderr, and images is the View's Images.
 type viewEnv struct {
 	t      *testing.T
 	ops    op.Ops
@@ -23,6 +27,8 @@ type viewEnv struct {
 	d      *doc.Document
 	view   *View
 	metric unit.Metric
+	warn   bytes.Buffer
+	images *Images
 }
 
 // metric1 is 1 px per dp and per sp, the metric most tests use.
@@ -34,31 +40,74 @@ var metric2 = unit.Metric{PxPerDp: 2, PxPerSp: 2}
 // newViewEnv parses src as a document in /doc and makes a View of it on palette pal.
 func newViewEnv(t *testing.T, src string, pal Palette, metric unit.Metric) *viewEnv {
 	t.Helper()
-	d, err := doc.Parse([]byte(src), "/doc")
+	return newViewEnvIn(t, src, "/doc", pal, metric)
+}
+
+// newViewEnvIn parses src as a document in dir, so that its relative image paths resolve there, and
+// makes a View of it with its images probed by NewImages.
+func newViewEnvIn(t *testing.T, src, dir string, pal Palette, metric unit.Metric) *viewEnv {
+	t.Helper()
+	return newViewEnvDoc(t, parseIn(t, src, dir), pal, metric)
+}
+
+// parseIn parses src as a document in dir.
+func parseIn(t *testing.T, src, dir string) *doc.Document {
+	t.Helper()
+	d, err := doc.Parse([]byte(src), dir)
 	if err != nil {
 		t.Fatalf("doc.Parse: %v", err)
 	}
-	return newViewEnvDoc(t, d, pal, metric)
+	return d
 }
 
-// newViewEnvDoc makes a View of d, with the faces loaded as the window loads them.
+// newViewEnvDoc makes a View of d, whose images NewImages probes.
 func newViewEnvDoc(t *testing.T, d *doc.Document, pal Palette, metric unit.Metric) *viewEnv {
+	t.Helper()
+	return viewWith(t, d, pal, metric, func(w io.Writer) (*Images, error) {
+		return NewImages(d, w)
+	})
+}
+
+// newViewEnvNoImages makes a View of d with an empty Images. It is for a document that NewImages
+// rejects (a block type its walk does not know), so that the layout reports the error instead.
+func newViewEnvNoImages(t *testing.T, d *doc.Document, pal Palette, metric unit.Metric) *viewEnv {
+	t.Helper()
+	return viewWith(t, d, pal, metric, func(io.Writer) (*Images, error) {
+		return &Images{}, nil
+	})
+}
+
+// viewWith makes a View of d on palette pal, with the faces loaded as the window loads them. build
+// makes the View's images, and is given the env's warn writer for their stderr lines.
+func viewWith(t *testing.T, d *doc.Document, pal Palette, metric unit.Metric, build func(warn io.Writer) (*Images, error)) *viewEnv {
 	t.Helper()
 	faces, err := LoadFaces()
 	if err != nil {
 		t.Fatalf("LoadFaces: %v", err)
 	}
-	return &viewEnv{t: t, d: d, view: NewView(d, NewShaper(faces), pal), metric: metric}
+	e := &viewEnv{t: t, d: d, metric: metric}
+	img, err := build(&e.warn)
+	if err != nil {
+		t.Fatalf("images: %v", err)
+	}
+	e.images = img
+	e.view = NewView(d, NewShaper(faces), pal, img)
+	return e
 }
 
-// elementsEnv is a View of testdata/elements.md, the document that shows every block kind.
+// elementsEnv is a View of testdata/elements.md, the document that shows every block kind. Its
+// images resolve in testdata.
 func elementsEnv(t *testing.T, metric unit.Metric) *viewEnv {
 	t.Helper()
 	src, err := os.ReadFile("../../testdata/elements.md")
 	if err != nil {
 		t.Fatalf("read elements.md: %v", err)
 	}
-	return newViewEnv(t, string(src), Light, metric)
+	dir, err := filepath.Abs("../../testdata")
+	if err != nil {
+		t.Fatalf("abs testdata: %v", err)
+	}
+	return newViewEnvIn(t, string(src), dir, Light, metric)
 }
 
 // context resets the ops and returns a context of width px for the env's metric.
@@ -225,34 +274,6 @@ func TestNoMaxWidth(t *testing.T) {
 	}
 }
 
-// TestViewPlaceholders: an image is height 0 until M8, with its margins (DOC-LAYOUT-4) and no
-// marks.
-func TestViewPlaceholders(t *testing.T) {
-	tests := []struct {
-		name, block string
-	}{
-		{"image", "![alt](i.png)"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			e := newViewEnv(t, "a\n\n"+tt.block+"\n\nb", Light, metric1)
-			if n := e.view.Len(); n != 3 {
-				t.Fatalf("%d elements, want 3", n)
-			}
-			mid, tr := e.layout(1, 800)
-			if mid.Size.Y != 16 {
-				t.Fatalf("placeholder is %d px tall with its gap, want 16 (its top gap is 16 and its height 0)", mid.Size.Y)
-			}
-			if len(tr.Marks) != 0 {
-				t.Fatalf("placeholder recorded %d marks, want none", len(tr.Marks))
-			}
-			if last := e.dims(2, 800).Size.Y; last != 16+24+45 {
-				t.Fatalf("element after the placeholder is %d px tall, want %d (gap 16, line 24, padding 45)", last, 16+24+45)
-			}
-		})
-	}
-}
-
 // TestViewLayoutError: a layout error is kept as the View's first error, which Err reports. The
 // failing element is Dimensions{}, and a later layout does not clear the error (ARCHITECTURE,
 // View).
@@ -268,7 +289,7 @@ func TestViewLayoutError(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e := newViewEnvDoc(t, &doc.Document{Blocks: []doc.Block{tt.block}}, Light, metric1)
+			e := newViewEnvNoImages(t, &doc.Document{Blocks: []doc.Block{tt.block}}, Light, metric1)
 			if dims := e.view.Layout(e.context(800), 0, nil); dims != (layout.Dimensions{}) {
 				t.Fatalf("failing element is %+v, want Dimensions{}", dims)
 			}
@@ -278,7 +299,7 @@ func TestViewLayoutError(t *testing.T) {
 		})
 	}
 
-	e := newViewEnvDoc(t, &doc.Document{Blocks: []doc.Block{
+	e := newViewEnvNoImages(t, &doc.Document{Blocks: []doc.Block{
 		doc.Heading{Level: 7},
 		doc.Heading{Level: 8},
 		doc.Paragraph{Runs: []doc.Run{plain("ok")}},
@@ -290,7 +311,7 @@ func TestViewLayoutError(t *testing.T) {
 		t.Fatalf("after two failures and a valid element: Err() = %v, want the first error (level 7)", err)
 	}
 
-	e = newViewEnvDoc(t, &doc.Document{Blocks: []doc.Block{doc.Paragraph{Runs: []doc.Run{plain("a")}}}}, Light, metric1)
+	e = newViewEnvNoImages(t, &doc.Document{Blocks: []doc.Block{doc.Paragraph{Runs: []doc.Run{plain("a")}}}}, Light, metric1)
 	if dims := e.view.Layout(e.context(800), e.view.Len(), nil); dims != (layout.Dimensions{}) {
 		t.Fatalf("element at a bad index is %+v, want Dimensions{}", dims)
 	}
@@ -298,7 +319,7 @@ func TestViewLayoutError(t *testing.T) {
 		t.Fatalf("element 1 of a one-block document: Err() = %v, want an error naming index 1", err)
 	}
 
-	e = newViewEnvDoc(t, &doc.Document{Blocks: []doc.Block{doc.Paragraph{Runs: []doc.Run{plain("a")}}}}, Light, metric1)
+	e = newViewEnvNoImages(t, &doc.Document{Blocks: []doc.Block{doc.Paragraph{Runs: []doc.Run{plain("a")}}}}, Light, metric1)
 	e.layout(0, 800)
 }
 
@@ -420,7 +441,24 @@ func TestViewElements(t *testing.T) {
 			needCount(t, "row fills", fills(tr), len(b.Rows)+1)
 			needMarks(t, tr, MarkGlyphs, "Glyphs")
 		case doc.Image:
-			// A placeholder until M8: height 0 with its margins.
+			// A missing or remote image is a placeholder. A local file that exists is its box or its
+			// pixels, and the two references to red-4x3.png may differ, as the decode runs meanwhile.
+			ph := len(marks(tr, MarkPlaceholder))
+			shown := len(marks(tr, MarkImageBox)) + len(marks(tr, MarkImagePixels))
+			if b.Target.Kind != doc.LocalFile || b.Dest == "img/missing.png" {
+				needCount(t, "placeholders", marks(tr, MarkPlaceholder), 1)
+				if shown != 0 {
+					t.Fatalf("element %d: %d image boxes or pixels for a placeholder, want none", i, shown)
+				}
+			} else {
+				needCount(t, "image boxes or pixels", append(marks(tr, MarkImageBox), marks(tr, MarkImagePixels)...), 1)
+				if ph != 0 {
+					t.Fatalf("element %d: %d placeholders for a local image that exists, want none", i, ph)
+				}
+			}
+			if b.Link != nil {
+				needCount(t, "link areas", marks(tr, MarkLinkArea), 1)
+			}
 		default:
 			t.Fatalf("element %d: no expectation for block %T", i, b)
 		}
@@ -461,8 +499,10 @@ func TestViewTinyWidth(t *testing.T) {
 		{PxPerDp: 1.5, PxPerSp: 1.5},
 		{PxPerDp: 2.25, PxPerSp: 2.25},
 	}
+	// Images: a local PNG, and a missing image's placeholder (STYLE-IMG-2, STYLE-IMG-3).
+	src += "\n\n![a](red-4x3.png)\n\n![A missing image](missing.png)"
 	for _, m := range metrics {
-		e := newViewEnv(t, src, Light, m)
+		e := newViewEnvIn(t, src, fixtureDir(t), Light, m)
 		for _, w := range widths {
 			for i := 0; i < e.view.Len(); i++ {
 				e.layout(i, w)

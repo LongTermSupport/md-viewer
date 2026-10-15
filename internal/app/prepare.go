@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/LongTermSupport/md-viewer/internal/doc"
+	"github.com/LongTermSupport/md-viewer/internal/render"
 )
 
 // Clock gives the current time. Load takes its readings from it, so tests use a fake clock.
@@ -36,6 +37,7 @@ type Prepared struct {
 	opts       Options
 	document   *doc.Document
 	stats      doc.LoadStats
+	images     *render.Images
 }
 
 // Prepare handles the command line and the file before any window opens (SPEED-1). A usage
