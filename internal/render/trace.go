@@ -12,7 +12,7 @@ import (
 type MarkKind uint8
 
 // The kinds of mark. The Mark prefix avoids the clash with the type names HeadingRule and
-// Bullet (ARCHITECTURE, F2).
+// Bullet (ARCHITECTURE).
 const (
 	MarkGlyphs      MarkKind = iota // text drawn in Rect
 	MarkCodeBg                      // a code run's rounded background (STYLE-TEXT-5)

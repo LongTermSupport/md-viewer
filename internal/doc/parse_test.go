@@ -525,7 +525,7 @@ const m1Kinds = "# Title\n" +
 	"- [x] done\n"
 
 // elementsKinds are the goldmark node kinds that GFM produces and that ARCHITECTURE says Parse
-// handles, except String, which only the typographer extension creates (P19). elements.md must
+// handles, except String, which only the typographer extension creates. elements.md must
 // reach each of them (DOC-2).
 var elementsKinds = []string{
 	"Document", "Heading", "Paragraph", "TextBlock", "CodeBlock", "FencedCodeBlock",
@@ -657,7 +657,7 @@ func checkStyles(t *testing.T, styles Style) {
 }
 
 // TestEveryKindIsMapped parses the M1 constant and elements.md, and checks that each reaches
-// every kind it should (DOC-2). M1's expectations for m1Kinds are unchanged (P17).
+// every kind it should (DOC-2). M1's expectations for m1Kinds are unchanged.
 func TestEveryKindIsMapped(t *testing.T) {
 	t.Run("m1Kinds", func(t *testing.T) {
 		c := coverageOf(parseDoc(t, m1Kinds).Blocks)

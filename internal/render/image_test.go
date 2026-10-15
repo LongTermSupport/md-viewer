@@ -649,7 +649,7 @@ func TestNewImagesWarnings(t *testing.T) {
 	}
 }
 
-// TestNewImagesErrors: a failed write is an error (P12), and so is a block the image walk does not
+// TestNewImagesErrors: a failed write is an error, and so is a block the image walk does not
 // know, which names its type.
 func TestNewImagesErrors(t *testing.T) {
 	t.Run("a failed write", func(t *testing.T) {

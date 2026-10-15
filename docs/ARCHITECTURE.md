@@ -140,7 +140,7 @@ type BinaryError   struct{ Path string }
 const MaxFileSize = 64 << 20
 
 // The error types are returned as pointers (*ReadError and so on). Their Error texts are for
-// developers; the CLI-8 wording is written by internal/app (P11).
+// developers; the CLI-8 wording is written by internal/app.
 ```
 
 `Load` takes the clock as a parameter, so tests
@@ -166,7 +166,7 @@ Conversion rules:
   (`IsChecked`), with alignment from `Table.Alignments` (`AlignLeft`, `AlignRight`,
   `AlignCenter`, `AlignNone`).
 - `ast.String` is created only by the typographer extension, which is not enabled, so no GFM
-  input reaches it (P19). The converter keeps its case; the kind-coverage test does not require it.
+  input reaches it. The converter keeps its case; the kind-coverage test does not require it.
 
 ### internal/render
 
@@ -203,7 +203,7 @@ func NewShaper(f Faces) *text.Shaper            // text.NewShaper(text.NoSystemF
 
 // TextStyle is what a run is drawn with.
 type TextStyle struct {
-	Font       font.Font   // Typeface "Go" or "Go Mono", Style, Weight; Bold is font.SemiBold (F1)
+	Font       font.Font   // Typeface "Go" or "Go Mono", Style, Weight; Bold is font.SemiBold (STYLE-FONT-3)
 	Size       unit.Sp
 	LineHeight float32     // multiple of Size: 1.5, 1.25 or 1.45
 	Colour     color.NRGBA
@@ -216,19 +216,19 @@ type HeadingRule struct {
 }
 
 // BodyStyle is the body text's style (STYLE-TEXT-1). A block's line height is its base style's
-// Size × LineHeight (F6).
+// Size × LineHeight (STYLE-TEXT-1).
 func BodyStyle(p Palette) TextStyle
 
-// HeadingStyle is the style of heading level 1 to 6; any other level is an error (F3). The sizes
-// are STYLE-TEXT-2's literal numbers in a per-level table, not em products (F4).
+// HeadingStyle is the style of heading level 1 to 6; any other level is an error. The sizes
+// are STYLE-TEXT-2's literal numbers in a per-level table, not em products.
 func HeadingStyle(level int, p Palette) (TextStyle, HeadingRule, error) // STYLE-TEXT-2
-// RunStyle keeps base.LineHeight for every run, so a code run never changes the line (F6).
+// RunStyle keeps base.LineHeight for every run, so a code run never changes the line (STYLE-TEXT-5).
 func RunStyle(base TextStyle, s doc.Style, link bool, p Palette, inHeading bool) TextStyle
-// Margins: nested affects the List row only (F7); a block type with no row is an error (F3).
+// Margins: nested affects the List row only; a block type with no row is an error.
 func Margins(b doc.Block, nested bool) (top, bottom unit.Dp, err error) // DOC-LAYOUT-4
 func Gap(prevBottom, nextTop unit.Dp) unit.Dp                           // DOC-LAYOUT-3
 func Padding(windowWidth unit.Dp) unit.Dp                               // DOC-LAYOUT-1
-// OrderedMarker: n below 1 or a roman numeral above 3999 prints decimal (F8).
+// OrderedMarker: n below 1 or a roman numeral above 3999 prints decimal (STYLE-LIST-3).
 func OrderedMarker(n, depth int) string // STYLE-LIST-3
 
 // Bullet is the shape of an unordered marker. Its String is the Mark text (disc, circle, square).
@@ -240,9 +240,9 @@ const (
 	BulletSquare
 )
 
-func BulletShape(depth int) Bullet // STYLE-LIST-2, M6 (F2); depth below 1 is disc
+func BulletShape(depth int) Bullet // STYLE-LIST-2, M6; depth below 1 is disc
 // ColumnWidths: floor(N × W ÷ ΣN) with a minimum of minCol; "fits" is ΣN <= W. table.go passes
-// W less the closing border; the table clips the overflow (F9).
+// W less the closing border; the table clips the overflow.
 func ColumnWidths(natural []int, width int, minCol int) []int // STYLE-TABLE-5
 
 // Trace records what layout drew. Its origin is the top-left corner of what the trace was made
@@ -254,7 +254,7 @@ type Mark struct {
 	Kind   MarkKind        // MarkGlyphs, MarkCodeBg, MarkCodeBlockBg, MarkHeadingRule, MarkQuoteBar, MarkRuleBar,
 	                       // MarkBullet, MarkNumber, MarkTaskBox, MarkTableLine, MarkRowFill, MarkImageBox,
 	                       // MarkImagePixels, MarkPlaceholder, MarkStrike, MarkLinkArea. The Mark prefix avoids the
-	                       // clash with the type names HeadingRule and Bullet (F2, from M4)
+	                       // clash with the type names HeadingRule and Bullet (from M4)
 	Rect   image.Rectangle
 	Colour color.NRGBA
 	Text   string          // Glyphs and Number: the text drawn in Rect; Bullet: the shape; TaskBox: open, done, border or check
@@ -434,9 +434,9 @@ func (t Timings) Line() string // SPEED-2, byte for byte
 
 **Notes on `Prepare`.** `Clock` and `SystemClock` live in `prepare.go`; `timing.go` holds
 `Timings`. `Prepare` handles the usage errors (stderr, `ExitUsage`) and `--help` and
-`--version` (stdout, `ExitOK`), so `main` only calls it (P16). A file that loads gives
-`OpenWindow` true and `ExitOK` (P14). A file error prints its CLI-8 line and gives `ExitFailure`;
-any other load error prints `md-viewer: ` + the error (P10, P11). If a write to stdout or stderr
+`--version` (stdout, `ExitOK`), so `main` only calls it. A file that loads gives
+`OpenWindow` true and `ExitOK`. A file error prints its CLI-8 line and gives `ExitFailure`;
+any other load error prints `md-viewer: ` + the error (DOC-13). If a write to stdout or stderr
 fails, `Prepare` returns `ExitFailure`, and when stdout failed it also writes `md-viewer: ` + the
 error to stderr, best effort.
 

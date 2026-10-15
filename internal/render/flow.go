@@ -149,7 +149,7 @@ type flow struct {
 }
 
 // layoutFlow lays out runs as wrapped lines and records what it drew in tr, which may be nil.
-// The line box is the base style's size times its line height (STYLE-TEXT-1, F6), and every
+// The line box is the base style's size times its line height (STYLE-TEXT-1), and every
 // line is that tall, so the block is lines × L tall. A run's style sets its font, colour and
 // marks; the base style sets the baseline.
 //

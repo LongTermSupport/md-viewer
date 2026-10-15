@@ -99,7 +99,7 @@ func TestHeadingStyle(t *testing.T) {
 }
 
 // TestRunStyle checks each style flag, link and heading context against STYLE-FONT-3, 4 and
-// STYLE-TEXT-3, 5. The line height always stays the base's (F6).
+// STYLE-TEXT-3, 5. The line height always stays the base's.
 func TestRunStyle(t *testing.T) {
 	quoteBase := TextStyle{Font: font.Font{Typeface: "Go"}, Size: 16, LineHeight: 1.5, Colour: Light.FgMuted}
 	tests := []struct {
@@ -268,7 +268,7 @@ func TestPadding(t *testing.T) {
 }
 
 // TestOrderedMarker checks the numbering of STYLE-LIST-3 by depth, and the decimal fallback for
-// values outside each style's range (F8).
+// values outside each style's range (STYLE-LIST-3).
 func TestOrderedMarker(t *testing.T) {
 	tests := []struct {
 		n, depth int

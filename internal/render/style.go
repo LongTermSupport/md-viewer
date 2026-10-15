@@ -65,7 +65,7 @@ const (
 // RunStyle is the style of a run inside base. Flags add to the base: Strong sets the bold
 // weight, Emphasis the italic style, Code the Go Mono family (STYLE-FONT-3, STYLE-FONT-4). A
 // link takes the palette's Accent colour (STYLE-TEXT-3). The line height is always the base's
-// (F6, STYLE-TEXT-5).
+// (STYLE-TEXT-5).
 func RunStyle(base TextStyle, s doc.Style, link bool, p Palette, inHeading bool) TextStyle {
 	ts := base
 	if s&doc.Strong != 0 {
@@ -100,7 +100,7 @@ func BodyStyle(p Palette) TextStyle {
 
 // headingSpec is one row of STYLE-TEXT-2's table. A level with no rule has no padding either.
 // The numbers are written out, not computed from em: float32 cannot give .3em of 24 exactly,
-// so the table is the spec's literal values (F4).
+// so the table is the spec's literal values.
 type headingSpec struct {
 	size    unit.Sp
 	padding unit.Dp // padding below the text, before the rule
@@ -119,7 +119,7 @@ var headingSpecs = [...]headingSpec{
 }
 
 // HeadingStyle is the style of heading level 1 to 6 (STYLE-TEXT-2). Any other level is an
-// error (F3).
+// error.
 func HeadingStyle(level int, p Palette) (TextStyle, HeadingRule, error) {
 	if level < 1 || level > len(headingSpecs) {
 		return TextStyle{}, HeadingRule{}, fmt.Errorf("render: no heading style for level %d", level)
@@ -150,8 +150,8 @@ const (
 
 // Margins gives a block's top and bottom margins (DOC-LAYOUT-4). nested is true for a list
 // inside a list at any depth, through quotes too: the only block whose margins depend on
-// nesting (F7). A block with no row
-// is an error (F3). Margins does not check Heading.Level: HeadingStyle rejects levels outside
+// nesting. A block with no row
+// is an error. Margins does not check Heading.Level: HeadingStyle rejects levels outside
 // 1 to 6.
 func Margins(b doc.Block, nested bool) (top, bottom unit.Dp, err error) {
 	switch b := b.(type) {
@@ -196,7 +196,7 @@ func Padding(windowWidth unit.Dp) unit.Dp {
 	return paddingNarrow
 }
 
-// romanMax is the largest number written in roman numerals (STYLE-LIST-3, F8).
+// romanMax is the largest number written in roman numerals (STYLE-LIST-3).
 const romanMax = 3999 // STYLE-LIST-3
 
 // romanDigits are the roman numeral values, largest first.
@@ -210,7 +210,7 @@ var romanDigits = [...]struct {
 
 // OrderedMarker is the marker text of an ordered item: the number and a period (STYLE-LIST-3).
 // Depth 0 is decimal, depth 1 lower-roman and depth 2 or more lower-alpha (after z comes aa).
-// A number outside its style's range, such as 0 or a roman numeral above 3999, is decimal (F8).
+// A number outside its style's range, such as 0 or a roman numeral above 3999, is decimal (STYLE-LIST-3).
 func OrderedMarker(n, depth int) string {
 	switch {
 	case depth == 1 && n >= 1 && n <= romanMax:

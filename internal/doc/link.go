@@ -12,14 +12,14 @@ const (
 	schemeHTTPS  = "https"
 	schemeMailto = "mailto"
 	schemeFile   = "file"
-	localHost    = "localhost" // DOC-5, P7: the only host a file URL may name besides none
+	localHost    = "localhost" // DOC-5: the only host a file URL may name besides none
 )
 
-// mailtoPrefix is put in front of an email address to make its link target (DOC-4, P2).
+// mailtoPrefix is put in front of an email address to make its link target (DOC-4).
 const mailtoPrefix = schemeMailto + ":"
 
 // ResolveLink classifies a link destination against the document directory (DOC-5). The
-// escapes and references in dest are resolved first, as DOC-3 resolves them in text (P6), so
+// escapes and references in dest are resolved first, as DOC-3 resolves them in text, so
 // the Dest of the result is the resolved destination.
 func ResolveLink(dir, dest string) Target {
 	return classify(dir, resolveText([]byte(dest)))

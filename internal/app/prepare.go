@@ -28,7 +28,7 @@ const (
 	msgTooLarge    = progName + ": %s is too large: %d bytes, the limit is %d\n"          // CLI-8
 	msgNotText     = progName + ": %s is not a text file: it contains a NUL byte\n"       // CLI-8
 	msgHTMLDropped = progName + ": %d HTML fragment(s) not shown: HTML is not rendered\n" // DOC-9
-	msgLoadOther   = progName + ": %v\n"                                                  // P10
+	msgLoadOther   = progName + ": %v\n"                                                  // DOC-13
 )
 
 // Prepared is what Prepare leaves for the window. OpenWindow is set when a file loaded; the
@@ -79,7 +79,7 @@ func (p Prepared) bind(invalidate func()) {
 // error prints its two lines to stderr (CLI-7) and gives ExitUsage. --help and --version print to
 // stdout and give ExitOK. A file that cannot be loaded prints its CLI-8 line and gives
 // ExitFailure. A file that loads prints DOC-9's line when HTML was dropped, and gives
-// OpenWindow with ExitOK (P14). A failed write gives ExitFailure (P12).
+// OpenWindow with ExitOK. A failed write gives ExitFailure.
 func Prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode) {
 	return prepareWith(args, stdout, stderr, c, render.LoadFaces)
 }
@@ -88,7 +88,7 @@ func Prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCo
 func prepareWith(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() (render.Faces, error)) (Prepared, ExitCode) {
 	p, code, err := prepare(args, stdout, stderr, c, loadFaces)
 	if err != nil {
-		// P12: best effort. A write error cannot be reported on the stream that failed, and the
+		// Best effort. A write error cannot be reported on the stream that failed, and the
 		// exit code is ExitFailure whether or not this line lands.
 		write(stderr, progName+": "+err.Error()+"\n")
 		return Prepared{}, ExitFailure
@@ -128,7 +128,7 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() 
 		}
 	}
 	// The image lines follow DOC-9's line, in document order (STYLE-IMG-3). Their write error is a
-	// failed write like any other (P12).
+	// failed write like any other.
 	images, err := render.NewImages(d, stderr)
 	if err != nil {
 		return Prepared{}, ExitFailure, err
@@ -161,7 +161,7 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() 
 }
 
 // loadMessage is the stderr line for a file that cannot be loaded: CLI-8's wording for each typed
-// error, and md-viewer: followed by the error for any other (P10).
+// error, and md-viewer: followed by the error for any other.
 func loadMessage(err error) string {
 	var re *doc.ReadError
 	var de *doc.DirectoryError

@@ -133,7 +133,7 @@ is in `.claude/ccy/Dockerfile` and a rebuild by the owner, not an install by han
 - `internal/app/version.go`: `VersionLine(info *debug.BuildInfo, ok bool) string`.
 - `cmd/md-viewer/main.go`: parses the arguments; prints usage (stdout, exit 0), the version
   line (stdout, exit 0), or a usage error (CLI-7, exit 2). With a valid FILE it prints
-  `md-viewer: not implemented yet` to stderr and exits 1; M10 replaces that line (M2 keeps it, P13).
+  `md-viewer: not implemented yet` to stderr and exits 1; M10 replaces that line (M2 keeps it).
 - `README.md` already exists; change nothing in it except to correct an error you find.
 
 `.github/workflows/ci.yml`:
