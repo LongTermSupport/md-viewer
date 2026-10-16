@@ -583,8 +583,11 @@ the viewer's state (list position, zoom percent, the fake opener's calls, quit).
 **Ink probes.** A test of where a glyph outline is drawn (STYLE-TEXT-7) cannot read the outline
 from the trace, so it draws the production outline under an `event.Op` tag (the same
 `pushGlyphs` transform the paint uses), frames the router twice (a handler takes the filter that
-its `Event` calls set before a frame), and queues a move and a press at each row in turn. The rows that hit are the outline's bounds, because Gio hit-tests clip bounds. Probe
-at non-negative coordinates only: the router never hits a negative one.
+its `Event` calls set before a frame), and queues a move and a press at each row in turn. The rows
+that hit are the outline's bounds, because Gio hit-tests clip bounds. Probe at non-negative
+coordinates only: the router never hits a negative one. The point the paint uses is read through
+`flowParams.drawn`, which `pushGlyphs` calls with the origin it draws at (nil in production), so a
+test probes where the flow drew a fragment, not only where its mark says it did.
 
 Text measurements depend on the Go fonts, which are embedded, so they are the same on every
 machine; tests may assert exact pixel numbers where the font determines them, but prefer

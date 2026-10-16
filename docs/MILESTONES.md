@@ -861,25 +861,36 @@ not fail `go test`, and no open in md-viewer can block on a FIFO.
 is its drawn text), and STYLE-TEXT-7 (one geometry: glyphs, code, strike, link areas and list
 markers share the baseline the glyphs are drawn on).
 
-**Files:** `internal/render/flow.go` (`place`, `pushGlyphs`), `trace.go` (`Mark.Origin`, `add`,
-`shiftFrom`), `list.go` (`drawNumber` copies `Origin`); their tests in `flow_test.go`,
+**Files:** `internal/render/flow.go` (`place`, `pushGlyphs`, and the test hook
+`flowParams.drawn`), `trace.go` (`Mark.Origin`, `add`, `shiftFrom`), `list.go` (`drawNumber`
+copies `Origin`); their tests in `flow_test.go`,
 `view_test.go` and `trace_test.go`; `testdata/corpus/align.md`.
 
-**Tests first.** Each is seen to fail on its assertion before the code that makes it pass:
+**Tests first.** Each is seen to fail on its assertion before the code that makes it pass. Where
+the code was already right when a test was added, the test is seen to fail on a mutant of it:
 
 - `TestGlyphInkInsideMark` (`flow_test.go`): the ink probe of each `Glyphs` mark's outline, at
   its `Origin`, lies inside its `Rect`, at every metric of body, bold, code and heading runs.
+- `TestGlyphDrawnAtOrigin` (`flow_test.go`): each fragment's outline is drawn at the `Origin` its
+  mark records (the point the flow passes to `pushGlyphs`), and the ink at that drawn point lies
+  inside its glyph box.
+- `TestGlyphInkMixedLine` (`flow_test.go`): a wrapped line of body, bold, code and plain text, at
+  body and heading size: the drawn points and ink as above; the first baseline is the one
+  STYLE-TEXT-1 gives from the base face; each later line is a whole line box lower; and each
+  fragment's box top plus its ceiled ascent is its `Origin.Y`.
 - `TestGlyphOriginIsBaseline` (`view_test.go`): over the corpus and `elements.md`, each mark's
-  `Rect.Min.Y` plus its ceiled ascent is its `Origin.Y`, and every fragment of one line has one
-  `Origin.Y`.
+  `Origin` lies strictly inside its glyph box; and in one line of body, code, bold and plain text,
+  every fragment has one `Origin.Y`.
+- `TestNumberOriginIsInk` (`view_test.go`): the ink of each ordered number, probed at its `Number`
+  mark's `Origin`, lies inside its `Rect`.
 - `TestLinkPressOnInk` (`flow_test.go`): a press and release on the ink centre of a link, on its
   first line, a wrapped second line and a heading, is that link's click.
 - `TestDecorationsShareGeometry` (`view_test.go`): over the corpus, each link area contains its
   fragment's glyph box, each code background contains its glyphs, each strike starts between the
   glyph box's top and the baseline, and each bullet or task box centre lies between the first
   line's top and baseline.
-- `TestTraceMovesOrigin` (`trace_test.go`): `add`, `shiftFrom` and a number's copy move `Origin`
-  with `Rect`.
+- `TestTraceMovesOrigin` (`trace_test.go`): `add` and `shiftFrom` move `Origin` with `Rect`. The
+  number's copy is covered by `TestNumberOriginIsInk`.
 - `TestNoMarkPastContentEdge` (`view_test.go`): over the corpus and `elements.md`, at 310, 600 and
   970 dp, no mark extends past the content edge, except inside a table that STYLE-TABLE-5 clips.
 
