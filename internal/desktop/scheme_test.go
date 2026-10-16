@@ -56,7 +56,7 @@ func TestBusAddress(t *testing.T) {
 			statOnly(""), "", false},
 		{"a unix address with a trailing tcp counts as no address", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/s;tcp:host=127.0.0.1,port=1"},
 			statOnly(""), "", false},
-		{"a list of unix addresses falls back to the runtime bus",map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/s;unix:path=/tmp/t", "XDG_RUNTIME_DIR": runDir},
+		{"a list of unix addresses falls back to the runtime bus", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/s;unix:path=/tmp/t", "XDG_RUNTIME_DIR": runDir},
 			statOnly(busPath), escaped, true},
 		{"an abstract socket address is used as is", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:abstract=/tmp/dbus-s"},
 			statOnly(""), "unix:abstract=/tmp/dbus-s", true},
