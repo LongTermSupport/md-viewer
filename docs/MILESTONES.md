@@ -105,6 +105,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M10 The window and the binary
 - [x] M11 Speed: fixtures, benchmarks, measurement
 - [x] M12 Hardening: the label gate on tracked files, non-blocking opens
+- [ ] Text on its baseline: alignment and link hit areas
 
 ---
 
@@ -851,6 +852,55 @@ go test -race -count=5 -run 'Open|NonRegular|FileOpens|TrackedFiles|PlannerLabel
 
 **Done when:** the standard checks and the smoke run pass, an untracked file holding a label does
 not fail `go test`, and no open in md-viewer can block on a FIFO.
+
+---
+
+## Text on its baseline: alignment and link hit areas
+
+**Covers:** STYLE-TEXT-1 (the line box and its baseline), STYLE-TEXT-3 and LINK-1 (a link's area
+is its drawn text), and STYLE-TEXT-7 (one geometry: glyphs, code, strike, link areas and list
+markers share the baseline the glyphs are drawn on).
+
+**Files:** `internal/render/flow.go` (`place`, `pushGlyphs`, and the test hook
+`flowParams.drawn`), `trace.go` (`Mark.Origin`, `add`, `shiftFrom`), `list.go` (`drawNumber`
+copies `Origin`); their tests in `flow_test.go`,
+`view_test.go` and `trace_test.go`; `testdata/corpus/align.md`.
+
+**Tests first.** Each is seen to fail on its assertion before the code that makes it pass. Where
+the code was already right when a test was added, the test is seen to fail on a mutant of it:
+
+- `TestGlyphInkInsideMark` (`flow_test.go`): the ink probe of each `Glyphs` mark's outline, at
+  its `Origin`, lies inside its `Rect`, at every metric of body, bold, code and heading runs.
+- `TestGlyphDrawnAtOrigin` (`flow_test.go`): each fragment's outline is drawn at the `Origin` its
+  mark records (the point the flow passes to `pushGlyphs`), and the ink at that drawn point lies
+  inside its glyph box.
+- `TestGlyphInkMixedLine` (`flow_test.go`): a wrapped line of body, bold, code and plain text, at
+  body and heading size: the drawn points and ink as above; the first baseline is the one
+  STYLE-TEXT-1 gives from the base face; each later line is a whole line box lower; and each
+  fragment's box top plus its ceiled ascent is its `Origin.Y`.
+- `TestGlyphOriginIsBaseline` (`view_test.go`): over the corpus and `elements.md`, each mark's
+  `Origin` lies strictly inside its glyph box; and in one line of body, code, bold and plain text,
+  every fragment has one `Origin.Y`.
+- `TestNumberOriginIsInk` (`view_test.go`): the ink of each ordered number, probed at its `Number`
+  mark's `Origin`, lies inside its `Rect`.
+- `TestLinkPressOnInk` (`flow_test.go`): a press and release on the ink centre of a link, on its
+  first line, a wrapped second line and a heading, is that link's click.
+- `TestDecorationsShareGeometry` (`view_test.go`): over the corpus, each link area contains its
+  fragment's glyph box, each code background contains its glyphs, each strike starts between the
+  glyph box's top and the baseline, and each bullet or task box centre lies between the first
+  line's top and baseline.
+- `TestTraceMovesOrigin` (`trace_test.go`): `add` and `shiftFrom` move `Origin` with `Rect`. The
+  number's copy is covered by `TestNumberOriginIsInk`.
+- `TestNoMarkPastContentEdge` (`view_test.go`): over the corpus and `elements.md`, at 310, 600 and
+  970 dp, no mark extends past the content edge, except inside a table that STYLE-TABLE-5 clips.
+
+**Verification:** the standard checks, the darwin and windows vets, the speed benchmarks of M11
+before and after (no change expected), and a visual check of the corpus against GitHub's
+rendering.
+
+**Done when:** the standard checks pass, the corpus lines up with GitHub's rendering at the
+checked points (bullets, task boxes, numbers, strikes, code chips, link areas, heading rules), and
+a press on a link's ink clicks it.
 
 ---
 

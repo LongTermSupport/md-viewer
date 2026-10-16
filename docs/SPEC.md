@@ -338,7 +338,10 @@ on `nested`.
 ### 3.4 Text
 
 **STYLE-TEXT-1. Body text** is 16 sp, colour `Fg`, line height 1.5 × font size
-(`.markdown-body { font-size: 16px; line-height: 1.5 }`).
+(`.markdown-body { font-size: 16px; line-height: 1.5 }`). Every line is L = round(size × line
+height) tall. Its baseline is the line's top plus round((L − (A + D)) ÷ 2 + A), with A and D the
+block's base face ascent and descent (CSS half-leading). Every run's glyphs are drawn on that
+baseline, whatever their own font and size, so bold, code and body text on one line share it.
 
 **STYLE-TEXT-2. Headings.**
 
@@ -358,7 +361,9 @@ width, directly under the padding. An empty heading (no runs) is one empty line 
 height, with its padding and rule.
 
 **STYLE-TEXT-3. Links** are drawn in `Accent`, with no underline, keeping their other style
-flags. The pointer turns into the hand cursor (`pointer.CursorPointer`) over a link
+flags. A link's clickable area is its fragment's advance × the line box, so it covers the
+link's drawn glyphs; a press on any pixel of a link's text hits that link (LINK-1). The pointer
+turns into the hand cursor (`pointer.CursorPointer`) over a link
 (`a { color; text-decoration: none }`). GitHub underlines on hover; md-viewer does not track
 hover.
 
@@ -378,6 +383,12 @@ vertical (`h1 code, … { padding: 0 .2em; font-size: inherit }`). When a code r
 lines, each line's fragment gets its own rectangle, with the horizontal padding on both edges.
 
 **STYLE-TEXT-6.** Text is aligned to the start (left). Paragraph text does not hyphenate.
+
+**STYLE-TEXT-7. One geometry.** A fragment's glyph outlines lie inside its glyph box: from its
+baseline − ceil(ascent) to baseline + ceil(descent), and across its advance. The code background
+(STYLE-TEXT-5), the strikethrough (STYLE-TEXT-4), the link area (STYLE-TEXT-3) and the list
+markers (STYLE-LIST-2, 3 and 5) are placed from the same baseline the glyphs are drawn on, so
+each decoration sits on the ink it decorates.
 
 ### 3.5 Blocks
 
@@ -551,7 +562,8 @@ moves once.
 ## 4. Links
 
 **LINK-1.** A primary-button click on a link (press and release on the same link) acts on its
-target (DOC-5):
+target (DOC-5). The link's area is its drawn text on every line it wraps to (STYLE-TEXT-3), so a
+press on the ink of a link is a press on the link:
 
 | Target kind | Action                                                                                                            |
 | ----------- | ----------------------------------------------------------------------------------------------------------------- |

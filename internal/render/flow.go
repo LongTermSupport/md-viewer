@@ -93,8 +93,9 @@ type flowParams struct {
 	palette   Palette
 	inHeading bool // RunStyle's code rule (STYLE-TEXT-5)
 	links     *links
-	wrap      wrapMode  // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
-	align     textAlign // how each line sits in its box (STYLE-TABLE-4)
+	wrap      wrapMode                 // how lines wrap; wrapCode for a code block (STYLE-CODE-2)
+	align     textAlign                // how each line sits in its box (STYLE-TABLE-4)
+	drawn     func(origin image.Point) // tests only: told each outline's origin as it is drawn; nil otherwise
 }
 
 // Inline code padding in em of the run's size (STYLE-TEXT-5).
@@ -420,8 +421,10 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 		descent = max(descent, g.Descent.Ceil())
 	}
 	baseY := f.top + f.baseOff
-	originX := f.cursor + padX - lo
-	glyphRect := image.Rect(originX+lo, baseY-ascent, originX+hi, baseY+descent)
+	// The outline's origin is the fragment's left edge on the baseline (STYLE-TEXT-7); its glyph
+	// box is derived from it, so the box, the decorations and the ink share one baseline.
+	origin := image.Pt(f.cursor+padX-lo, baseY)
+	glyphRect := image.Rect(origin.X+lo, origin.Y-ascent, origin.X+hi, origin.Y+descent)
 
 	if code {
 		bg := image.Rect(glyphRect.Min.X-padX, glyphRect.Min.Y-padY, glyphRect.Max.X+padX, glyphRect.Max.Y+padY)
@@ -429,14 +432,12 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 		f.tr.add(Mark{Kind: MarkCodeBg, Rect: bg, Colour: f.fp.palette.CodeBg})
 	}
 
-	stack := op.Offset(image.Pt(originX, baseY-int(glyphs[0].Y))).Push(f.gtx.Ops)
+	pop := pushGlyphs(f.gtx, f.fp.shaper, glyphs, origin, f.fp.drawn)
 	paint.ColorOp{Color: ts.Colour}.Add(f.gtx.Ops)
-	clipStack := clip.Outline{Path: f.fp.shaper.Shape(glyphs)}.Op().Push(f.gtx.Ops)
 	paint.PaintOp{}.Add(f.gtx.Ops)
-	clipStack.Pop()
-	stack.Pop()
+	pop()
 
-	f.tr.add(Mark{Kind: MarkGlyphs, Rect: glyphRect, Colour: ts.Colour, Text: fragmentText(s)})
+	f.tr.add(Mark{Kind: MarkGlyphs, Rect: glyphRect, Origin: origin, Colour: ts.Colour, Text: fragmentText(s)})
 
 	boxStart := f.cursor
 	f.cursor += 2*padX + hi - lo
@@ -448,6 +449,23 @@ func (f *flow) place(r doc.Run, ts TextStyle, s string, glyphs []text.Glyph, pad
 	}
 	f.hasContent = true
 	return nil
+}
+
+// pushGlyphs makes the outline of glyphs the clip of what is drawn until the returned pop is
+// called, with the outline's origin at origin (STYLE-TEXT-7). Shape's outline has its baseline at
+// y = 0 and x from the first glyph, and Glyph.Y is not in it (gioui.org/text, Shape), so origin
+// is the fragment's left edge on its baseline. The paint and the ink probes both use it. If drawn
+// is not nil, it is told origin, the point the outline is drawn at.
+func pushGlyphs(gtx layout.Context, sh *text.Shaper, glyphs []text.Glyph, origin image.Point, drawn func(image.Point)) (pop func()) {
+	if drawn != nil {
+		drawn(origin)
+	}
+	offset := op.Offset(origin).Push(gtx.Ops)
+	outline := clip.Outline{Path: sh.Shape(glyphs)}.Op().Push(gtx.Ops)
+	return func() {
+		outline.Pop()
+		offset.Pop()
+	}
 }
 
 // linkArea makes rect a link's clickable area: the hand cursor shows over it, and a press and

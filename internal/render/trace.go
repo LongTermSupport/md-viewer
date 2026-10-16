@@ -46,6 +46,7 @@ type Trace struct {
 type Mark struct {
 	Kind   MarkKind
 	Rect   image.Rectangle
+	Origin image.Point // for Glyphs and Number: the point the outline is drawn at (STYLE-TEXT-7)
 	Colour color.NRGBA
 	Text   string      // for Glyphs and Number: the text drawn in Rect
 	Link   *doc.Target // for LinkArea
@@ -57,8 +58,17 @@ func (t *Trace) add(m Mark) {
 	if t == nil {
 		return
 	}
-	m.Rect = m.Rect.Add(t.origin)
+	m.move(t.origin)
 	t.Marks = append(t.Marks, m)
+}
+
+// move moves m by d: its Rect, and for Glyphs and Number its Origin, which is where their outline
+// is drawn (STYLE-TEXT-7). Other kinds have no Origin.
+func (m *Mark) move(d image.Point) {
+	m.Rect = m.Rect.Add(d)
+	if m.Kind == MarkGlyphs || m.Kind == MarkNumber {
+		m.Origin = m.Origin.Add(d)
+	}
 }
 
 // count is the number of marks recorded so far. A nil Trace has none.
@@ -76,7 +86,7 @@ func (t *Trace) shiftFrom(i int, d image.Point) {
 		return
 	}
 	for j := i; j < len(t.Marks); j++ {
-		t.Marks[j].Rect = t.Marks[j].Rect.Add(d)
+		t.Marks[j].move(d)
 	}
 }
 

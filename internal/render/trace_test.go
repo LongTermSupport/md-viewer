@@ -101,3 +101,31 @@ func TestTraceShift(t *testing.T) {
 	nilPrev := nilTrace.push(image.Pt(1, 1))
 	nilTrace.pop(nilPrev)
 }
+
+// TestTraceMovesOrigin: a Glyphs or Number mark's Origin moves with its Rect, under the trace's
+// origin (push and pop) and under shiftFrom, as a centred line's marks do (STYLE-TEXT-7). Other
+// marks have no Origin, so it stays zero for them.
+func TestTraceMovesOrigin(t *testing.T) {
+	var tr Trace
+	outer := tr.push(image.Pt(10, 20))
+	tr.add(Mark{Kind: MarkGlyphs, Rect: image.Rect(0, 0, 5, 5), Origin: image.Pt(1, 4)})
+	tr.add(Mark{Kind: MarkNumber, Rect: image.Rect(0, 0, 5, 5), Origin: image.Pt(2, 3)})
+	tr.add(Mark{Kind: MarkCodeBg, Rect: image.Rect(0, 0, 5, 5)})
+	tr.pop(outer)
+
+	check := func(stage string, want []image.Point) {
+		t.Helper()
+		for i, p := range want {
+			if got := tr.Marks[i].Origin; got != p {
+				t.Fatalf("%s: mark %d Origin %v, want %v", stage, i, got, p)
+			}
+		}
+	}
+	check("after push", []image.Point{image.Pt(11, 24), image.Pt(12, 23), {}})
+
+	tr.shiftFrom(1, image.Pt(5, 0))
+	check("after shiftFrom", []image.Point{image.Pt(11, 24), image.Pt(17, 23), {}})
+	if got := tr.Marks[1].Rect; got != image.Rect(15, 20, 20, 25) {
+		t.Fatalf("number Rect %v after shiftFrom, want (15,20)-(20,25)", got)
+	}
+}

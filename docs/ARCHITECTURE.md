@@ -252,12 +252,14 @@ func ColumnWidths(natural []int, width int, minCol int) []int // STYLE-TABLE-5
 // trace. Nested layout translates by its origin (push and pop), so a sub-layout records in the
 // coordinates of the trace it was given. Tests read it to assert structure.
 type Trace struct{ Marks []Mark } // shiftFrom(i, d) moves Marks[i:] by d; count() is len(Marks) (M7)
+// add, shiftFrom and drawNumber's copy move a mark's Origin with its Rect.
 type Mark struct {
 	Kind   MarkKind        // MarkGlyphs, MarkCodeBg, MarkCodeBlockBg, MarkHeadingRule, MarkQuoteBar, MarkRuleBar,
 	                       // MarkBullet, MarkNumber, MarkTaskBox, MarkTableLine, MarkRowFill, MarkImageBox,
 	                       // MarkImagePixels, MarkPlaceholder, MarkStrike, MarkLinkArea. The Mark prefix avoids the
 	                       // clash with the type names HeadingRule and Bullet (from M4)
 	Rect   image.Rectangle
+	Origin image.Point     // Glyphs and Number: the point the outline is drawn at, the fragment's left edge on its baseline (STYLE-TEXT-7)
 	Colour color.NRGBA
 	Text   string          // Glyphs and Number: the text drawn in Rect; Bullet: the shape; TaskBox: open, done, border or check
 	Link   *doc.Target     // for LinkArea
@@ -294,6 +296,10 @@ glyph outlines with `Shaper.Shape(glyphs)` → `clip.Outline{Path: …}.Op()` un
 `paint.ColorOp` and `paint.PaintOp`. Each run is shaped alone, so the flow places baselines
 itself.
 
+`Shaper.Shape` builds a fragment's outline with the baseline at y = 0 and x relative to the first
+glyph; `Glyph.Y` is not part of the path (`gioui.org@v0.10.3/text/gotext.go`, `Shape`). So the
+flow offsets the outline by the fragment's `Origin` alone, and `Origin.Y` is the baseline itself.
+
 Line breaking rules:
 
 - A run fills the current line. A run that does not fit is split at the last word break that
@@ -314,18 +320,21 @@ Line breaking rules:
 
 Flow rules:
 
-- **Line box.** Line height is L = round(base.Size px × base.LineHeight). The first baseline is
-  line top + round((L − (A + D)) ÷ 2 + A), with A and D the base style's face ascent and
-  descent; every run in the line shares that baseline. A block of n lines is n × L tall.
+- **Line box.** The line height and its baseline are STYLE-TEXT-1: `newFlow` computes L and the
+  baseline offset from the base style, and every run in the line shares that baseline. A block of
+  n lines is n × L tall.
 - **Rounding.** Each length is computed in float px and rounded to the nearest whole px once.
 - **Fractional sizes.** PxPerEm rounds up to whole px, so 13.6 sp code is drawn with 14 px
   glyphs. The em products (padding, strike) use the style's size, 13.6.
 - **Code padding.** Every fragment of a wrapped code run gets its own padding on both edges.
 - **Strike.** Top edge at baseline − round(0.3 em), spanning the whole fragment including code
   padding.
-- **Mark rectangles** (relative to the trace's origin, see Trace). `Glyphs`: from the fragment's text
-  start to its end; y from baseline − ceil(ascent) to baseline + ceil(descent) of the
-  fragment's glyphs; `Text` is the fragment's bytes with each invalid byte as U+FFFD (DOC-15).
+- **Mark rectangles** (relative to the trace's origin, see Trace). `Glyphs`: `Origin` is the point
+  the outline is drawn at (the fragment's left edge on its baseline, the same value that is passed
+  to `op.Offset`); `Rect` is derived from it: across the fragment's advance, y from Origin.Y −
+  ceil(ascent) to Origin.Y + ceil(descent) of its glyphs (STYLE-TEXT-7). `Text` is the fragment's
+  bytes with each invalid byte as U+FFFD (DOC-15). Every decoration of the fragment is placed from
+  `Origin.Y`, so the same baseline serves the glyphs, code, strike, link area and list markers.
   `CodeBg`: the `Glyphs` rectangle grown by the horizontal pad on each side and, outside a
   heading, the vertical pad above and below. It is painted directly, before the glyphs, with
   `paint.ColorOp` and `paint.PaintOp` under a rounded clip; no recorded macro is used.
@@ -571,6 +580,15 @@ Input is tested through the same `input.Router`: lay out a frame, call `r.Frame(
 events with `r.Queue(key.Event{…})` or `r.Queue(pointer.Event{…})`, lay out again and assert
 the viewer's state (list position, zoom percent, the fake opener's calls, quit).
 
+**Ink probes.** A test of where a glyph outline is drawn (STYLE-TEXT-7) cannot read the outline
+from the trace, so it draws the production outline under an `event.Op` tag (the same
+`pushGlyphs` transform the paint uses), frames the router twice (a handler takes the filter that
+its `Event` calls set before a frame), and queues a move and a press at each row in turn. The rows
+that hit are the outline's bounds, because Gio hit-tests clip bounds. Probe at non-negative
+coordinates only: the router never hits a negative one. The point the paint uses is read through
+`flowParams.drawn`, which `pushGlyphs` calls with the origin it draws at (nil in production), so a
+test probes where the flow drew a fragment, not only where its mark says it did.
+
 Text measurements depend on the Go fonts, which are embedded, so they are the same on every
 machine; tests may assert exact pixel numbers where the font determines them, but prefer
 relations (taller, narrower, inside) so a Gio upgrade breaks fewer tests.
@@ -581,6 +599,7 @@ relations (taller, narrower, inside) so a Gio upgrade breaks fewer tests.
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `elements.md`      | every supported element once, including a linked image and a reference-style link (committed with the plan); the smoke run's input                                                                                                                       |
 | `large.md`         | `elements.md` repeated 100 times, separated by a blank line; for benchmarks and `--time`; `TestLargeFixtureIsCurrent` fails if it is not exactly that, and rewrites it when `MDV_UPDATE_FIXTURES=1` |
+| `corpus/*.md`      | the rendering corpus for the visual check: `lists`, `inline`, `blocks`, `plan`, `images` and `align` (the baseline and link-area cases). Its GitHub reference images are kept outside the repository, and `align.md` is checked by the baseline tests (STYLE-TEXT-7) |
 | `img/red-4x3.png`  | a 4 × 3 PNG, every pixel `#ff0000`                                                                                                                                                                  |
 | `img/blue-8x8.jpg` | an 8 × 8 JPEG, quality 90, each channel of every pixel within 4 of `00 00 ff`                                                                                                                      |
 | `img/notes.gif`    | a 1 × 1 GIF, for the unsupported-format placeholder (a GIF is not PNG or JPEG)                                                                                                                      |

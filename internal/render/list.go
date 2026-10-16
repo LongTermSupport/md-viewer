@@ -182,7 +182,7 @@ func drawNumber(gtx layout.Context, ctx blockCtx, edge, base int, s string, tr *
 		if m.Kind != MarkGlyphs {
 			continue
 		}
-		tr.add(Mark{Kind: MarkNumber, Rect: m.Rect.Add(off), Colour: m.Colour, Text: m.Text})
+		tr.add(Mark{Kind: MarkNumber, Rect: m.Rect.Add(off), Origin: m.Origin.Add(off), Colour: m.Colour, Text: m.Text})
 	}
 	return nil
 }
