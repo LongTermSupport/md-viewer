@@ -21,6 +21,11 @@ func ColorScheme(ctx context.Context, getenv func(string) string) (scheme Scheme
 	}
 	conn, err := dbus.Connect(addr, dbus.WithContext(ctx))
 	if err != nil {
+		// A deadline stops the attempt, and godbus then reports the closed connection. The deadline
+		// is the cause, so it is what the caller sees.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return SchemeNoPreference, fmt.Errorf("connect to the session bus: %w", ctxErr)
+		}
 		return SchemeNoPreference, fmt.Errorf("connect to the session bus: %w", err)
 	}
 	defer func() {
