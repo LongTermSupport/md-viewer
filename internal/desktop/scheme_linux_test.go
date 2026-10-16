@@ -257,6 +257,36 @@ func TestColorSchemeAsksPortalKey(t *testing.T) {
 	}
 }
 
+// TestColorSchemeDeadTCPAddress (THEME-2, THEME-3): a tcp: session bus address is not dialled, so
+// a dead one cannot hold the query. The address is a port on the loopback interface that nothing
+// listens on, so the test makes no network connection. The bound is generous; the query returns
+// at once.
+func TestColorSchemeDeadTCPAddress(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on the loopback interface: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	if err := probe.Close(); err != nil {
+		t.Fatalf("close the probe listener: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	got, err := ColorScheme(ctx, func(k string) string {
+		if k == "DBUS_SESSION_BUS_ADDRESS" {
+			return fmt.Sprintf("tcp:host=127.0.0.1,port=%d", port)
+		}
+		return ""
+	})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("ColorScheme took %v with a dead tcp address, want within 1s", elapsed)
+	}
+	if err != nil || got != SchemeNoPreference {
+		t.Errorf("ColorScheme = %d, %v; want no preference and nil", got, err)
+	}
+}
+
 // TestColorSchemeConnectDeadline (THEME-3): a bus that accepts the connection and never speaks gives
 // an error that matches the deadline, not the closed connection godbus reports when it stops the
 // attempt. The listener is the test's own, and the deadline bounds the wait.
