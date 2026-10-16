@@ -469,6 +469,93 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// TestNoSessionBusHelpers (THEME-2): no non-test file calls a godbus helper that finds or starts the
+// session or system bus from the environment: those exec dbus-launch, read the user database and call
+// os.Setenv. md-viewer connects with dbus.Connect on the address it resolves itself. The fixture row
+// shows the check finds each helper, and passes dbus.Connect.
+func TestNoSessionBusHelpers(t *testing.T) {
+	t.Run("fixture with three helpers", func(t *testing.T) {
+		dir := writeTree(t, map[string]string{
+			"x.go": "package x\n\nimport \"github.com/godbus/dbus/v5\"\n\nfunc f() {\n" +
+				"\tdbus.SessionBus()\n\tdbus.SessionBusPrivate()\n\tdbus.ConnectSessionBus()\n" +
+				"\tdbus.Connect(\"unix:path=/x\")\n}\n",
+			"x_test.go": "package x\n\nimport \"github.com/godbus/dbus/v5\"\n\nfunc g() { dbus.SystemBus() }\n",
+		})
+		got, err := busHelperCalls(dir)
+		if err != nil {
+			t.Fatalf("busHelperCalls: %v", err)
+		}
+		want := []string{"x.go: dbus.SessionBus", "x.go: dbus.SessionBusPrivate", "x.go: dbus.ConnectSessionBus"}
+		if !slices.Equal(got, want) {
+			t.Errorf("busHelperCalls = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("module", func(t *testing.T) {
+		got, err := busHelperCalls(moduleRoot(t))
+		if err != nil {
+			t.Fatalf("busHelperCalls: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("busHelperCalls = %q, want none", got)
+		}
+	})
+}
+
+// busHelpers are the godbus functions that find or start a bus from the environment, by the prefix of
+// their names, or by the whole name for the two Connect helpers.
+var busHelpers = []string{"SessionBus", "SystemBus", "ConnectSessionBus", "ConnectSystemBus"}
+
+// busHelperCalls lists "file: dbus.Name" for each call in a non-test .go file under root to a godbus
+// bus helper (THEME-2), once per call. The package's local name is dbus unless it is imported under
+// another name.
+func busHelperCalls(root string) ([]string, error) {
+	var found []string
+	err := goFiles(root, func(rel string, f *ast.File) error {
+		local := ""
+		for _, imp := range f.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				return err
+			}
+			if path != "github.com/godbus/dbus/v5" {
+				continue
+			}
+			local = "dbus"
+			if imp.Name != nil {
+				local = imp.Name.Name
+			}
+		}
+		if local == "" {
+			return nil
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			x, ok := sel.X.(*ast.Ident)
+			if !ok || x.Name != local || !isBusHelper(sel.Sel.Name) {
+				return true
+			}
+			found = append(found, rel+": "+local+"."+sel.Sel.Name)
+			return true
+		})
+		return nil
+	})
+	return found, err
+}
+
+// isBusHelper reports whether name is one of busHelpers, or begins with one of them.
+func isBusHelper(name string) bool {
+	for _, h := range busHelpers {
+		if strings.HasPrefix(name, h) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestNoInitFunctions: no package of md-viewer declares func init (SPEED-6). The fixture row
 // shows the check finds one when there is one.
 func TestNoInitFunctions(t *testing.T) {
@@ -553,7 +640,8 @@ func TestGoStatements(t *testing.T) {
 		}
 		want := []string{
 			"cmd/md-viewer/main.go",
-			"internal/app/viewer.go",
+			"internal/app/prepare.go",
+				"internal/app/viewer.go",
 			"internal/render/image.go",
 		}
 		slices.Sort(got)

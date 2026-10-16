@@ -22,7 +22,7 @@ const (
 
 func main() {
 	start := time.Now()
-	prep, code := app.Prepare(os.Args[1:], os.Stdout, os.Stderr, app.SystemClock{})
+	prep, code := app.Prepare(os.Args[1:], app.SystemEnv(), os.Stdout, os.Stderr, app.SystemClock{})
 	if !prep.OpenWindow {
 		os.Exit(int(code))
 	}

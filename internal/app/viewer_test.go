@@ -125,6 +125,12 @@ type viewerEnv struct {
 // records its functions; runSpawned runs them.
 func newEnv(t *testing.T, d *doc.Document, size image.Point, stderr io.Writer) *viewerEnv {
 	t.Helper()
+	return newEnvFont(t, d, size, stderr, DefaultFontSize)
+}
+
+// newEnvFont is newEnv with the body font size given (FONT-1).
+func newEnvFont(t *testing.T, d *doc.Document, size image.Point, stderr io.Writer, font FontSize) *viewerEnv {
+	t.Helper()
 	images, err := render.NewImages(d, io.Discard)
 	if err != nil {
 		t.Fatalf("NewImages: %v", err)
@@ -138,7 +144,7 @@ func newEnv(t *testing.T, d *doc.Document, size image.Point, stderr io.Writer) *
 		metric: unit.Metric{PxPerDp: 1, PxPerSp: 1},
 	}
 	e.view = render.NewView(d, shaper(t), render.Light, images)
-	e.vw = newViewer(e.view, render.Light, e.opener, stderr, func(f func()) {
+	e.vw = newViewer(e.view, render.Light, font, e.opener, stderr, func(f func()) {
 		e.spawned = append(e.spawned, f)
 	})
 	return e
@@ -525,6 +531,69 @@ func TestViewerZoomScalesContent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestViewerFontSize (FONT-2, FONT-3): the font size scales the text and its line, and leaves the
+// dp spacing and rules alone; the zoom multiplies on top of it, and Ctrl+0 resets only the zoom. At
+// 600 px the padding is 15 dp (DOC-LAYOUT-1). At metric 1 a font of 20 is 1.25 px per sp, so its
+// body line is 30 px, and at zoom 200 it is 60 px.
+func TestViewerFontSize(t *testing.T) {
+	const pad = 15
+	para := parse(t, "one paragraph\n", t.TempDir())
+	rule := parse(t, "---\n", t.TempDir())
+	window := image.Pt(600, 600)
+	height := func(e *viewerEnv) int {
+		var ops op.Ops
+		gtx := layout.Context{
+			Ops:         &ops,
+			Source:      e.router.Source(),
+			Metric:      e.metric,
+			Constraints: layout.Exact(e.size),
+		}
+		return e.vw.element(gtx, 0).Size.Y
+	}
+	t.Run("the line scales with the font", func(t *testing.T) {
+		// 16 sp is 24 px a line, and 24 sp is 36 px (1.5 times the size).
+		for _, c := range []struct {
+			font FontSize
+			line int
+		}{{16, 24}, {24, 36}} {
+			e := newEnvFont(t, para, window, io.Discard, c.font)
+			e.frame()
+			if got, want := height(e), pad+c.line+pad; got != want {
+				t.Errorf("font %d: element is %d px, want %d", c.font, got, want)
+			}
+		}
+	})
+	t.Run("a rule does not scale", func(t *testing.T) {
+		small := newEnvFont(t, rule, window, io.Discard, 16)
+		small.frame()
+		large := newEnvFont(t, rule, window, io.Discard, 24)
+		large.frame()
+		if a, b := height(small), height(large); a != b {
+			t.Errorf("rule element is %d px at 16 sp and %d px at 24 sp, want the same", a, b)
+		}
+	})
+	t.Run("zoom multiplies the font size", func(t *testing.T) {
+		e := newEnvFont(t, para, window, io.Discard, 20)
+		e.frame()
+		// Five Ctrl+= presses reach 200 (ZOOM-1). Each padding is 15 dp, so 30 px, and there are two.
+		// The line is 60 px.
+		e.press(keyZoomIn, keyZoomIn, keyZoomIn, keyZoomIn, keyZoomIn)
+		e.frame()
+		if got, want := height(e), 2*(2*pad)+60; got != want {
+			t.Errorf("at zoom 200 and font 20 the element is %d px, want %d", got, want)
+		}
+	})
+	t.Run("ctrl+0 keeps the font", func(t *testing.T) {
+		e := newEnvFont(t, para, window, io.Discard, 20)
+		e.frame()
+		e.press(keyZoomIn, keyZoomIn, keyZoomIn, keyZoomIn, keyZoomIn, keyZoom0)
+		e.frame()
+		if got, want := height(e), pad+30+pad; got != want {
+			t.Errorf("after Ctrl+0 at font 20 the element is %d px, want %d", got, want)
+		}
+	})
 }
 
 // TestViewerWheel checks SCROLL-3 and ZOOM-4's boundary: a vertical wheel scroll without Ctrl
@@ -1135,7 +1204,7 @@ func TestViewerGoSpawnWrites(t *testing.T) {
 	d := parse(t, "[e](https://e.org/x) [n](nope.md)\n", dir)
 	w := &signalBuffer{wrote: make(chan struct{}, 2)}
 	e := newEnv(t, d, defaultSize, w)
-	e.vw = newViewer(e.view, render.Light, e.opener, w, goSpawn)
+	e.vw = newViewer(e.view, render.Light, DefaultFontSize, e.opener, w, goSpawn)
 	e.opener.err = errors.New("exit status 3")
 	centres := linkAreas(t, d, e.images, defaultSize.X-10)
 	if len(centres) != 2 {
