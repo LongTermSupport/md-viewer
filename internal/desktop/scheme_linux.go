@@ -21,12 +21,7 @@ func ColorScheme(ctx context.Context, getenv func(string) string) (scheme Scheme
 	}
 	conn, err := dbus.Connect(addr, dbus.WithContext(ctx))
 	if err != nil {
-		// A deadline stops the attempt, and godbus then reports the closed connection. The deadline
-		// is the cause, so it is what the caller sees.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return SchemeNoPreference, fmt.Errorf("connect to the session bus: %w", ctxErr)
-		}
-		return SchemeNoPreference, fmt.Errorf("connect to the session bus: %w", err)
+		return SchemeNoPreference, failure(ctx, "connect to the session bus", err)
 	}
 	defer func() {
 		err = errors.Join(err, conn.Close())
@@ -37,10 +32,19 @@ func ColorScheme(ctx context.Context, getenv func(string) string) (scheme Scheme
 		if unavailable(callErr) {
 			return SchemeNoPreference, nil
 		}
-		return SchemeNoPreference, fmt.Errorf("read the colour scheme: %w", callErr)
+		return SchemeNoPreference, failure(ctx, "read the colour scheme", callErr)
 	}
 	scheme, err = schemeFromReply(reply)
 	return scheme, err
+}
+
+// failure is the error for a step that did not finish. A deadline stops the step, and godbus then
+// reports the closed connection, so when the context is done its error is the cause the caller sees.
+func failure(ctx context.Context, step string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%s: %w", step, ctxErr)
+	}
+	return fmt.Errorf("%s: %w", step, err)
 }
 
 // statPath reports whether path exists, as an error from os.Stat.
