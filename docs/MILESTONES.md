@@ -106,7 +106,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M11 Speed: fixtures, benchmarks, measurement
 - [x] M12 Hardening: the label gate on tracked files, non-blocking opens
 - [x] Text on its baseline: alignment and link hit areas
-- [ ] Settings: theme (light, dark, auto) and font size
+- [x] Settings: theme (light, dark, auto) and font size
 
 ---
 
