@@ -29,7 +29,7 @@ type HeadingRule struct {
 
 // Body text (STYLE-TEXT-1).
 const (
-	bodySize       unit.Sp = 16  // STYLE-TEXT-1: 16 sp
+	BodySize       unit.Sp = 16  // STYLE-TEXT-1: 16 sp, the default font size (FONT-1)
 	lineHeightBody float32 = 1.5 // STYLE-TEXT-1: 1.5 × font size
 )
 
@@ -39,7 +39,7 @@ const codeScale = 0.85 // STYLE-TEXT-5
 
 // Code block text (STYLE-CODE-1): 85% of the body size, with a line height of 1.45.
 const (
-	codeBlockSize          = bodySize * codeScale // STYLE-CODE-1: 85% of 16 sp, 13.6 sp
+	codeBlockSize          = BodySize * codeScale // STYLE-CODE-1: 85% of 16 sp, 13.6 sp
 	lineHeightCode float32 = 1.45                 // STYLE-CODE-1: line height 1.45 × font size
 )
 
@@ -92,7 +92,7 @@ func RunStyle(base TextStyle, s doc.Style, link bool, p Palette, inHeading bool)
 func BodyStyle(p Palette) TextStyle {
 	return TextStyle{
 		Font:       font.Font{Typeface: typefaceText, Style: font.Regular, Weight: font.Normal},
-		Size:       bodySize,
+		Size:       BodySize,
 		LineHeight: lineHeightBody,
 		Colour:     p.Fg,
 	}

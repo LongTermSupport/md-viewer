@@ -63,7 +63,22 @@ func runCmd(t *testing.T, env []string, name string, args ...string) (string, st
 // runBinary runs bin with args and returns its stdout, stderr and exit code.
 func runBinary(t *testing.T, bin string, args ...string) (string, string, int) {
 	t.Helper()
-	return runCmd(t, nil, bin, args...)
+	return runCmd(t, isolatedEnv(t), bin, args...)
+}
+
+// isolatedEnv is the test's environment without the owner's configuration or session bus:
+// XDG_CONFIG_HOME is an empty directory, and DBUS_SESSION_BUS_ADDRESS is removed (SET-2, THEME-2).
+func isolatedEnv(t *testing.T) []string {
+	t.Helper()
+	env := []string{"XDG_CONFIG_HOME=" + t.TempDir()}
+	for _, kv := range os.Environ() {
+		switch strings.SplitN(kv, "=", 2)[0] {
+		case "XDG_CONFIG_HOME", "DBUS_SESSION_BUS_ADDRESS":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
 }
 
 // buildBinary builds md-viewer into a temporary directory and returns the binary's path.
@@ -83,11 +98,11 @@ func buildBinary(t *testing.T) string {
 // desktop's. A test that wants X11 under xvfb-run leaves DISPLAY to xvfb-run.
 func noDisplayEnv(t *testing.T) []string {
 	t.Helper()
-	env := []string{"XDG_RUNTIME_DIR=" + t.TempDir()}
+	env := []string{"XDG_RUNTIME_DIR=" + t.TempDir(), "XDG_CONFIG_HOME=" + t.TempDir()}
 	for _, kv := range os.Environ() {
 		name := strings.SplitN(kv, "=", 2)[0]
 		switch name {
-		case "DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "XDG_RUNTIME_DIR":
+		case "DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "DBUS_SESSION_BUS_ADDRESS":
 			continue
 		}
 		env = append(env, kv)
@@ -105,7 +120,7 @@ func TestMainUsageExit(t *testing.T) {
 			t.Errorf("exit code = %d, want 0", code)
 		}
 		// The prefix check stops an empty app.Usage from passing the equality check below.
-		if !strings.HasPrefix(stdout, "Usage: md-viewer [--dark] [--time] FILE\n") {
+		if !strings.HasPrefix(stdout, "Usage: md-viewer [--theme light|dark|auto] [--font-size N] [--time] FILE\n") {
 			t.Errorf("stdout = %q, want the CLI-4 usage text", stdout)
 		}
 		if stdout != app.Usage {
@@ -264,6 +279,31 @@ func TestBinaryNoDisplay(t *testing.T) {
 	}
 }
 
+// TestBinaryConfigError (SET-5): a malformed configuration file makes the binary exit 1 with exactly
+// the one line that names the file and the line, and nothing on stdout. No display is needed: the
+// file is refused before any window.
+func TestBinaryConfigError(t *testing.T) {
+	bin := buildBinary(t)
+	home := t.TempDir()
+	cfg := filepath.Join(home, "md-viewer", "config")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o700); err != nil {
+		t.Fatalf("mkdir for the config: %v", err)
+	}
+	writeFile(t, cfg, "theme = blue\n")
+	env := append(noDisplayEnv(t), "XDG_CONFIG_HOME="+home)
+	stdout, stderr, code := runCmd(t, env, bin, elementsFile)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	want := "md-viewer: " + cfg + ":1: theme must be light, dark or auto, not blue\n"
+	if stderr != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
+	}
+}
+
 // TestBinaryTimeUnderXvfb (SPEED-2, the smoke run): under xvfb-run the binary opens its window,
 // draws the first frame, prints the --time line and exits 0. The environment hides every display
 // but the one xvfb-run starts (noDisplayEnv), so no Wayland compositor is reached. Only the lines
@@ -281,6 +321,8 @@ func TestBinaryTimeUnderXvfb(t *testing.T) {
 	}{
 		{name: "plain", args: []string{"--time", elementsFile}},
 		{name: "dark", args: []string{"--dark", "--time", elementsFile}},
+		{name: "theme dark", args: []string{"--theme", "dark", "--time", elementsFile}},
+		{name: "font size 24", args: []string{"--font-size", "24", "--time", elementsFile}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

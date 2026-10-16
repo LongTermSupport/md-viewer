@@ -10,7 +10,7 @@ type Palette struct {
 	Fg, Canvas, FgMuted, Accent, Border, BorderMuted, BgMuted, CodeBg, OnAccent color.NRGBA
 }
 
-// Light is the default palette (STYLE-PAL-1, STYLE-PAL-2). Its colours are GitHub's light
+// Light is the palette for light (THEME-1, STYLE-PAL-1). Its colours are GitHub's light
 // stylesheet values, cited per field in SPEC section 3.1.
 var Light = Palette{
 	Fg:          color.NRGBA{R: 0x1f, G: 0x23, B: 0x28, A: 0xff}, // .markdown-body color
@@ -24,7 +24,7 @@ var Light = Palette{
 	OnAccent:    color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}, // md-viewer's task check mark
 }
 
-// Dark is the palette for --dark (STYLE-PAL-1, STYLE-PAL-2), from GitHub's dark stylesheet.
+// Dark is the palette for dark (THEME-1, STYLE-PAL-1), from GitHub's dark stylesheet.
 var Dark = Palette{
 	Fg:          color.NRGBA{R: 0xf0, G: 0xf6, B: 0xfc, A: 0xff}, // .markdown-body color
 	Canvas:      color.NRGBA{R: 0x0d, G: 0x11, B: 0x17, A: 0xff}, // .markdown-body background

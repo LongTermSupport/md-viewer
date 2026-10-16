@@ -106,6 +106,7 @@ private-repository reason, while go-qa-ci is private; any other failure in it is
 - [x] M11 Speed: fixtures, benchmarks, measurement
 - [x] M12 Hardening: the label gate on tracked files, non-blocking opens
 - [x] Text on its baseline: alignment and link hit areas
+- [ ] Settings: theme (light, dark, auto) and font size
 
 ---
 
@@ -168,7 +169,7 @@ env:
   APT_PACKAGES: >-
     gcc libc6-dev pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
     libx11-dev libx11-xcb-dev libxcursor-dev libxfixes-dev libegl-dev libgles-dev
-    libvulkan-dev libffi-dev xvfb xauth libegl-mesa0 libgl1-mesa-dri
+    libvulkan-dev libffi-dev xvfb xauth libegl-mesa0 libgl1-mesa-dri dbus-daemon
 
 jobs:
   build:
@@ -904,6 +905,68 @@ a press on a link's ink clicks it.
 
 ---
 
+## Settings: theme (light, dark, auto) and font size
+
+**Covers:** SET-1 to SET-5 (the two settings, their file and its errors), THEME-1 to THEME-4 (the
+theme and the desktop's colour scheme), FONT-1 to FONT-3 (the font size, and its interaction with
+zoom), and the edits of CLI-2, CLI-3, CLI-4, CLI-6, CLI-7, CLI-11, STYLE-PAL-2, STYLE-IMG-2,
+SPEED-1 and SPEED-6. Decision 02 is settled by this section.
+
+**Files:** new `internal/desktop/` (`scheme.go`, `scheme_linux.go`, `scheme_other.go`, and tests
+`scheme_test.go`, `scheme_linux_test.go`); `internal/app/settings.go` and `settings_test.go`;
+`cli.go`, `prepare.go`, `viewer.go` and their tests; `internal/render/style.go` (exports
+`BodySize`) and the new `internal/render/theme_test.go`; `cmd/md-viewer/` (`main.go`, the binary
+tests' environment, `init_test.go`); `go.mod` (godbus moves to a direct requirement);
+`.github/workflows/ci.yml` (`dbus-daemon` in `APT_PACKAGES`).
+
+**Tests first.** Each is seen to fail on its assertion before the code that makes it pass.
+Stubs compile and return zero values.
+
+- `TestParseConfig`, `TestParseConfigErrors` (exact line and message, through `errors.As`),
+  `TestParseConfigBytes` (NUL, invalid UTF-8, the size cap) and `TestConfigPath`
+  (`settings_test.go`): SET-2 to SET-5.
+- `TestSettingsOverResolved`, `TestFontSizeMetric`, `TestFontSizeBounds` (`settings_test.go`):
+  SET-1, FONT-1, FONT-2.
+- `TestParseArgsSettings`, `TestParseArgsSettingsErrors`, `TestUsageText` (`cli_test.go`): CLI-2,
+  CLI-3, CLI-4, CLI-7. The existing rows that set `Dark` move to `Settings{Theme: ThemeDark}` in
+  the same commit as the type.
+- `TestPrepareTheme`, `TestPrepareConfigErrors`, `TestPrepareFontSize`,
+  `TestPrepareHelpSkipsConfig` (`prepare_test.go`): THEME-1 to THEME-3, SET-5, FONT-2. The fake
+  `ColorScheme` records its calls and whether its context has a deadline.
+- `TestViewerFontSize` (`viewer_test.go`): FONT-2 and FONT-3, with the zoom reset of ZOOM-2.
+- `TestBusAddress`, `TestSchemeFromReply`, `TestUnavailable` (`scheme_test.go`): THEME-2, THEME-3.
+- `TestColorSchemePrivateBus` (`scheme_linux_test.go`): one private `dbus-daemon` in
+  `t.TempDir()` and an in-process fake portal. Rows: 1 gives dark, 2 gives light, no portal and
+  a missing key give no preference, a reply of type `s` is an error, a silent portal with a 50 ms
+  context gives `context.DeadlineExceeded`, and an address nobody listens on is an error. A
+  missing `dbus-daemon` fails the test; it never skips. The test never reads the process
+  environment.
+- `TestGoStatements` (`init_test.go`) gains `internal/app/prepare.go`. `TestNoSessionBusHelpers`
+  is a new AST pin: no non-test file calls `dbus.SessionBus`, `SessionBusPrivate*`,
+  `ConnectSessionBus` or `SystemBus*`. Its fixture row is seen to fail first. `TestFileOpens` is
+  unchanged and must stay green, which keeps the config read on `doc.OpenRegular`.
+- `TestBinaryConfigError` (`main_test.go`): a malformed config gives exit 1, empty stdout and
+  exactly the SET-5 line. Every binary test's environment gains an empty `XDG_CONFIG_HOME` and
+  loses `DBUS_SESSION_BUS_ADDRESS`.
+- `TestDarkViewColours` and `TestImageTransparentNoUnderlay` (`theme_test.go`): guards for
+  STYLE-PAL-1 and STYLE-IMG-2. Each is shown to bite with a mutant (a hard-coded `Light.Border`,
+  and a `BgMuted` fill under an image).
+
+**Verification:** the standard checks; `GOOS=darwin CGO_ENABLED=0 go vet ./internal/app/...
+./internal/desktop/... ./internal/render/... ./internal/doc/...` and the same for `GOOS=windows`;
+`go mod tidy`, with `go.mod` and `go.sum` showing only godbus moving to a direct requirement; the
+smoke run, and the same with `--theme dark --font-size 24`; `go test -race -count=5 -run
+'Config|Theme|Scheme|FontSize|PrivateBus|Binary' ./...`; the benchmarks of `FirstViewportLarge`
+and `LoadFonts` before and after (no change expected, since neither path is touched). On the
+owner's desktop, for information: 10 runs each of `md-viewer --time testdata/large.md` with the
+default and with `--theme light`, whose medians of `first_frame_ms` give the query's real cost,
+and `hyperfine --warmup 3 --runs 20` on both.
+
+**Done when:** the standard checks pass, the visual check of the corpus shows both themes and two
+font sizes, and a missing or malformed configuration file behaves as SET-4 and SET-5 say.
+
+---
+
 ## Decisions for the owner
 
 These were chosen so that work can start; each is a one-line change of spec if the owner
@@ -914,10 +977,9 @@ decides otherwise.
     (STYLE-FONT-1), for start-up speed. Emoji and symbols such as ✅ ⬜ 🔄, common in plan files,
     show as missing-glyph boxes. The alternatives are system fonts (a font scan at every start;
     its cost is measured in M11 if wanted) or embedding a monochrome emoji font (a larger binary).
-02. **Dark mode.** (Awaiting the owner; built to `--dark` only; seam: `app.Prepare` in M10.)
-    Gio v0.10.3 does not report the desktop's colour scheme, so it is `--dark` only. md-viewer
-    could read the XDG desktop portal's `org.freedesktop.appearance` `color-scheme` setting over
-    D-Bus (Gio already depends on `godbus`), at the cost of one D-Bus round trip at start.
+02. **Dark mode.** (Settled by the owner: dark mode follows the desktop, with an override. Built in
+    the Settings section; THEME-1 and THEME-2.) The desktop's colour scheme is read from the XDG
+    desktop portal over D-Bus, at the cost of one D-Bus round trip at start.
 03. **`--time` exits after the first frame**, so it can be scripted and benchmarked. The
     alternative is to print and keep the window open.
 04. **HTML is dropped**, with one stderr line counting it. The alternative is to show HTML
@@ -934,10 +996,12 @@ decides otherwise.
 12. **SPEED-6 carve-out, the new indirect modules, and the SPEED-1 reading.** (Awaiting the
     owner; built to the suggested reading.) M10 reworded SPEED-6 to leave Gio's own platform work
     to Gio, which on X11 includes its IBus connection over D-Bus. md-viewer's code starts only the
-    window loop, the image-decoding spawn and the opener's wait (`TestGoStatements` pins them),
-    and does no D-Bus itself. Importing `gioui.org/app` adds four indirect modules:
-    `gioui.org/shader`, `github.com/godbus/dbus/v5`, `golang.org/x/net` and `golang.org/x/sys`.
-    ARCHITECTURE lists them. SPEED-1 is read as allowing the view, the viewer's state and the
+    window loop, the image-decoding spawn, the opener's wait and the colour-scheme query
+    (`TestGoStatements` pins them), and its only D-Bus is THEME-2's one connection and call, made
+    in `internal/desktop`. Importing `gioui.org/app` adds three indirect modules:
+    `gioui.org/shader`, `golang.org/x/net` and `golang.org/x/sys`. It also reaches
+    `github.com/godbus/dbus/v5`, which is a direct requirement since `internal/desktop` imports
+    it. ARCHITECTURE lists them. SPEED-1 is read as allowing the view, the viewer's state and the
     theme to be built before the window, since that is in-memory work; no other I/O or parsing
     happens first. The alternative is to build them after the window opens. The SPEC wording is
     unchanged: the owner accepts it or asks for a change.

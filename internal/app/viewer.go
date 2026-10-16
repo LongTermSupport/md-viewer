@@ -53,7 +53,8 @@ type Viewer struct {
 	theme    *material.Theme
 	list     widget.List
 	zoom     Zoom
-	wheelAcc float32 // the Ctrl+wheel distance not yet zoomed by, in px (ZOOM-4)
+	wheelAcc float32  // the Ctrl+wheel distance not yet zoomed by, in px (ZOOM-4)
+	fontSize FontSize // the body text size (FONT-2); the zoom multiplies on top of it (FONT-3)
 	keys     []event.Filter
 	opener   Opener
 	stderr   io.Writer
@@ -75,18 +76,19 @@ type Viewer struct {
 // to stderr. The viewer serialises its own writes, from the frame and from the opener's goroutine.
 // stderr is also written by render.Images from layout, on the frame goroutine, so stderr must be
 // safe for concurrent use: *os.File, which main passes, is.
-func NewViewer(v *render.View, p render.Palette, o Opener, stderr io.Writer) *Viewer {
-	return newViewer(v, p, o, stderr, goSpawn)
+func NewViewer(v *render.View, p render.Palette, font FontSize, o Opener, stderr io.Writer) *Viewer {
+	return newViewer(v, p, font, o, stderr, goSpawn)
 }
 
 // newViewer is NewViewer with the function that runs the opener's wait. spawn is goSpawn in the
 // window; the tests pass one that records the functions. The theme is material's, with the
 // scrollbar's indicator in the palette's Fg (SCROLL-4). Until Bind, invalidate does nothing.
-func newViewer(v *render.View, p render.Palette, o Opener, stderr io.Writer, spawn func(func())) *Viewer {
+func newViewer(v *render.View, p render.Palette, font FontSize, o Opener, stderr io.Writer, spawn func(func())) *Viewer {
 	th := material.NewTheme()
 	th.Palette.Fg = p.Fg
 	return &Viewer{
 		view:       v,
+		fontSize:   font,
 		theme:      th,
 		list:       widget.List{List: layout.List{Axis: layout.Vertical}},
 		keys:       keyFilters(),
@@ -344,9 +346,10 @@ func (vw *Viewer) setZoom(z Zoom) {
 	vw.zoom = z
 }
 
-// element lays out block i at the zoom (STYLE-ZOOM-3). The list has given it the width less the
-// scrollbar gutter, which is not zoomed, so only the document's own metric changes.
+// element lays out block i at the font size and the zoom (FONT-2, FONT-3, STYLE-ZOOM-3). The list has
+// given it the width less the scrollbar gutter, which is not zoomed, so only the document's own
+// metric changes.
 func (vw *Viewer) element(gtx layout.Context, i int) layout.Dimensions {
-	gtx.Metric = vw.zoom.Metric(gtx.Metric)
+	gtx.Metric = vw.fontSize.Metric(vw.zoom.Metric(gtx.Metric))
 	return vw.view.Layout(gtx, i, nil)
 }

@@ -1,12 +1,16 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"runtime/debug"
 	"time"
 
+	"github.com/LongTermSupport/md-viewer/internal/desktop"
 	"github.com/LongTermSupport/md-viewer/internal/doc"
 	"github.com/LongTermSupport/md-viewer/internal/render"
 	"github.com/LongTermSupport/md-viewer/internal/window"
@@ -21,6 +25,18 @@ type SystemClock struct{}
 // Now returns the current time.
 func (SystemClock) Now() time.Time { return time.Now() }
 
+// Env is what Prepare reads from outside the process: the environment's variables (SET-2,
+// THEME-2) and the colour-scheme query (THEME-2). SystemEnv gives the real ones; a test gives its own.
+type Env struct {
+	Getenv      func(string) string
+	ColorScheme func(context.Context, func(string) string) (desktop.Scheme, error)
+}
+
+// SystemEnv is the process's environment and the desktop's colour-scheme query.
+func SystemEnv() Env {
+	return Env{Getenv: os.Getenv, ColorScheme: desktop.ColorScheme}
+}
+
 // Messages printed before the window opens. Each ends with a newline.
 const (
 	msgReadFailed  = progName + ": cannot read %s: %v\n"                                  // CLI-8
@@ -29,6 +45,9 @@ const (
 	msgNotText     = progName + ": %s is not a text file: it contains a NUL byte\n"       // CLI-8
 	msgHTMLDropped = progName + ": %d HTML fragment(s) not shown: HTML is not rendered\n" // DOC-9
 	msgLoadOther   = progName + ": %v\n"                                                  // DOC-13
+	msgSchemeRead  = progName + ": cannot read the desktop colour scheme: %v\n"           // THEME-3
+	msgConfigLine  = progName + ": %s:%d: %s\n"                                           // SET-5
+	msgConfigFile  = progName + ": %s %s\n"                                               // SET-5
 )
 
 // Prepared is what Prepare leaves for the window. OpenWindow is set when a file loaded; the
@@ -75,18 +94,20 @@ func (p Prepared) bind(invalidate func()) {
 	p.viewer.Bind(invalidate)
 }
 
-// Prepare handles the command line and the file before any window opens (SPEED-1). A usage
-// error prints its two lines to stderr (CLI-7) and gives ExitUsage. --help and --version print to
-// stdout and give ExitOK. A file that cannot be loaded prints its CLI-8 line and gives
-// ExitFailure. A file that loads prints DOC-9's line when HTML was dropped, and gives
-// OpenWindow with ExitOK. A failed write gives ExitFailure.
-func Prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode) {
-	return prepareWith(args, stdout, stderr, c, render.LoadFaces)
+// Prepare handles the command line, the configuration file and the document before any window
+// opens (SPEED-1). A usage error prints its two lines to stderr (CLI-7) and gives ExitUsage.
+// --help and --version print to stdout and give ExitOK, without reading the configuration file.
+// A configuration file that cannot be read or is refused prints its line and gives ExitFailure
+// (SET-5). A document that cannot be loaded prints its CLI-8 line and gives ExitFailure. A
+// document that loads prints DOC-9's line when HTML was dropped, and gives OpenWindow with
+// ExitOK. A failed write gives ExitFailure.
+func Prepare(args []string, env Env, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode) {
+	return prepareWith(args, env, stdout, stderr, c, render.LoadFaces)
 }
 
 // prepareWith is Prepare with the font loader given, so that a test can make the load fail.
-func prepareWith(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() (render.Faces, error)) (Prepared, ExitCode) {
-	p, code, err := prepare(args, stdout, stderr, c, loadFaces)
+func prepareWith(args []string, env Env, stdout, stderr io.Writer, c Clock, loadFaces func() (render.Faces, error)) (Prepared, ExitCode) {
+	p, code, err := prepare(args, env, stdout, stderr, c, loadFaces)
 	if err != nil {
 		// Best effort. A write error cannot be reported on the stream that failed, and the
 		// exit code is ExitFailure whether or not this line lands.
@@ -99,7 +120,7 @@ func prepareWith(args []string, stdout, stderr io.Writer, c Clock, loadFaces fun
 // prepare does the work of Prepare. Its error is a failed write, a font error, or an argument error
 // that is not a usage error; the code is ignored when the error is not nil. ParseArgs returns only
 // a *UsageError, so the other case is a fallback for a later change to ParseArgs.
-func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() (render.Faces, error)) (Prepared, ExitCode, error) {
+func prepare(args []string, env Env, stdout, stderr io.Writer, c Clock, loadFaces func() (render.Faces, error)) (Prepared, ExitCode, error) {
 	opts, err := ParseArgs(args)
 	if err != nil {
 		var ue *UsageError
@@ -118,6 +139,13 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() 
 		info, ok := debug.ReadBuildInfo()
 		return Prepared{}, ExitOK, write(stdout, VersionLine(info, ok)+"\n")
 	}
+	// The file is read before the document, so a refused file is reported even when FILE is
+	// missing (SET-5). Flags win over the file, and the rest is the default (SET-1).
+	file, err := loadSettings(env.Getenv)
+	if err != nil {
+		return Prepared{}, ExitFailure, write(stderr, configMessage(err))
+	}
+	settings := opts.Settings.Over(file).Resolved()
 	d, stats, err := doc.Load(opts.Path, c.Now)
 	if err != nil {
 		return Prepared{}, ExitFailure, write(stderr, loadMessage(err))
@@ -127,18 +155,22 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() 
 			return Prepared{}, ExitFailure, werr
 		}
 	}
+	// The desktop is asked only for auto (THEME-2). It runs alongside the image probes and the font
+	// load, and the deferred close joins it on every path after this point, so it never outlives
+	// Prepare.
+	var query *schemeQuery
+	if settings.Theme == ThemeAuto {
+		query = startScheme(env.ColorScheme, env.Getenv)
+	}
+	defer query.close()
 	// The image lines follow DOC-9's line, in document order (STYLE-IMG-3). Their write error is a
 	// failed write like any other.
 	images, err := render.NewImages(d, stderr)
 	if err != nil {
 		return Prepared{}, ExitFailure, err
 	}
-	// The palette is chosen here and nowhere else (STYLE-PAL-2). The faces and the shaper are timed
-	// from two readings, which is what fonts_ms measures (SPEC SPEED-2).
-	pal := render.Light
-	if opts.Dark {
-		pal = render.Dark
-	}
+	// The faces and the shaper are timed from two readings, which is what fonts_ms measures (SPEC
+	// SPEED-2).
 	fontsStart := c.Now()
 	faces, err := loadFaces()
 	if err != nil {
@@ -146,6 +178,16 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() 
 	}
 	sh := render.NewShaper(faces)
 	fonts := c.Now().Sub(fontsStart)
+	// The desktop's answer is joined here. A failed query prints its line after the image lines,
+	// and the window opens with light (THEME-3).
+	answer := query.wait()
+	if answer.err != nil {
+		if werr := write(stderr, fmt.Sprintf(msgSchemeRead, answer.err)); werr != nil {
+			return Prepared{}, ExitFailure, werr
+		}
+	}
+	// The palette is chosen here and nowhere else (STYLE-PAL-2).
+	pal := paletteFor(settings.Theme, answer.scheme)
 	view := render.NewView(d, sh, pal, images)
 	return Prepared{
 		OpenWindow: true,
@@ -153,11 +195,151 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() 
 		document:   d,
 		images:     images,
 		palette:    pal,
-		viewer:     NewViewer(view, pal, SystemOpener(), stderr),
+		viewer:     NewViewer(view, pal, settings.FontSize, SystemOpener(), stderr),
 		timings:    Timings{Read: stats.Read, Parse: stats.Parse, Fonts: fonts},
 		clock:      c,
 		stdout:     stdout,
 	}, ExitOK, nil
+}
+
+// paletteFor is the palette of a resolved theme (THEME-1). Auto is dark only when the desktop
+// prefers dark; no preference is light.
+func paletteFor(t Theme, s desktop.Scheme) render.Palette {
+	switch t {
+	case ThemeDark:
+		return render.Dark
+	case ThemeAuto:
+		if s == desktop.SchemeDark {
+			return render.Dark
+		}
+		return render.Light
+	case ThemeUnset, ThemeLight:
+		// ThemeUnset never reaches here: Resolved gives every unset theme its default.
+		return render.Light
+	default:
+		return render.Light
+	}
+}
+
+// schemeAnswer is what the colour-scheme query gave.
+type schemeAnswer struct {
+	scheme desktop.Scheme
+	err    error
+}
+
+// schemeQuery is one colour-scheme query, run in its own goroutine and joined once (THEME-2).
+type schemeQuery struct {
+	ch     chan schemeAnswer // one buffered slot: the goroutine never blocks on the answer
+	answer schemeAnswer
+	joined bool
+}
+
+// startScheme starts the query with the deadline of THEME-3. The query gets its own context, so it
+// is bounded whatever the caller does.
+func startScheme(query func(context.Context, func(string) string) (desktop.Scheme, error), getenv func(string) string) *schemeQuery {
+	q := &schemeQuery{ch: make(chan schemeAnswer, 1)}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), schemeTimeout)
+		defer cancel()
+		scheme, err := query(ctx, getenv)
+		q.ch <- schemeAnswer{scheme: scheme, err: err}
+	}()
+	return q
+}
+
+// wait joins the query and returns its answer, once. A nil query, which a theme other than auto
+// has, gives no preference and no error.
+func (q *schemeQuery) wait() schemeAnswer {
+	if q == nil {
+		return schemeAnswer{scheme: desktop.SchemeNoPreference}
+	}
+	if !q.joined {
+		q.answer = <-q.ch
+		q.joined = true
+	}
+	return q.answer
+}
+
+// close joins a query that the preparation did not reach, so that its goroutine ends with Prepare.
+func (q *schemeQuery) close() {
+	q.wait()
+}
+
+// configFileError is a configuration file that cannot be read or is refused: its path, and the
+// error. The error is a *fs.PathError for a file that cannot be opened, or a *ConfigError for its
+// content.
+type configFileError struct {
+	path string
+	err  error
+}
+
+// Error is the path and the error.
+func (e *configFileError) Error() string {
+	return e.path + ": " + e.err.Error()
+}
+
+// Unwrap is the error, for errors.As.
+func (e *configFileError) Unwrap() error {
+	return e.err
+}
+
+// loadSettings reads the configuration file, if there is one (SET-2). An absent file, or one whose
+// directory is absent, gives no settings and no message (SET-4). The file is opened through
+// doc.OpenRegular, so no open can block on a FIFO (CLI-8), and it is read up to one byte past the
+// limit, so ParseConfig can refuse a larger file (SET-5).
+func loadSettings(getenv func(string) string) (Settings, error) {
+	path, ok := ConfigPath(getenv)
+	if !ok {
+		return Settings{}, nil
+	}
+	f, info, err := doc.OpenRegular(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Settings{}, nil
+		}
+		return Settings{}, &configFileError{path: path, err: err}
+	}
+	// The size is the open file's, so the message gives the whole file's size (SET-5). The read is
+	// capped, so a file that grows after this point is still refused.
+	if size := info.Size(); size > maxConfigSize {
+		tooLarge := &ConfigError{Msg: fmt.Sprintf(msgCfgTooLarge, size, maxConfigSize)}
+		if closeErr := f.Close(); closeErr != nil {
+			return Settings{}, &configFileError{path: path, err: errors.Join(tooLarge, closeErr)}
+		}
+		return Settings{}, &configFileError{path: path, err: tooLarge}
+	}
+	data, readErr := io.ReadAll(io.LimitReader(f, maxConfigSize+1))
+	closeErr := f.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return Settings{}, &configFileError{path: path, err: err}
+	}
+	s, err := ParseConfig(data)
+	if err != nil {
+		return Settings{}, &configFileError{path: path, err: err}
+	}
+	return s, nil
+}
+
+// configMessage is the stderr line for a configuration file that is refused (SET-5): the file and
+// its line when the error is in a line, the file and its problem when the error is in the whole file,
+// and CLI-8's wording when the file cannot be read.
+func configMessage(err error) string {
+	var fe *configFileError
+	if !errors.As(err, &fe) {
+		return fmt.Sprintf(msgLoadOther, err)
+	}
+	var ce *ConfigError
+	if errors.As(fe.err, &ce) {
+		if ce.Line == 0 {
+			return fmt.Sprintf(msgConfigFile, fe.path, ce.Msg)
+		}
+		return fmt.Sprintf(msgConfigLine, fe.path, ce.Line, ce.Msg)
+	}
+	var pe *fs.PathError
+	if errors.As(fe.err, &pe) {
+		return fmt.Sprintf(msgReadFailed, fe.path, pe.Err)
+	}
+	return fmt.Sprintf(msgReadFailed, fe.path, fe.err)
 }
 
 // loadMessage is the stderr line for a file that cannot be loaded: CLI-8's wording for each typed

@@ -25,7 +25,7 @@ env:
   APT_PACKAGES: >-
     gcc libc6-dev pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev
     libx11-dev libx11-xcb-dev libxcursor-dev libxfixes-dev libegl-dev libgles-dev
-    libvulkan-dev libffi-dev xvfb xauth libegl-mesa0 libgl1-mesa-dri
+    libvulkan-dev libffi-dev xvfb xauth libegl-mesa0 libgl1-mesa-dri dbus-daemon
 
 jobs:
   build:
