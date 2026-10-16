@@ -292,12 +292,21 @@ func loadSettings(getenv func(string) string) (Settings, error) {
 	if !ok {
 		return Settings{}, nil
 	}
-	f, _, err := doc.OpenRegular(path)
+	f, info, err := doc.OpenRegular(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return Settings{}, nil
 		}
 		return Settings{}, &configFileError{path: path, err: err}
+	}
+	// The size is the open file's, so the message gives the whole file's size (SET-5). The read is
+	// capped, so a file that grows after this point is still refused.
+	if size := info.Size(); size > maxConfigSize {
+		tooLarge := &ConfigError{Msg: fmt.Sprintf(msgCfgTooLarge, size, maxConfigSize)}
+		if closeErr := f.Close(); closeErr != nil {
+			return Settings{}, &configFileError{path: path, err: errors.Join(tooLarge, closeErr)}
+		}
+		return Settings{}, &configFileError{path: path, err: tooLarge}
 	}
 	data, readErr := io.ReadAll(io.LimitReader(f, maxConfigSize+1))
 	closeErr := f.Close()

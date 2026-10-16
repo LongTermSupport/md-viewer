@@ -635,6 +635,8 @@ func TestPrepareConfigErrors(t *testing.T) {
 			stderr: "md-viewer: cannot read CFG: is a directory\n", code: ExitFailure},
 		{name: "too large", config: strings.Repeat("#", 4097),
 			stderr: "md-viewer: CFG is too large: 4097 bytes, the limit is 4096\n", code: ExitFailure},
+		{name: "too large is reported at its full size", config: strings.Repeat("#", 5000),
+			stderr: "md-viewer: CFG is too large: 5000 bytes, the limit is 4096\n", code: ExitFailure},
 		{name: "not text", config: "theme = dark\x00\n",
 			stderr: "md-viewer: CFG is not a text file\n", code: ExitFailure},
 		{name: "an unknown key on line 2", config: "theme = dark\ncolour = red\n",
