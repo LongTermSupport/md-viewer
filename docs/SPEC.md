@@ -757,9 +757,10 @@ when the desktop states no preference.
   `/org/freedesktop/portal/desktop` on the session bus.
 - The reply value 1 is dark, and 2 is light. Any other `uint32`, 0 ("no preference") included, is
   no preference, as the portal specification says unknown values mean; `auto` shows light for it.
-- The session bus address is `DBUS_SESSION_BUS_ADDRESS` when it is non-empty and not
-  `autolaunch:`. Otherwise it is `unix:path=$XDG_RUNTIME_DIR/bus` when `XDG_RUNTIME_DIR` is
-  absolute and that path exists. Otherwise there is no bus.
+- The session bus address is `DBUS_SESSION_BUS_ADDRESS` when it is a single `unix:` address with
+  no `;`. Any other value, `tcp:` and `autolaunch:` included, is treated as absent. Otherwise it is
+  `unix:path=$XDG_RUNTIME_DIR/bus` when `XDG_RUNTIME_DIR` is absolute and that path exists.
+  Otherwise there is no bus.
 - md-viewer never starts a bus (no `dbus-launch`). The bus may activate the portal.
 - The connection is closed before the window opens.
 - The query is made only when the theme resolves to `auto`.
