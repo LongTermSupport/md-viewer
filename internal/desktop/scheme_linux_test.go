@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -253,5 +254,48 @@ func TestColorSchemeAsksPortalKey(t *testing.T) {
 	want := []string{wantNamespace + " " + wantKey}
 	if asked := portal.askedFor(); !slices.Equal(asked, want) {
 		t.Errorf("the portal was asked %q, want %q", asked, want)
+	}
+}
+
+// TestColorSchemeConnectDeadline (THEME-3): a bus that accepts the connection and never speaks gives
+// an error that matches the deadline, not the closed connection godbus reports when it stops the
+// attempt. The listener is the test's own, and the deadline bounds the wait.
+func TestColorSchemeConnectDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bus")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen on a test socket: %v", err)
+	}
+	// The accepted connection, if any, is closed after the listener. The channel closes when the
+	// accept ends, so the drain never races the goroutine.
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		defer close(accepted)
+		if c, err := ln.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+	t.Cleanup(func() {
+		for c := range accepted {
+			if err := c.Close(); err != nil {
+				t.Errorf("close the silent connection: %v", err)
+			}
+		}
+	})
+	t.Cleanup(func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("close the test socket: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	_, err = ColorScheme(ctx, func(k string) string {
+		if k == "DBUS_SESSION_BUS_ADDRESS" {
+			return "unix:path=" + path
+		}
+		return ""
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("ColorScheme error = %v, want one matching context.DeadlineExceeded", err)
 	}
 }
