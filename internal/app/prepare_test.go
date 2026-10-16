@@ -59,11 +59,12 @@ func runPrepareEnv(t *testing.T, env *fakeEnv, args ...string) prepareRun {
 // fakeEnv is the Env a test gives Prepare: the variables it names, and a colour-scheme query that
 // answers with scheme or err and counts its calls. No test reads the process environment or a bus.
 type fakeEnv struct {
-	vars     map[string]string
-	scheme   desktop.Scheme
-	err      error
-	calls    int
-	deadline bool // whether the last call's context had a deadline
+	vars      map[string]string
+	scheme    desktop.Scheme
+	err       error
+	calls     int
+	deadline  bool          // whether the last call's context had a deadline
+	remaining time.Duration // the time to that deadline, read when the call began
 }
 
 // newFakeEnv is an environment with no variables and no preference from the desktop.
@@ -83,7 +84,11 @@ func (f *fakeEnv) env() Env {
 // returns, so the test reads the record after Prepare without a race.
 func (f *fakeEnv) query(ctx context.Context, _ func(string) string) (desktop.Scheme, error) {
 	f.calls++
-	_, f.deadline = ctx.Deadline()
+	deadline, ok := ctx.Deadline()
+	f.deadline = ok
+	if ok {
+		f.remaining = time.Until(deadline)
+	}
 	return f.scheme, f.err
 }
 
@@ -611,6 +616,25 @@ func TestPrepareTheme(t *testing.T) {
 				t.Errorf("the query's context has no deadline")
 			}
 		})
+	}
+}
+
+// TestPrepareSchemeDeadline (THEME-3): the desktop query has 100 ms from its start. The fake reads the
+// time left when the call begins, so a longer deadline, which lets a silent portal hold the window
+// for seconds, fails the bound. The lower bound is loose for a loaded host; it is not a timing check.
+func TestPrepareSchemeDeadline(t *testing.T) {
+	env := newFakeEnv()
+	env.scheme = desktop.SchemeDark
+	run := runPrepareEnv(t, env, writeImageDoc(t))
+	checkRun(t, run, "", imageLine, ExitOK, true)
+	if env.calls != 1 {
+		t.Fatalf("the desktop was asked %d times, want 1", env.calls)
+	}
+	if !env.deadline {
+		t.Fatal("the query's context has no deadline")
+	}
+	if env.remaining <= 50*time.Millisecond || env.remaining > 100*time.Millisecond {
+		t.Errorf("the query had %v to run, want 100 ms", env.remaining)
 	}
 }
 
