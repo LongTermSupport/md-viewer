@@ -77,11 +77,11 @@ no build info.
 
 **CLI-6. Exit codes.**
 
-| Code | Meaning                                                                        |
-| ---- | ------------------------------------------------------------------------------ |
-| 0    | success: the window was closed by the user, or `--help`, `--version`, `--time` |
+| Code | Meaning                                                                                                                                 |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | success: the window was closed by the user, or `--help`, `--version`, `--time`                                                          |
 | 1    | a runtime failure: the file or the configuration file (SET-5) cannot be read or is refused, no window opened, or a frame failed (below) |
-| 2    | a usage error: missing or extra FILE, an unknown flag, a flag without its value, an invalid value |
+| 2    | a usage error: missing or extra FILE, an unknown flag, a flag without its value, an invalid value                                       |
 
 A frame failure is a layout error (`View.Err`), a failed write to stderr during a frame, or a
 failed write of the `--time` line to stdout. The window closes, md-viewer prints `md-viewer: `
@@ -732,17 +732,17 @@ directory does not exist, gives the defaults with no message.
 and before any window opens. CONFIG is the full path. The checks are those of CLI-8, made through
 `doc.OpenRegular`: non-blocking, with no wait on a FIFO.
 
-| Condition                                  | Message                                                                     |
-| ------------------------------------------ | --------------------------------------------------------------------------- |
-| cannot be opened or read                   | `md-viewer: cannot read CONFIG: REASON`                                     |
-| a directory, or not a regular file         | `md-viewer: cannot read CONFIG: is a directory` / `: not a regular file`    |
-| larger than 4096 bytes                     | `md-viewer: CONFIG is too large: SIZE bytes, the limit is 4096`             |
-| a NUL byte, or invalid UTF-8               | `md-viewer: CONFIG is not a text file`                                      |
-| a line without `=`, or an empty key        | `md-viewer: CONFIG:N: expected KEY = VALUE`                                 |
-| an unknown key                             | `md-viewer: CONFIG:N: unknown setting: KEY`                                 |
-| a key given twice                          | `md-viewer: CONFIG:N: KEY is already set on line M`                         |
-| a bad theme                                | `md-viewer: CONFIG:N: theme must be light, dark or auto, not VALUE`        |
-| a bad font size                            | `md-viewer: CONFIG:N: font-size must be a whole number from 10 to 32, not VALUE` |
+| Condition                           | Message                                                                          |
+| ----------------------------------- | -------------------------------------------------------------------------------- |
+| cannot be opened or read            | `md-viewer: cannot read CONFIG: REASON`                                          |
+| a directory, or not a regular file  | `md-viewer: cannot read CONFIG: is a directory` / `: not a regular file`         |
+| larger than 4096 bytes              | `md-viewer: CONFIG is too large: SIZE bytes, the limit is 4096`                  |
+| a NUL byte, or invalid UTF-8        | `md-viewer: CONFIG is not a text file`                                           |
+| a line without `=`, or an empty key | `md-viewer: CONFIG:N: expected KEY = VALUE`                                      |
+| an unknown key                      | `md-viewer: CONFIG:N: unknown setting: KEY`                                      |
+| a key given twice                   | `md-viewer: CONFIG:N: KEY is already set on line M`                              |
+| a bad theme                         | `md-viewer: CONFIG:N: theme must be light, dark or auto, not VALUE`              |
+| a bad font size                     | `md-viewer: CONFIG:N: font-size must be a whole number from 10 to 32, not VALUE` |
 
 N is the 1-based line number. Only the first error, in line order, is reported.
 

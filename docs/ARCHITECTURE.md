@@ -5,14 +5,14 @@ to that file. The order of work is in [MILESTONES.md](MILESTONES.md).
 
 ## Pinned dependencies
 
-| Module                     | Version                                           | Why                                                                        |
-| -------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------- |
-| Go toolchain               | 1.26.9                                            | `go 1.26.9` in `go.mod`; the same as go-qa-ci's `go.mod` and the ccy image |
-| `gioui.org`                | v0.10.3                                           | window, input, layout, text shaping, painting                              |
-| `github.com/yuin/goldmark` | v1.8.6                                            | CommonMark parser with the GFM extensions                                  |
-| `golang.org/x/image`       | v0.26.0                                           | the Go font files (`font/gofont/...`); the version Gio v0.10.3 requires    |
-| `github.com/godbus/dbus/v5`| v5.2.2                                            | the desktop colour scheme over D-Bus (THEME-2), imported by `internal/desktop` only |
-| go-qa-ci                   | commit `7fc4547e92f2fb0cf67c0c91f1f2068774be5d5a` | QA; no tag is published yet, so the pin is a commit (`qa/go-qa-ci.ref`)    |
+| Module                      | Version                                           | Why                                                                                 |
+| --------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Go toolchain                | 1.26.9                                            | `go 1.26.9` in `go.mod`; the same as go-qa-ci's `go.mod` and the ccy image          |
+| `gioui.org`                 | v0.10.3                                           | window, input, layout, text shaping, painting                                       |
+| `github.com/yuin/goldmark`  | v1.8.6                                            | CommonMark parser with the GFM extensions                                           |
+| `golang.org/x/image`        | v0.26.0                                           | the Go font files (`font/gofont/...`); the version Gio v0.10.3 requires             |
+| `github.com/godbus/dbus/v5` | v5.2.2                                            | the desktop colour scheme over D-Bus (THEME-2), imported by `internal/desktop` only |
+| go-qa-ci                    | commit `7fc4547e92f2fb0cf67c0c91f1f2068774be5d5a` | QA; no tag is published yet, so the pin is a commit (`qa/go-qa-ci.ref`)             |
 
 `widget/material` (the scrollbar, SCROLL-4) imports `golang.org/x/exp/shiny`, which Gio v0.10.3's
 `go.mod` pins at `v0.0.0-20250408133849-7e4ce0ab07d0`. `go.mod` therefore names that module as an
@@ -45,9 +45,10 @@ testdata/               fixtures shared by the packages' tests and benchmarks
 ```
 
 Dependencies point one way: `cmd -> app, window, window/gioapp`; `gioapp -> window`;
-`app -> window, render, doc, desktop`; `desktop -> godbus`; `render -> doc`; `window` imports only Gio's `layout`, `op`,
-`op/paint`, `unit` and `image/color` packages, not `gioui.org/app`; `doc` imports neither. Nothing below `cmd` calls
-`os.Exit` (go-qa's `gqaci_exit_outside_main` enforces it).
+`app -> window, render, doc, desktop`; `desktop -> godbus`; `render -> doc`; `window` imports
+only Gio's `layout`, `op`, `op/paint`, `unit` and `image/color` packages, not `gioui.org/app`;
+`doc` imports neither. Nothing below `cmd` calls `os.Exit` (go-qa's `gqaci_exit_outside_main`
+enforces it).
 
 Only `internal/window/gioapp` and `cmd/md-viewer` need a display at run time. Everything else is
 tested headless: Gio's `layout`, `op`, `text`, `widget` and `io/input` packages run without a
@@ -507,9 +508,9 @@ error to stderr, best effort.
 100 ms context (THEME-3), into a one-buffered channel. The start is after the file loads (the DOC-9
 line), so the query overlaps the image probes and the font load. A deferred join receives from the
 channel on every path after the start, so the goroutine never outlives `Prepare`. `Prepare` picks
-the palette in one place, from the theme (THEME-1, STYLE-PAL-2). The clock is read three times by the load (`read_ms` and `parse_ms`, SPEED-2) and
-twice around the faces and the shaper (`fonts_ms`). The view, the viewer and their theme are built
-in memory after that. `Window` takes one more reading, in its `OnFirst`, from the same clock, and
+the palette in one place, from the theme (THEME-1, STYLE-PAL-2). The clock is read three times by
+the load (`read_ms` and `parse_ms`, SPEED-2) and twice around the faces and the shaper
+(`fonts_ms`). The view, the viewer and their theme are built in memory after that. `Window` takes one more reading, in its `OnFirst`, from the same clock, and
 measures `first_frame_ms` from `start`. A font error is returned like any other preparation
 error, so it prints `md-viewer: ` + the error and gives `ExitFailure`.
 
@@ -691,11 +692,11 @@ While go-qa-ci is private, the install step fails and the `go-qa` job is red on 
 
 md-viewer is Linux first. These are the places another platform plugs in:
 
-| Seam               | Where                                            | Linux now                         | Elsewhere                                                                                  |
-| ------------------ | ------------------------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------ |
-| window and input   | `internal/window`                                | Gio, Wayland or X11               | Gio supports macOS and Windows unchanged                                                   |
-| link opener        | `internal/app/opener_*.go` (build tags)          | `xdg-open`                        | `open` (macOS), `rundll32 url.dll,FileProtocolHandler` (Windows)                           |
+| Seam               | Where                                            | Linux now                         | Elsewhere                                                                                                 |
+| ------------------ | ------------------------------------------------ | --------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| window and input   | `internal/window`                                | Gio, Wayland or X11               | Gio supports macOS and Windows unchanged                                                                  |
+| link opener        | `internal/app/opener_*.go` (build tags)          | `xdg-open`                        | `open` (macOS), `rundll32 url.dll,FileProtocolHandler` (Windows)                                          |
 | colour scheme      | `internal/desktop`, `scheme_linux.go`            | portal `ReadOne` over D-Bus       | `scheme_other.go`: no preference (light); macOS `AppleInterfaceStyle`, Windows `AppsUseLightTheme`, later |
-| fonts              | `render.LoadFaces`                               | embedded Go fonts                 | the same; nothing platform-specific                                                        |
-| paths              | `doc.ResolveLink`, `doc.Load`, `doc.OpenRegular` | `path/filepath`                   | the same; the flags O_NONBLOCK and O_NOCTTY are ignored on Windows (no FIFOs)              |
-| build dependencies | README, CI, `.claude/ccy/Dockerfile`             | Wayland, X11, EGL, Vulkan headers | none on macOS and Windows (Gio uses system frameworks)                                     |
+| fonts              | `render.LoadFaces`                               | embedded Go fonts                 | the same; nothing platform-specific                                                                       |
+| paths              | `doc.ResolveLink`, `doc.Load`, `doc.OpenRegular` | `path/filepath`                   | the same; the flags O_NONBLOCK and O_NOCTTY are ignored on Windows (no FIFOs)                             |
+| build dependencies | README, CI, `.claude/ccy/Dockerfile`             | Wayland, X11, EGL, Vulkan headers | none on macOS and Windows (Gio uses system frameworks)                                                    |

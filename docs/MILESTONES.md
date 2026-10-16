@@ -998,9 +998,10 @@ decides otherwise.
     to Gio, which on X11 includes its IBus connection over D-Bus. md-viewer's code starts only the
     window loop, the image-decoding spawn, the opener's wait and the colour-scheme query
     (`TestGoStatements` pins them), and its only D-Bus is THEME-2's one connection and call, made
-    in `internal/desktop`. Importing `gioui.org/app` adds four indirect modules:
-    `gioui.org/shader`, `github.com/godbus/dbus/v5`, `golang.org/x/net` and `golang.org/x/sys`.
-    ARCHITECTURE lists them. SPEED-1 is read as allowing the view, the viewer's state and the
+    in `internal/desktop`. Importing `gioui.org/app` adds three indirect modules:
+    `gioui.org/shader`, `golang.org/x/net` and `golang.org/x/sys`. It also reaches
+    `github.com/godbus/dbus/v5`, which is a direct requirement since `internal/desktop` imports
+    it. ARCHITECTURE lists them. SPEED-1 is read as allowing the view, the viewer's state and the
     theme to be built before the window, since that is in-memory work; no other I/O or parsing
     happens first. The alternative is to build them after the window opens. The SPEC wording is
     unchanged: the owner accepts it or asks for a change.
