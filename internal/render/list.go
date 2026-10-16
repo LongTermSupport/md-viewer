@@ -194,7 +194,7 @@ func drawNumber(gtx layout.Context, ctx blockCtx, edge, base int, s string, tr *
 func drawBullet(gtx layout.Context, ctx blockCtx, edge, base int, shape Bullet, tr *Trace) error {
 	size := gtx.Dp(bulletSize)
 	cx := float64(edge) - dpPx(gtx, bulletOffset)
-	cy := float64(base) - bulletRise*pxOf(gtx, bodySize)
+	cy := float64(base) - bulletRise*pxOf(gtx, BodySize)
 	left := int(math.Round(cx - float64(size)/2))
 	top := int(math.Round(cy - float64(size)/2))
 	r := image.Rect(left, top, left+size, top+size)
@@ -242,7 +242,7 @@ func fillClip(gtx layout.Context, a clipArea, c color.NRGBA) {
 func drawTaskBox(gtx layout.Context, ctx blockCtx, edge, base int, task doc.Task, tr *Trace) error {
 	size := gtx.Dp(taskBoxSize)
 	left := edge - gtx.Dp(taskBoxOffset)
-	top := int(math.Round(float64(base) - taskBoxRise*pxOf(gtx, bodySize) - float64(size)/2))
+	top := int(math.Round(float64(base) - taskBoxRise*pxOf(gtx, BodySize) - float64(size)/2))
 	box := image.Rect(left, top, left+size, top+size)
 	rad := gtx.Dp(taskBoxRadius)
 	switch task {
