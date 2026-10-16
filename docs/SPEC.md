@@ -755,8 +755,8 @@ when the desktop states no preference.
 - The query is one call of `org.freedesktop.portal.Settings.ReadOne` with
   `("org.freedesktop.appearance", "color-scheme")`, to `org.freedesktop.portal.Desktop` at
   `/org/freedesktop/portal/desktop` on the session bus.
-- The reply value 1 is dark. 0 ("no preference"), 2 ("light") and any other `uint32` are light,
-  as the portal specification says unknown values mean no preference.
+- The reply value 1 is dark, and 2 is light. Any other `uint32`, 0 ("no preference") included, is
+  no preference, as the portal specification says unknown values mean; `auto` shows light for it.
 - The session bus address is `DBUS_SESSION_BUS_ADDRESS` when it is non-empty and not
   `autolaunch:`. Otherwise it is `unix:path=$XDG_RUNTIME_DIR/bus` when `XDG_RUNTIME_DIR` is
   absolute and that path exists. Otherwise there is no bus.
