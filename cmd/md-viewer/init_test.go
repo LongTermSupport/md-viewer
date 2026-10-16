@@ -641,7 +641,7 @@ func TestGoStatements(t *testing.T) {
 		want := []string{
 			"cmd/md-viewer/main.go",
 			"internal/app/prepare.go",
-				"internal/app/viewer.go",
+			"internal/app/viewer.go",
 			"internal/render/image.go",
 		}
 		slices.Sort(got)
