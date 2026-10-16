@@ -14,7 +14,7 @@ import (
 // The session bus, and the portal the query asks (THEME-2).
 const (
 	busEnv         = "DBUS_SESSION_BUS_ADDRESS"
-	autolaunchAddr = "autolaunch:"
+	unixPrefix     = "unix:"
 	runtimeEnv     = "XDG_RUNTIME_DIR"
 	busSocketName  = "bus"
 	portalName     = "org.freedesktop.portal.Desktop"
@@ -53,7 +53,7 @@ const (
 // BusAddress is the session bus address md-viewer connects to (THEME-2), and whether there is one.
 // stat reports whether a path exists.
 func BusAddress(getenv func(string) string, stat func(string) error) (string, bool) {
-	if addr := getenv(busEnv); addr != "" && !strings.HasPrefix(addr, autolaunchAddr) {
+	if addr := getenv(busEnv); isSingleUnix(addr) {
 		return addr, true
 	}
 	dir := getenv(runtimeEnv)
@@ -65,6 +65,12 @@ func BusAddress(getenv func(string) string, stat func(string) error) (string, bo
 		return "", false
 	}
 	return "unix:path=" + dbus.EscapeBusAddressValue(path), true
+}
+
+// isSingleUnix reports whether addr is one unix: address. A list, or a tcp: address that godbus
+// dials without the query's deadline, is not used (THEME-2).
+func isSingleUnix(addr string) bool {
+	return strings.HasPrefix(addr, unixPrefix) && !strings.Contains(addr, ";")
 }
 
 // schemeFromReply reads the portal's reply (THEME-2): a uint32 variant, 1 is dark, 2 is light, and
