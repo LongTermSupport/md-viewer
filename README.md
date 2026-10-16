@@ -16,7 +16,8 @@ Status: specified, being built. The specification is [docs/SPEC.md](docs/SPEC.md
   lists, tables with alignment, rules, links, autolinks, and local PNG and JPEG images.
 - Looks like GitHub: sizes, spacing and colours come from
   [github-markdown-css](https://github.com/sindresorhus/github-markdown-css) v5.9.0, in light
-  or dark (`--dark`).
+  or dark. Dark follows the desktop's colour scheme by default (`--theme auto`).
+- Two settings, theme and body font size, from flags or a configuration file.
 - Scrolls with the wheel, the arrows, Page Up/Down, Space, Home and End.
 - Zooms with Ctrl and `+`, `-`, `0`, or Ctrl and the wheel, from 50% to 300%.
 - Wraps text to the window's width.
@@ -27,8 +28,8 @@ Status: specified, being built. The specification is [docs/SPEC.md](docs/SPEC.md
 
 No editing. No syntax highlighting. No tabs, no second window, no second file. No live reload,
 no search, no table of contents, no text selection or copy. No HTML (it is left out), no
-remote images, no network at all. No settings and no configuration file. The full list is
-SPEC section 10.
+remote images, no network at all. Two settings, theme and font size, and nothing else. The full
+list is SPEC section 10.
 
 ## Install
 
@@ -61,18 +62,31 @@ binary as the artifact `md-viewer-linux-amd64`.
 ## Use
 
 ```text
-md-viewer [--dark] [--time] FILE
+md-viewer [--theme light|dark|auto] [--font-size N] [--time] FILE
 md-viewer --help | --version
 ```
 
-| Flag        | Effect                                                  |
-| ----------- | ------------------------------------------------------- |
-| `--dark`    | use the dark palette                                    |
-| `--time`    | print start-up timings after the first frame, then exit |
-| `--help`    | show the usage                                          |
-| `--version` | show the version                                        |
+| Flag              | Effect                                                              |
+| ----------------- | ------------------------------------------------------------------- |
+| `--theme MODE`    | `light`, `dark`, or `auto` to follow the desktop (default `auto`)   |
+| `--dark`          | the same as `--theme dark`                                          |
+| `--font-size N`   | body text size, 10 to 32 (default 16); headings and code scale too  |
+| `--time`          | print start-up timings after the first frame, then exit             |
+| `--help`          | show the usage                                                      |
+| `--version`       | show the version                                                    |
 
-Exit codes: 0 success, 1 the file cannot be shown or no window opened, 2 a usage error.
+Settings can also go in `$XDG_CONFIG_HOME/md-viewer/config` (or `~/.config/md-viewer/config`),
+one `key = value` per line. A flag overrides the file:
+
+```text
+theme = dark
+font-size = 18
+```
+
+A malformed file stops md-viewer with an error and exit code 1.
+
+Exit codes: 0 success, 1 the file or the configuration file cannot be shown or no window opened,
+2 a usage error.
 
 ## Speed
 

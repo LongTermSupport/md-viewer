@@ -11,16 +11,19 @@ to that file. The order of work is in [MILESTONES.md](MILESTONES.md).
 | `gioui.org`                | v0.10.3                                           | window, input, layout, text shaping, painting                              |
 | `github.com/yuin/goldmark` | v1.8.6                                            | CommonMark parser with the GFM extensions                                  |
 | `golang.org/x/image`       | v0.26.0                                           | the Go font files (`font/gofont/...`); the version Gio v0.10.3 requires    |
+| `github.com/godbus/dbus/v5`| v5.2.2                                            | the desktop colour scheme over D-Bus (THEME-2), imported by `internal/desktop` only |
 | go-qa-ci                   | commit `7fc4547e92f2fb0cf67c0c91f1f2068774be5d5a` | QA; no tag is published yet, so the pin is a commit (`qa/go-qa-ci.ref`)    |
 
 `widget/material` (the scrollbar, SCROLL-4) imports `golang.org/x/exp/shiny`, which Gio v0.10.3's
 `go.mod` pins at `v0.0.0-20250408133849-7e4ce0ab07d0`. `go.mod` therefore names that module as an
 indirect requirement. It is not a direct dependency, and nothing in md-viewer imports it.
 
-Importing `gioui.org/app` (in `internal/window/gioapp`) adds four more indirect requirements, at the
-versions `go mod tidy` chooses with Gio v0.10.3: `gioui.org/shader v1.0.9`,
-`github.com/godbus/dbus/v5 v5.2.2`, `golang.org/x/net v0.48.0` and `golang.org/x/sys v0.39.0`.
-Nothing in md-viewer imports them directly.
+Importing `gioui.org/app` (in `internal/window/gioapp`) adds three more indirect requirements, at the
+versions `go mod tidy` chooses with Gio v0.10.3: `gioui.org/shader v1.0.9`, `golang.org/x/net
+v0.48.0` and `golang.org/x/sys v0.39.0`. Nothing in md-viewer imports them directly.
+
+`github.com/godbus/dbus/v5` is Gio's too (its IBus code), and `internal/desktop` imports it
+directly for THEME-2, so it is a direct requirement. Nothing else imports it.
 
 No other direct dependency is added without the owner's agreement: no `gioui.org/x`, no test
 assertion library (tests use the standard library), no CLI flag library.
@@ -34,14 +37,15 @@ versions.
 cmd/md-viewer/          thin main: start the clock, call app.Prepare, run the window, exit
 internal/doc/           file loading, goldmark AST -> typed model, link resolution
 internal/render/        model -> Gio layout: palettes, styles, fonts, text flow, blocks, images
-internal/app/           arguments, version, timing, the viewer (input, scroll, zoom, links)
+internal/app/           arguments, settings, version, timing, the viewer (input, scroll, zoom, links)
+internal/desktop/       the desktop colour scheme (THEME-2): the only importer of godbus
 internal/window/        the window loop, cgo-free: Config, FrameError, Source, Loop
 internal/window/gioapp/ the only importer of gioui.org/app: Run (the Source of a window) and Main
 testdata/               fixtures shared by the packages' tests and benchmarks
 ```
 
 Dependencies point one way: `cmd -> app, window, window/gioapp`; `gioapp -> window`;
-`app -> window, render, doc`; `render -> doc`; `window` imports only Gio's `layout`, `op`,
+`app -> window, render, doc, desktop`; `desktop -> godbus`; `render -> doc`; `window` imports only Gio's `layout`, `op`,
 `op/paint`, `unit` and `image/color` packages, not `gioui.org/app`; `doc` imports neither. Nothing below `cmd` calls
 `os.Exit` (go-qa's `gqaci_exit_outside_main` enforces it).
 
@@ -59,7 +63,7 @@ in Gio's own `internal/gl`; so that vet covers `app`, `window`, `render` and `do
 ```go
 func main() {
 	start := time.Now()
-	prep, code := app.Prepare(os.Args[1:], os.Stdout, os.Stderr, app.SystemClock{})
+	prep, code := app.Prepare(os.Args[1:], app.SystemEnv(), os.Stdout, os.Stderr, app.SystemClock{})
 	if !prep.OpenWindow {
 		os.Exit(int(code))
 	}
@@ -181,13 +185,12 @@ plain values:
    layout functions that use the styles, shape text with a `*text.Shaper` and record what they
    drew into a `Trace`.
 
-The two open owner decisions (MILESTONES "Decisions for the owner", 01 and 02) are **awaiting the
-owner**. Both are built to the spec default, behind these seams:
-
-- 01 fonts and emoji: the face list in `fonts.go` and the options given to `NewShaper`. An emoji
-  or system font is one more source, or dropping `NoSystemFonts`.
-- 02 dark mode: only `--dark` (STYLE-PAL-2). The choice is made in one place, `app.Prepare`
-  (M10), from `Options.Dark`.
+Of the owner decisions in MILESTONES ("Decisions for the owner"), 01 (fonts and emoji) is still
+**awaiting the owner**, built to the spec default behind the seam of the face list in `fonts.go`
+and the options given to `NewShaper`: an emoji or system font is one more source, or dropping
+`NoSystemFonts`. 02 (dark mode) is settled: the theme follows the desktop, with a flag and a file
+override (THEME-1, THEME-2). Its seam is `app.Prepare`, the one place that chooses the palette,
+from the resolved theme.
 
 ```go
 type Palette struct {
@@ -395,18 +398,65 @@ and body rows 1, 3, … and `BgMuted` for body rows 2, 4, …. Only a `MarkTable
 `(min(T, W), H)`, and `Baseline` is H − (1 dp + 6 dp + the header's first baseline). Colours come
 from the block's root palette, text from its text palette (STYLE-QUOTE-1).
 
+### internal/desktop
+
+```go
+// scheme.go (portable)
+type Scheme uint8
+const (SchemeNoPreference Scheme = iota; SchemeDark; SchemeLight) // the portal's 0, 1, 2
+func BusAddress(getenv func(string) string, stat func(string) error) (string, bool) // THEME-2
+func schemeFromReply(v dbus.Variant) (Scheme, error)  // u -> Scheme; else an error naming the signature
+func unavailable(err error) bool                      // THEME-3's error names
+
+// scheme_linux.go
+func ColorScheme(ctx context.Context, getenv func(string) string) (Scheme, error)
+// BusAddress; none gives (SchemeNoPreference, nil). dbus.Connect(addr, dbus.WithContext(ctx)),
+// CallWithContext ReadOne, Close (deferred; its error joined). unavailable gives (SchemeNoPreference, nil).
+
+// scheme_other.go
+func ColorScheme(ctx context.Context, getenv func(string) string) (Scheme, error) // (SchemeNoPreference, nil): THEME-2's seam
+```
+
 ### internal/app
 
 ```go
 type ExitCode int
 const (ExitOK ExitCode = 0; ExitFailure ExitCode = 1; ExitUsage ExitCode = 2)
 
-type Options struct{ Path string; Dark, Time, Help, Version bool }
+type Options struct{ Path string; Settings Settings; Time, Help, Version bool }
 type UsageError struct{ Msg string } // the first line of CLI-7
 func ParseArgs(args []string) (Options, error)     // CLI-1..3, CLI-7
 const Usage = "..."                                // CLI-4, byte for byte
 const UsageHint = "Run 'md-viewer --help' for usage." // CLI-7, the second line of a usage error
 func VersionLine(info *debug.BuildInfo, ok bool) string // CLI-5
+
+// settings.go (SET-1 to SET-5, THEME-1, FONT-1)
+type Theme uint8
+const (ThemeUnset Theme = iota; ThemeAuto; ThemeLight; ThemeDark) // ThemeUnset: not given (SET-1)
+type FontSize uint8                                                // whole sp; 0 is not given (FONT-1)
+const (
+	MinFontSize     FontSize = 10                        // FONT-1
+	MaxFontSize     FontSize = 32                        // FONT-1
+	DefaultFontSize          = FontSize(render.BodySize) // FONT-1: STYLE-TEXT-1's 16 sp, one constant
+	DefaultTheme             = ThemeAuto                 // THEME-1
+	maxConfigSize            = 4096                      // SET-5
+	schemeTimeout            = 100 * time.Millisecond    // THEME-3
+)
+type Settings struct{ Theme Theme; FontSize FontSize }
+func ParseTheme(s string) (Theme, bool); func ParseFontSize(s string) (FontSize, bool) // shared by flags and file
+func ParseConfig(data []byte) (Settings, error)              // SET-3, SET-5: *ConfigError{Line int; Msg string}
+func ConfigPath(getenv func(string) string) (string, bool)   // SET-2
+func (s Settings) Over(lower Settings) Settings              // field-wise: s wins where set (SET-1)
+func (s Settings) Resolved() Settings                        // unset gives the defaults
+func (f FontSize) Metric(m unit.Metric) unit.Metric          // FONT-2: PxPerSp x f/16
+
+// Env is what Prepare reads from outside: the environment and the colour-scheme query. Tests pass
+// a map and a fake, so no unit test reads the process environment or touches a bus.
+type Env struct {
+	Getenv      func(string) string
+	ColorScheme func(context.Context, func(string) string) (desktop.Scheme, error)
+}
+func SystemEnv() Env // {os.Getenv, desktop.ColorScheme}
 
 type Clock interface{ Now() time.Time }
 type SystemClock struct{}                          // the only reader of time.Now outside main
@@ -416,7 +466,7 @@ type Prepared struct {
 	OpenWindow bool
 	// unexported: opts, document, images, palette, viewer, timings, clock, stdout
 }
-func Prepare(args []string, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode)
+func Prepare(args []string, env Env, stdout, stderr io.Writer, c Clock) (Prepared, ExitCode)
 // Window is the window's Config (WIN-1, STYLE-PAL-3, SPEED-2). start is the first statement of main.
 // Bind passes the window's Invalidate to the images and to the viewer; OnFirst is set only with
 // --time, and then writes the timings line to stdout (its write error is a frame failure, CLI-6).
@@ -424,7 +474,7 @@ func (p Prepared) Window(start time.Time) window.Config
 
 // Viewer is the per-window state: list position, zoom, accumulators, opener.
 type Viewer struct{ /* unexported */ }
-func NewViewer(v *render.View, p render.Palette, o Opener, stderr io.Writer) *Viewer
+func NewViewer(v *render.View, p render.Palette, fs FontSize, o Opener, stderr io.Writer) *Viewer // fs: FONT-2, applied in element
 func (vw *Viewer) Bind(invalidate func()) // the window's Invalidate; called after a failed async write (LINK-2)
 func (vw *Viewer) Frame(gtx layout.Context) (quit bool, err error) // handle input, lay out; err is View.Err or a failed stderr write (CLI-6)
 
@@ -452,8 +502,12 @@ any other load error prints `md-viewer: ` + the error (DOC-13). If a write to st
 fails, `Prepare` returns `ExitFailure`, and when stdout failed it also writes `md-viewer: ` + the
 error to stderr, best effort.
 
-`Prepare` picks the palette in one place: `render.Light`, or `render.Dark` with `--dark`
-(STYLE-PAL-2). The clock is read three times by the load (`read_ms` and `parse_ms`, SPEED-2) and
+`Prepare` reads the configuration file (SET-2) before anything else, then merges it with the flags
+(`flags.Over(file).Resolved()`). For `auto` it starts the colour-scheme query in a goroutine, with a
+100 ms context (THEME-3), into a one-buffered channel. The start is after the file loads (the DOC-9
+line), so the query overlaps the image probes and the font load. A deferred join receives from the
+channel on every path after the start, so the goroutine never outlives `Prepare`. `Prepare` picks
+the palette in one place, from the theme (THEME-1, STYLE-PAL-2). The clock is read three times by the load (`read_ms` and `parse_ms`, SPEED-2) and
 twice around the faces and the shaper (`fonts_ms`). The view, the viewer and their theme are built
 in memory after that. `Window` takes one more reading, in its `OnFirst`, from the same clock, and
 measures `first_frame_ms` from `start`. A font error is returned like any other preparation
@@ -641,7 +695,7 @@ md-viewer is Linux first. These are the places another platform plugs in:
 | ------------------ | ------------------------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------ |
 | window and input   | `internal/window`                                | Gio, Wayland or X11               | Gio supports macOS and Windows unchanged                                                   |
 | link opener        | `internal/app/opener_*.go` (build tags)          | `xdg-open`                        | `open` (macOS), `rundll32 url.dll,FileProtocolHandler` (Windows)                           |
-| colour scheme      | `--dark` only                                    | flag                              | a platform query could set the default                                                     |
+| colour scheme      | `internal/desktop`, `scheme_linux.go`            | portal `ReadOne` over D-Bus       | `scheme_other.go`: no preference (light); macOS `AppleInterfaceStyle`, Windows `AppsUseLightTheme`, later |
 | fonts              | `render.LoadFaces`                               | embedded Go fonts                 | the same; nothing platform-specific                                                        |
 | paths              | `doc.ResolveLink`, `doc.Load`, `doc.OpenRegular` | `path/filepath`                   | the same; the flags O_NONBLOCK and O_NOCTTY are ignored on Windows (no FIFOs)              |
 | build dependencies | README, CI, `.claude/ccy/Dockerfile`             | Wayland, X11, EGL, Vulkan headers | none on macOS and Windows (Gio uses system frameworks)                                     |

@@ -26,31 +26,40 @@ with `-`. A lone `-` is a FILE operand (a file called `-`), not standard input.
 **CLI-3.** The flags are exactly these. Each is matched by its whole spelling; there are no
 abbreviations, no `=value` forms, and single-dash long forms (`-dark`) are unknown flags.
 
-| Flag           | Effect                                                                       |
-| -------------- | ---------------------------------------------------------------------------- |
-| `--dark`       | use the dark palette (STYLE-PAL-2)                                           |
-| `--time`       | print startup timings to stdout after the first frame, then exit 0 (SPEED-2) |
-| `--help`, `-h` | print the usage text (CLI-4) to stdout and exit 0; FILE is not needed        |
-| `--version`    | print the version line (CLI-5) to stdout and exit 0; FILE is not needed      |
+| Flag             | Effect                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------- |
+| `--theme MODE`   | the colour scheme: `light`, `dark` or `auto` (THEME-1, SET-1)                               |
+| `--dark`         | the same as `--theme dark`                                                                  |
+| `--font-size N`  | the body text size in sp, a whole number from 10 to 32 (FONT-1, SET-1)                      |
+| `--time`         | print startup timings to stdout after the first frame, then exit 0 (SPEED-2)                |
+| `--help`, `-h`   | print the usage text (CLI-4) to stdout and exit 0; FILE is not needed                       |
+| `--version`      | print the version line (CLI-5) to stdout and exit 0; FILE is not needed                     |
 
-If both `--help` and `--version` are given, `--help` wins. Repeating a flag is allowed and has
-the same effect as giving it once. With `--help` or `--version`, FILE is optional: one FILE
-operand is recorded and ignored, and other operands are not an error (CLI-7 still applies to
-unknown flags).
+`--theme` and `--font-size` take the next argument as their value, whatever it is, even `--` or
+a word that starts with `-`. There is no `=value` form, so `--theme=dark` is an unknown flag. When
+a theme flag repeats (`--theme` or `--dark`), the last one wins; the same holds for
+`--font-size`. Otherwise a repeated flag has the same effect as giving it once.
+
+If both `--help` and `--version` are given, `--help` wins. With `--help` or `--version`, FILE is
+optional: one FILE operand is recorded and ignored, and other operands are not an error (CLI-7
+still applies to unknown flags).
 
 **CLI-4.** The usage text is exactly:
 
 ```text
-Usage: md-viewer [--dark] [--time] FILE
+Usage: md-viewer [--theme light|dark|auto] [--font-size N] [--time] FILE
        md-viewer --help | --version
 
 Shows one Markdown file, rendered, in one window.
 
-  --dark     use the dark palette
-  --time     print startup timings after the first frame, then exit
-  --help     show this help
-  --version  show the version
+  --theme MODE    light, dark, or auto to follow the desktop (default auto)
+  --dark          the same as --theme dark
+  --font-size N   body text size, 10 to 32 (default 16)
+  --time          print startup timings after the first frame, then exit
+  --help          show this help
+  --version       show the version
 
+Settings file: $XDG_CONFIG_HOME/md-viewer/config (theme = ..., font-size = ...).
 Scroll: wheel, arrows, Page Up/Down, Space, Home/End.
 Zoom: Ctrl and + or -, Ctrl+0 to reset, Ctrl and the wheel.
 Quit: q or Esc.
@@ -71,8 +80,8 @@ no build info.
 | Code | Meaning                                                                        |
 | ---- | ------------------------------------------------------------------------------ |
 | 0    | success: the window was closed by the user, or `--help`, `--version`, `--time` |
-| 1    | a runtime failure: the file cannot be read or is refused, no window opened, or a frame failed (below) |
-| 2    | a usage error: missing or extra FILE, an unknown flag                          |
+| 1    | a runtime failure: the file or the configuration file (SET-5) cannot be read or is refused, no window opened, or a frame failed (below) |
+| 2    | a usage error: missing or extra FILE, an unknown flag, a flag without its value, an invalid value |
 
 A frame failure is a layout error (`View.Err`), a failed write to stderr during a frame, or a
 failed write of the `--time` line to stdout. The window closes, md-viewer prints `md-viewer: `
@@ -89,10 +98,12 @@ happen.
 | no FILE           | `md-viewer: missing FILE argument`                |
 | two or more FILEs | `md-viewer: expected one FILE, got N` (N counted) |
 | unknown flag      | `md-viewer: unknown flag: ARG` (ARG as typed)     |
+| a valued flag is the last argument | `md-viewer: FLAG needs a value`          |
+| an invalid value of `--theme` or `--font-size` | `md-viewer: invalid FLAG value: VALUE` (VALUE as typed) |
 
-When several usage errors apply, the first unknown flag (in argument order) is reported;
-otherwise the FILE count error. An unknown flag is reported even with `--help` or `--version`;
-the FILE count is not checked with either of them (CLI-3).
+When several usage errors apply, the first unknown flag, missing value or invalid value (in
+argument order) is reported; otherwise the FILE count error. These are reported even with
+`--help` or `--version`; the FILE count is not checked with either of them (CLI-3).
 
 **CLI-8. File errors** print one line to stderr and exit 1. PATH is the FILE argument exactly
 as typed.
@@ -122,8 +133,9 @@ reports the Wayland error when neither works, even if X11 was the one meant.
 
 **CLI-10.** The file extension is not checked: any text file is shown as Markdown.
 
-**CLI-11.** md-viewer reads no configuration file, no environment variable of its own, and no
-standard input.
+**CLI-11.** md-viewer reads one configuration file (SET-2) and no standard input. It reads no
+environment variable of its own; it reads the standard `XDG_CONFIG_HOME`, `HOME`,
+`DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`, as SET-2 and THEME-2 say.
 
 ## 2. Document model
 
@@ -270,10 +282,7 @@ departs from the stylesheet, the expectation says so and why.
 | `CodeBg`      | `#818b981f` | `#656c7633` | `code, tt { background-color }`                                                          |
 | `OnAccent`    | `#ffffff`   | `#ffffff`   | md-viewer's own: the check mark on a done task box                                       |
 
-**STYLE-PAL-2.** The light palette is used unless `--dark` is given. Gio v0.10.3 exposes no
-system colour-scheme setting (its `app` package has no such event or query), so md-viewer does
-not follow the desktop's light or dark preference. See "Decisions for the owner" in
-[MILESTONES.md](MILESTONES.md).
+**STYLE-PAL-2.** The palette is chosen by THEME-1.
 
 **STYLE-PAL-3.** The whole window, outside and inside the content, is filled with `Canvas`.
 Gio's window decorations, where Gio draws them, keep Gio's colours.
@@ -521,6 +530,9 @@ than the width available to it is scaled down, keeping its aspect ratio, to that
 (`img { max-width: 100% }`). The available width is the window's content width less any list
 indent or quote inset around the image. Images are never scaled up. An image is left-aligned.
 Each side of its box is rounded to whole pixels once, so a box may be 0 px tall.
+Nothing is painted under a drawn image, so its transparent pixels show `Canvas`. In the dark
+theme, dark line art on a transparent background can be hard to see, as on GitHub. md-viewer adds
+no backing plate.
 
 **STYLE-IMG-3. Placeholder.** An image that is not drawn (remote, missing, unreadable, another
 format, too large, or failed to decode) is shown as its alt text, or its destination when the alt
@@ -689,6 +701,105 @@ selection or clipboard.
 installed as `md-viewer` (Gio's default, the executable's base name). A renamed or symlinked
 binary, or `go run`, gets its own base name instead.
 
+### 8.1 Settings
+
+**SET-1.** md-viewer has exactly two settings, `theme` (THEME-1) and `font-size` (FONT-1). Each
+is taken from its command line flag (CLI-3) if given, else from the configuration file (SET-2),
+else its default.
+
+- The file is read whenever a window is to be opened, even when both flags are given, so a broken
+  file is always reported. It is not read for `--help` or `--version`.
+- Nothing else is configurable, and md-viewer never writes the file.
+
+**SET-2. Location.** The file is `$XDG_CONFIG_HOME/md-viewer/config` when `XDG_CONFIG_HOME` is
+an absolute path. Otherwise it is `$HOME/.config/md-viewer/config` when `HOME` is absolute.
+Otherwise no file is read and the defaults apply. A relative `XDG_CONFIG_HOME` is ignored, as
+the XDG Base Directory specification requires.
+
+**SET-3. Format.** The file is UTF-8 text in lines; a `\r` before the `\n` is removed.
+
+- A line that is empty, or holds only spaces and tabs, is ignored.
+- A line whose first character other than a space or tab is `#` is ignored.
+- Every other line is `KEY = VALUE`, split at the first `=`, with spaces and tabs trimmed from
+  both sides of each part.
+- Keys are case-sensitive. There are no quotes, no inline comments and no sections.
+- Example: `theme = dark` and `font-size = 18`.
+
+**SET-4. Absent file.** A file that does not exist (`fs.ErrNotExist` from its stat), or whose
+directory does not exist, gives the defaults with no message.
+
+**SET-5. Errors.** Every other problem prints one line to stderr and exits 1 before FILE is read
+and before any window opens. CONFIG is the full path. The checks are those of CLI-8, made through
+`doc.OpenRegular`: non-blocking, with no wait on a FIFO.
+
+| Condition                                  | Message                                                                     |
+| ------------------------------------------ | --------------------------------------------------------------------------- |
+| cannot be opened or read                   | `md-viewer: cannot read CONFIG: REASON`                                     |
+| a directory, or not a regular file         | `md-viewer: cannot read CONFIG: is a directory` / `: not a regular file`    |
+| larger than 4096 bytes                     | `md-viewer: CONFIG is too large: SIZE bytes, the limit is 4096`             |
+| a NUL byte, or invalid UTF-8               | `md-viewer: CONFIG is not a text file`                                      |
+| a line without `=`, or an empty key        | `md-viewer: CONFIG:N: expected KEY = VALUE`                                 |
+| an unknown key                             | `md-viewer: CONFIG:N: unknown setting: KEY`                                 |
+| a key given twice                          | `md-viewer: CONFIG:N: KEY is already set on line M`                         |
+| a bad theme                                | `md-viewer: CONFIG:N: theme must be light, dark or auto, not VALUE`        |
+| a bad font size                            | `md-viewer: CONFIG:N: font-size must be a whole number from 10 to 32, not VALUE` |
+
+N is the 1-based line number. Only the first error, in line order, is reported.
+
+**THEME-1.** `theme` is `light`, `dark` or `auto`; the default is `auto`. `light` and `dark`
+choose STYLE-PAL-1's palettes. `auto` chooses the palette the desktop prefers (THEME-2), and light
+when the desktop states no preference.
+
+**THEME-2. Desktop preference (Linux).**
+
+- The query is one call of `org.freedesktop.portal.Settings.ReadOne` with
+  `("org.freedesktop.appearance", "color-scheme")`, to `org.freedesktop.portal.Desktop` at
+  `/org/freedesktop/portal/desktop` on the session bus.
+- The reply value 1 is dark. 0 ("no preference"), 2 ("light") and any other `uint32` are light,
+  as the portal specification says unknown values mean no preference.
+- The session bus address is `DBUS_SESSION_BUS_ADDRESS` when it is non-empty and not
+  `autolaunch:`. Otherwise it is `unix:path=$XDG_RUNTIME_DIR/bus` when `XDG_RUNTIME_DIR` is
+  absolute and that path exists. Otherwise there is no bus.
+- md-viewer never starts a bus (no `dbus-launch`). The bus may activate the portal.
+- The connection is closed before the window opens.
+- The query is made only when the theme resolves to `auto`.
+- On other platforms `auto` is light (the seam is `internal/desktop`).
+
+**THEME-3. Failures.** md-viewer cannot see the desktop's preference in these cases, and uses
+light with no message:
+
+- there is no bus;
+- the name has no owner (`org.freedesktop.DBus.Error.ServiceUnknown`, `NameHasNoOwner`);
+- the portal has no such method, interface or object (`UnknownMethod`, `UnknownInterface`,
+  `UnknownObject`);
+- the portal has no such setting (`org.freedesktop.portal.Error.NotFound`).
+
+Any other failure prints `md-viewer: cannot read the desktop colour scheme: REASON` to stderr and
+uses light. That covers a connect or authentication error, a reply that is not a `uint32` variant,
+and no reply within 100 ms of the start of the query. Such a failure never ends the program. The
+line comes after DOC-9's line and the image lines (STYLE-IMG-3), before the window opens.
+
+**THEME-4.** The preference is read once, at start. A change of the desktop's colour scheme while
+the window is open is not followed.
+
+**FONT-1.** `font-size` is the body text size in sp, a whole number from 10 to 32, written in
+decimal digits only (no sign, no point). The default is 16, the size of STYLE-TEXT-1.
+
+**FONT-2.** The font size multiplies every size given in sp, and every length given in em, in
+section 3, by font-size ÷ 16. Lengths given in dp do not change.
+
+- Scaled: text, headings, inline and block code, line heights, code padding, the strike, and the
+  rises of bullets and task boxes.
+- Not scaled: page padding, block margins, list indents, borders, bars, rules, bullet and box
+  sizes, images, scroll distances (SCROLL-2) and the scrollbar.
+- It is applied by multiplying the frame's `unit.Metric` `PxPerSp` by font-size ÷ 16.
+- Example: at 20, body text is 20 sp with a 30 sp line, an h1 is 40 sp, code-block text is
+  17 sp, and paragraph margins stay 16 dp.
+
+**FONT-3. With zoom.** The zoom (section 6) multiplies `PxPerDp` and `PxPerSp` after FONT-2, so
+the effective text scale is zoom × font-size ÷ 16. Ctrl+0 resets the zoom to 100 and leaves the
+font size. The zoom always starts at 100 and is not saved.
+
 ## 9. Speed
 
 The targets are measured on the owner's desktop, which has a display. The development
@@ -698,9 +809,11 @@ judged against the targets.
 
 **SPEED-1. Work before the window.** Before the window is created, md-viewer parses its
 arguments, stats and reads the file, parses it into the document model, reads each local
-image's header (`image.DecodeConfig`, for its size), and loads the six font faces. Building the
-view, the viewer's state and its theme is in-memory work done in the same preparation. No other
-I/O or parsing happens before the window opens. Gio's own work at window creation is not
+image's header (`image.DecodeConfig`, for its size), and loads the six font faces. It also reads
+the configuration file (SET-2) and, for `auto`, makes the colour-scheme query (THEME-2). The query
+runs alongside the load, the image probes and the font load, and is joined before the view is
+built. Building the view, the viewer's state and its theme is in-memory work done in the same
+preparation. No other I/O or parsing happens before the window opens. Gio's own work at window creation is not
 md-viewer's and is outside this rule.
 
 **SPEED-2. `--time`.** With `--time`, after the first frame has been submitted (the first
@@ -746,8 +859,10 @@ laid out. The window is invalidated when each is ready. The goroutine exits when
 waiting, and the next request starts it again. The first frame never waits for image pixels.
 
 **SPEED-6. Nothing else.** No `init` functions in md-viewer's packages, no background goroutines
-other than the window loop, image decoding and the link opener's wait, no network, no D-Bus, no
-file watching, no configuration reads. Gio's own goroutines and platform work (on X11, its
+other than the window loop, image decoding, the link opener's wait and the colour-scheme query
+during preparation, no network, no D-Bus except THEME-2's one connection and one call, closed
+before the window opens (godbus's own connection goroutines end at the close), no file watching,
+no configuration reads except SET-2's one file at start. Gio's own goroutines and platform work (on X11, its
 connection to IBus over D-Bus and its reads of the machine ID and IBus configuration) are
 Gio's, and outside this rule.
 
@@ -770,6 +885,7 @@ md-viewer will not have, and a change adding any of these is out of scope:
 - loading remote images or anything else from the network;
 - horizontal scrolling;
 - printing, export, PDF;
-- font, colour or size settings, configuration files;
-- reading from standard input;
-- following the desktop's dark-mode setting (STYLE-PAL-2), unless the owner decides otherwise.
+- a settings window or menu; md-viewer writing its configuration file; any setting other than
+  theme and font size (no custom colours, fonts or line heights); remembering the zoom;
+  following a change of the desktop's colour scheme or of the configuration file while open;
+- reading from standard input.
