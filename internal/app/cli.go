@@ -20,6 +20,8 @@ const progName = "md-viewer"
 // Flags and operand markers (CLI-2, CLI-3).
 const (
 	flagDark      = "--dark"
+	flagTheme     = "--theme"
+	flagFontSize  = "--font-size"
 	flagTime      = "--time"
 	flagHelp      = "--help"
 	flagHelpShort = "-h"
@@ -28,20 +30,27 @@ const (
 	argDash       = "-"
 )
 
-// Usage error messages (CLI-7). msgExtraFile takes the count of FILE operands.
+// Usage error messages (CLI-7). msgExtraFile takes the count of FILE operands; msgNeedsValue takes
+// the flag; msgInvalidValue takes the flag and the value as typed.
 const (
-	msgMissingFile = progName + ": missing FILE argument"
-	msgExtraFile   = progName + ": expected one FILE, got %d"
-	msgUnknownFlag = progName + ": unknown flag: "
+	msgMissingFile  = progName + ": missing FILE argument"
+	msgExtraFile    = progName + ": expected one FILE, got %d"
+	msgUnknownFlag  = progName + ": unknown flag: "
+	msgNeedsValue   = progName + ": %s needs a value"
+	msgInvalidValue = progName + ": invalid %s value: %s"
 )
 
 // UsageHint is the second line of every usage error (CLI-7).
 const UsageHint = "Run '" + progName + " --help' for usage."
 
 // Options is what the command line asked for. Path is the FILE operand, as typed (CLI-1).
+// Settings holds the theme and font size the flags gave (SET-1); an unset field is not given.
 type Options struct {
-	Path                      string
-	Dark, Time, Help, Version bool
+	Path     string
+	Settings Settings
+	Time     bool
+	Help     bool
+	Version  bool
 }
 
 // UsageError is a CLI-7 usage error. Msg is the first line of the message, without the hint.
@@ -55,22 +64,48 @@ func (e *UsageError) Error() string {
 
 // ParseArgs reads the arguments after the program name (CLI-1 to CLI-3, CLI-7).
 //
-// Precedence: the first unknown flag is always an error. Otherwise --help and --version
-// skip the FILE count (Path is set only when exactly one operand is given). Otherwise
-// zero operands, or more than one, is an error.
+// Precedence: the first unknown flag, missing value or invalid value, in argument order, is always
+// an error. Otherwise --help and --version skip the FILE count (Path is set only when exactly one
+// operand is given). Otherwise zero operands, or more than one, is an error. --theme and
+// --font-size take the next argument as their value, whatever it is (CLI-3).
 func ParseArgs(args []string) (Options, error) {
 	var opts Options
 	var operands []string
-	unknown := ""
+	var problem error
 	endOfFlags := false
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch {
 		case endOfFlags:
 			operands = append(operands, arg)
 		case arg == argEndOfFlags:
 			endOfFlags = true
 		case arg == flagDark:
-			opts.Dark = true
+			opts.Settings.Theme = ThemeDark
+		case arg == flagTheme:
+			if i+1 >= len(args) {
+				problem = firstProblem(problem, &UsageError{Msg: fmt.Sprintf(msgNeedsValue, arg)})
+				break
+			}
+			i++
+			t, ok := ParseTheme(args[i])
+			if !ok {
+				problem = firstProblem(problem, &UsageError{Msg: fmt.Sprintf(msgInvalidValue, arg, args[i])})
+				break
+			}
+			opts.Settings.Theme = t
+		case arg == flagFontSize:
+			if i+1 >= len(args) {
+				problem = firstProblem(problem, &UsageError{Msg: fmt.Sprintf(msgNeedsValue, arg)})
+				break
+			}
+			i++
+			f, ok := ParseFontSize(args[i])
+			if !ok {
+				problem = firstProblem(problem, &UsageError{Msg: fmt.Sprintf(msgInvalidValue, arg, args[i])})
+				break
+			}
+			opts.Settings.FontSize = f
 		case arg == flagTime:
 			opts.Time = true
 		case arg == flagHelp, arg == flagHelpShort:
@@ -80,15 +115,13 @@ func ParseArgs(args []string) (Options, error) {
 		case arg == argDash:
 			operands = append(operands, arg)
 		case strings.HasPrefix(arg, argDash):
-			if unknown == "" {
-				unknown = arg
-			}
+			problem = firstProblem(problem, &UsageError{Msg: msgUnknownFlag + arg})
 		default:
 			operands = append(operands, arg)
 		}
 	}
-	if unknown != "" {
-		return Options{}, &UsageError{Msg: msgUnknownFlag + unknown}
+	if problem != nil {
+		return Options{}, problem
 	}
 	if opts.Help || opts.Version {
 		if len(operands) == 1 {
@@ -107,17 +140,29 @@ func ParseArgs(args []string) (Options, error) {
 	}
 }
 
+// firstProblem keeps the earlier of two usage problems. ParseArgs reports the first in argument
+// order (CLI-7), so a later one never replaces an earlier one.
+func firstProblem(first, next error) error {
+	if first != nil {
+		return first
+	}
+	return next
+}
+
 // Usage is the text of --help (CLI-4), byte for byte. It ends with one newline.
-const Usage = `Usage: md-viewer [--dark] [--time] FILE
+const Usage = `Usage: md-viewer [--theme light|dark|auto] [--font-size N] [--time] FILE
        md-viewer --help | --version
 
 Shows one Markdown file, rendered, in one window.
 
-  --dark     use the dark palette
-  --time     print startup timings after the first frame, then exit
-  --help     show this help
-  --version  show the version
+  --theme MODE    light, dark, or auto to follow the desktop (default auto)
+  --dark          the same as --theme dark
+  --font-size N   body text size, 10 to 32 (default 16)
+  --time          print startup timings after the first frame, then exit
+  --help          show this help
+  --version       show the version
 
+Settings file: $XDG_CONFIG_HOME/md-viewer/config (theme = ..., font-size = ...).
 Scroll: wheel, arrows, Page Up/Down, Space, Home/End.
 Zoom: Ctrl and + or -, Ctrl+0 to reset, Ctrl and the wheel.
 Quit: q or Esc.

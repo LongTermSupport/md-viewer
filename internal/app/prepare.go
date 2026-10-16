@@ -136,7 +136,7 @@ func prepare(args []string, stdout, stderr io.Writer, c Clock, loadFaces func() 
 	// The palette is chosen here and nowhere else (STYLE-PAL-2). The faces and the shaper are timed
 	// from two readings, which is what fonts_ms measures (SPEC SPEED-2).
 	pal := render.Light
-	if opts.Dark {
+	if opts.Settings.Theme == ThemeDark {
 		pal = render.Dark
 	}
 	fontsStart := c.Now()
