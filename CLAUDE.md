@@ -426,8 +426,8 @@ feature, a flag or a dependency the spec does not name: propose it to the owner 
 
 QA is go-qa-ci, pinned to the commit in `qa/go-qa-ci.ref`. Install its tools with
 `scripts/install-qa-tools.sh`, run the gate with `scripts/qa.sh`. Also `go vet ./...` and
-`go test -race -count=1 ./...`. All must pass before every commit is pushed. go-qa-ci is
-private, so CI's `go-qa` job fails until it is published; its `build` job must be green.
+`go test -race -count=1 ./...`. All must pass before every commit is pushed, and CI's `build`
+and `go-qa` jobs must both be green.
 
 This container has Gio's headers and Xvfb but no display: the binary builds and runs under
 `xvfb-run -a`, and its timings there are information only. Speed targets are judged on the
