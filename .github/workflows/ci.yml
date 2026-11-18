@@ -5,9 +5,22 @@ name: CI
 # go-qa: go-qa-ci over the module, an add-on to the plain Go gate in `build`. go-qa installs
 #   its own pinned tools. go-qa-ci is private, so until it is public this job fails at its
 #   install step. It must not be skipped or made optional.
+# actions-qa-ci: actions-qa-ci over the workflows, on pull requests only.
 on:
+  # A push of documentation alone starts no run. Markdown the tests read stays in: README.md
+  # and docs/**.md (TestNoPlannerLabels) and testdata/** (rendering tests and the Xvfb smoke).
   push:
     branches: ["**"]
+    paths:
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "README.md"
+      - "docs/**.md"
+      - "testdata/**"
+      - "**/CLAUDE.md"
+      - "**/AGENTS.md"
+      - ".claude/**"
   pull_request:
   workflow_dispatch:
 
@@ -84,3 +97,16 @@ jobs:
         run: go install "github.com/LongTermSupport/go-qa-ci/cmd/go-qa@$(tr -d '[:space:]' < qa/go-qa-ci.ref)"
       - name: go-qa run --ci
         run: go-qa run --ci
+
+  actions-qa-ci:
+    name: actions-qa-ci
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: LongTermSupport/actions-qa-ci@c692fb40e93f3ad63d59adf78a86d1a1d0111449 # v0.1.1

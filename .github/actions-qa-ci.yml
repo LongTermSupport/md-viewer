@@ -1,0 +1,7 @@
+version: 1
+exceptions:
+  - id: actionsqaci.docsOnlyPush
+    path: .github/workflows/ci.yml
+    hazard: "A push that changes only README.md or Markdown under docs/ runs the whole CI workflow"
+    scope: "Only ci.yml, whose race tests include TestNoPlannerLabels, which scans the tracked README.md and docs Markdown"
+    decision: https://github.com/LongTermSupport/md-viewer/issues/1
