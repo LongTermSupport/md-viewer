@@ -221,8 +221,10 @@ func TestFrameErrorMapping(t *testing.T) {
 		{name: "closed normally", err: nil, code: 0, stderr: ""},
 		{name: "frame failure", err: frame, code: 1, stderr: "md-viewer: boom\n"},
 		{name: "wrapped frame failure", err: fmt.Errorf("x: %w", frame), code: 1, stderr: "md-viewer: boom\n"},
-		{name: "window cannot open", err: errors.New("wayland: no"), code: 1,
-			stderr: "md-viewer: cannot open a window: wayland: no\n"},
+		{
+			name: "window cannot open", err: errors.New("wayland: no"), code: 1,
+			stderr: "md-viewer: cannot open a window: wayland: no\n",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
