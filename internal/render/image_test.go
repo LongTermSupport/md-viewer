@@ -621,14 +621,20 @@ func TestNewImagesWarnings(t *testing.T) {
 	tests := []struct {
 		name, src, want string
 	}{
-		{"the same missing image twice gives two lines", "![m](missing.png)\n\n![m](missing.png)",
+		{
+			"the same missing image twice gives two lines", "![m](missing.png)\n\n![m](missing.png)",
 			"md-viewer: image not shown: missing.png: no such file or directory\n" +
-				"md-viewer: image not shown: missing.png: no such file or directory\n"},
-		{"an ftp destination is remote", "![r](ftp://e.org/r.png)",
-			"md-viewer: image not shown: ftp://e.org/r.png: remote images are not loaded\n"},
+				"md-viewer: image not shown: missing.png: no such file or directory\n",
+		},
+		{
+			"an ftp destination is remote", "![r](ftp://e.org/r.png)",
+			"md-viewer: image not shown: ftp://e.org/r.png: remote images are not loaded\n",
+		},
 		{"a fragment is not a local file", "![f](#x)", "md-viewer: image not shown: #x: not a local file\n"},
-		{"a javascript destination is not a local file", "![j](javascript:x)",
-			"md-viewer: image not shown: javascript:x: not a local file\n"},
+		{
+			"a javascript destination is not a local file", "![j](javascript:x)",
+			"md-viewer: image not shown: javascript:x: not a local file\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -760,27 +766,47 @@ func TestImagePlaceholders(t *testing.T) {
 		name, src, dir, text, stderr string
 		italic                       bool // checked against Italic text: plain words only
 	}{
-		{"missing", "![A missing image](missing.png)", fix, "A missing image",
-			"md-viewer: image not shown: missing.png: no such file or directory\n", true},
-		{"a GIF", "![A gif](notes.gif)", fix, "A gif",
-			"md-viewer: image not shown: notes.gif: unsupported format\n", true},
-		{"not an image", "![A broken image](broken.png)", fix, "A broken image",
-			"md-viewer: image not shown: broken.png: unsupported format\n", true},
-		{"remote", "![A remote image](https://example.com/r.png)", fix, "A remote image",
-			"md-viewer: image not shown: https://example.com/r.png: remote images are not loaded\n", true},
-		{"remote with no alt text shows its destination", "![](https://example.com/r.png)", fix,
+		{
+			"missing", "![A missing image](missing.png)", fix, "A missing image",
+			"md-viewer: image not shown: missing.png: no such file or directory\n", true,
+		},
+		{
+			"a GIF", "![A gif](notes.gif)", fix, "A gif",
+			"md-viewer: image not shown: notes.gif: unsupported format\n", true,
+		},
+		{
+			"not an image", "![A broken image](broken.png)", fix, "A broken image",
+			"md-viewer: image not shown: broken.png: unsupported format\n", true,
+		},
+		{
+			"remote", "![A remote image](https://example.com/r.png)", fix, "A remote image",
+			"md-viewer: image not shown: https://example.com/r.png: remote images are not loaded\n", true,
+		},
+		{
+			"remote with no alt text shows its destination", "![](https://example.com/r.png)", fix,
 			"https://example.com/r.png",
-			"md-viewer: image not shown: https://example.com/r.png: remote images are not loaded\n", false},
-		{"ftp", "![A ftp image](ftp://e.org/r.png)", fix, "A ftp image",
-			"md-viewer: image not shown: ftp://e.org/r.png: remote images are not loaded\n", true},
-		{"fragment", "![A fragment](#x)", fix, "A fragment",
-			"md-viewer: image not shown: #x: not a local file\n", true},
-		{"a directory", "![d]()", fix, "d",
-			"md-viewer: image not shown: : is a directory\n", false},
-		{"header cut short", "![A bad header](cut.png)", tmp, "A bad header",
-			"md-viewer: image not shown: cut.png: unexpected EOF\n", true},
-		{"too large", "![A huge image](huge.png)", tmp, "A huge image",
-			"md-viewer: image not shown: huge.png: image too large: 8193x1\n", true},
+			"md-viewer: image not shown: https://example.com/r.png: remote images are not loaded\n", false,
+		},
+		{
+			"ftp", "![A ftp image](ftp://e.org/r.png)", fix, "A ftp image",
+			"md-viewer: image not shown: ftp://e.org/r.png: remote images are not loaded\n", true,
+		},
+		{
+			"fragment", "![A fragment](#x)", fix, "A fragment",
+			"md-viewer: image not shown: #x: not a local file\n", true,
+		},
+		{
+			"a directory", "![d]()", fix, "d",
+			"md-viewer: image not shown: : is a directory\n", false,
+		},
+		{
+			"header cut short", "![A bad header](cut.png)", tmp, "A bad header",
+			"md-viewer: image not shown: cut.png: unexpected EOF\n", true,
+		},
+		{
+			"too large", "![A huge image](huge.png)", tmp, "A huge image",
+			"md-viewer: image not shown: huge.png: image too large: 8193x1\n", true,
+		},
 	}
 	for _, tt := range rows {
 		t.Run(tt.name, func(t *testing.T) {

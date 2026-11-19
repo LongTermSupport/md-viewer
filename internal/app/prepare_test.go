@@ -592,8 +592,10 @@ func TestPrepareTheme(t *testing.T) {
 		{"--dark over a light desktop", []string{"--dark"}, "", desktop.SchemeLight, nil, render.Dark, 0, ""},
 		{"a file's dark over a light desktop", nil, "theme = dark\n", desktop.SchemeLight, nil, render.Dark, 0, ""},
 		{"--theme auto over a file's dark", []string{"--theme", "auto"}, "theme = dark\n", desktop.SchemeDark, nil, render.Dark, 1, ""},
-		{"a failed query", nil, "", desktop.SchemeNoPreference, errors.New("no reply"), render.Light, 1,
-			"md-viewer: cannot read the desktop colour scheme: no reply\n"},
+		{
+			"a failed query", nil, "", desktop.SchemeNoPreference, errors.New("no reply"), render.Light, 1,
+			"md-viewer: cannot read the desktop colour scheme: no reply\n",
+		},
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
@@ -651,20 +653,34 @@ func TestPrepareConfigErrors(t *testing.T) {
 		code    ExitCode
 		open    bool
 	}{
-		{name: "a bad theme", config: "theme = blue\n",
-			stderr: "md-viewer: CFG:1: theme must be light, dark or auto, not blue\n", code: ExitFailure},
-		{name: "a missing FILE is not reported", config: "theme = blue\n", missing: true,
-			stderr: "md-viewer: CFG:1: theme must be light, dark or auto, not blue\n", code: ExitFailure},
-		{name: "a directory", dir: true,
-			stderr: "md-viewer: cannot read CFG: is a directory\n", code: ExitFailure},
-		{name: "too large", config: strings.Repeat("#", 4097),
-			stderr: "md-viewer: CFG is too large: 4097 bytes, the limit is 4096\n", code: ExitFailure},
-		{name: "too large is reported at its full size", config: strings.Repeat("#", 5000),
-			stderr: "md-viewer: CFG is too large: 5000 bytes, the limit is 4096\n", code: ExitFailure},
-		{name: "not text", config: "theme = dark\x00\n",
-			stderr: "md-viewer: CFG is not a text file\n", code: ExitFailure},
-		{name: "an unknown key on line 2", config: "theme = dark\ncolour = red\n",
-			stderr: "md-viewer: CFG:2: unknown setting: colour\n", code: ExitFailure},
+		{
+			name: "a bad theme", config: "theme = blue\n",
+			stderr: "md-viewer: CFG:1: theme must be light, dark or auto, not blue\n", code: ExitFailure,
+		},
+		{
+			name: "a missing FILE is not reported", config: "theme = blue\n", missing: true,
+			stderr: "md-viewer: CFG:1: theme must be light, dark or auto, not blue\n", code: ExitFailure,
+		},
+		{
+			name: "a directory", dir: true,
+			stderr: "md-viewer: cannot read CFG: is a directory\n", code: ExitFailure,
+		},
+		{
+			name: "too large", config: strings.Repeat("#", 4097),
+			stderr: "md-viewer: CFG is too large: 4097 bytes, the limit is 4096\n", code: ExitFailure,
+		},
+		{
+			name: "too large is reported at its full size", config: strings.Repeat("#", 5000),
+			stderr: "md-viewer: CFG is too large: 5000 bytes, the limit is 4096\n", code: ExitFailure,
+		},
+		{
+			name: "not text", config: "theme = dark\x00\n",
+			stderr: "md-viewer: CFG is not a text file\n", code: ExitFailure,
+		},
+		{
+			name: "an unknown key on line 2", config: "theme = dark\ncolour = red\n",
+			stderr: "md-viewer: CFG:2: unknown setting: colour\n", code: ExitFailure,
+		},
 		{name: "an absent file is the defaults", stderr: "", code: ExitOK, open: true},
 	}
 	for _, r := range rows {

@@ -119,8 +119,11 @@ func TestConfigPath(t *testing.T) {
 		ok   bool
 	}{
 		{"XDG_CONFIG_HOME", map[string]string{"XDG_CONFIG_HOME": "/x"}, "/x/md-viewer/config", true},
-		{"relative XDG_CONFIG_HOME falls back to HOME", map[string]string{"XDG_CONFIG_HOME": "rel", "HOME": "/h"},
-			"/h/.config/md-viewer/config", true},
+		{
+			"relative XDG_CONFIG_HOME falls back to HOME",
+			map[string]string{"XDG_CONFIG_HOME": "rel", "HOME": "/h"},
+			"/h/.config/md-viewer/config", true,
+		},
 		{"neither set", map[string]string{}, "", false},
 		{"both relative", map[string]string{"XDG_CONFIG_HOME": "rel", "HOME": "h"}, "", false},
 	}

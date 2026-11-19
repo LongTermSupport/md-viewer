@@ -40,32 +40,71 @@ func TestBusAddress(t *testing.T) {
 		want  string
 		found bool
 	}{
-		{"environment address is used as is", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/s"},
-			statOnly(busPath), "unix:path=/tmp/s", true},
-		{"autolaunch counts as no address", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "autolaunch:"},
-			statOnly(""), "", false},
-		{"autolaunch falls back to the runtime bus", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "autolaunch:", "XDG_RUNTIME_DIR": runDir},
-			statOnly(busPath), escaped, true},
-		{"tcp address counts as no address", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "tcp:host=127.0.0.1,port=1"},
-			statOnly(""), "", false},
-		{"tcp address falls back to the runtime bus", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "tcp:host=127.0.0.1,port=1", "XDG_RUNTIME_DIR": runDir},
-			statOnly(busPath), escaped, true},
-		{"nonce-tcp address counts as no address", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "nonce-tcp:host=127.0.0.1,port=1"},
-			statOnly(""), "", false},
-		{"a list starting with tcp counts as no address", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "tcp:host=127.0.0.1,port=1;unix:path=/tmp/s"},
-			statOnly(""), "", false},
-		{"a unix address with a trailing tcp counts as no address", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/s;tcp:host=127.0.0.1,port=1"},
-			statOnly(""), "", false},
-		{"a list of unix addresses falls back to the runtime bus", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/s;unix:path=/tmp/t", "XDG_RUNTIME_DIR": runDir},
-			statOnly(busPath), escaped, true},
-		{"an abstract socket address is used as is", map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:abstract=/tmp/dbus-s"},
-			statOnly(""), "unix:abstract=/tmp/dbus-s", true},
-		{"empty address, runtime bus escaped", map[string]string{"XDG_RUNTIME_DIR": runDir},
-			statOnly(busPath), escaped, true},
-		{"no bus file gives none", map[string]string{"XDG_RUNTIME_DIR": runDir},
-			statOnly(""), "", false},
-		{"a relative runtime directory gives none", map[string]string{"XDG_RUNTIME_DIR": "run"},
-			statOnly("run/bus"), "", false},
+		{
+			"environment address is used as is",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/s"},
+			statOnly(busPath), "unix:path=/tmp/s", true,
+		},
+		{
+			"autolaunch counts as no address",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "autolaunch:"},
+			statOnly(""), "", false,
+		},
+		{
+			"autolaunch falls back to the runtime bus",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "autolaunch:", "XDG_RUNTIME_DIR": runDir},
+			statOnly(busPath), escaped, true,
+		},
+		{
+			"tcp address counts as no address",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "tcp:host=127.0.0.1,port=1"},
+			statOnly(""), "", false,
+		},
+		{
+			"tcp address falls back to the runtime bus",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "tcp:host=127.0.0.1,port=1", "XDG_RUNTIME_DIR": runDir},
+			statOnly(busPath), escaped, true,
+		},
+		{
+			"nonce-tcp address counts as no address",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "nonce-tcp:host=127.0.0.1,port=1"},
+			statOnly(""), "", false,
+		},
+		{
+			"a list starting with tcp counts as no address",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "tcp:host=127.0.0.1,port=1;unix:path=/tmp/s"},
+			statOnly(""), "", false,
+		},
+		{
+			"a unix address with a trailing tcp counts as no address",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/s;tcp:host=127.0.0.1,port=1"},
+			statOnly(""), "", false,
+		},
+		{
+			"a list of unix addresses falls back to the runtime bus",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/s;unix:path=/tmp/t", "XDG_RUNTIME_DIR": runDir},
+			statOnly(busPath), escaped, true,
+		},
+		{
+			"an abstract socket address is used as is",
+			map[string]string{"DBUS_SESSION_BUS_ADDRESS": "unix:abstract=/tmp/dbus-s"},
+			statOnly(""), "unix:abstract=/tmp/dbus-s", true,
+		},
+		{
+			"empty address, runtime bus escaped",
+			map[string]string{"XDG_RUNTIME_DIR": runDir},
+			statOnly(busPath), escaped, true,
+		},
+		{
+			"no bus file gives none",
+			map[string]string{"XDG_RUNTIME_DIR": runDir},
+			statOnly(""), "", false,
+		},
+		{
+			"a relative runtime directory gives none",
+			map[string]string{"XDG_RUNTIME_DIR": "run"},
+			statOnly("run/bus"), "", false,
+		},
 		{"nothing set gives none", map[string]string{}, statOnly(busPath), "", false},
 	}
 	for _, r := range rows {

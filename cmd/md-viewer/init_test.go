@@ -428,8 +428,10 @@ func TestFileOpens(t *testing.T) {
 		if err != nil {
 			t.Fatalf("openCalls: %v", err)
 		}
-		want := []string{"x.go: os.Open", "x.go: os.ReadFile", "x.go: os.OpenRoot", "x.go: os.ReadDir",
-			"x.go: ioutil.ReadFile", "x.go: syscall.Open"}
+		want := []string{
+			"x.go: os.Open", "x.go: os.ReadFile", "x.go: os.OpenRoot", "x.go: os.ReadDir",
+			"x.go: ioutil.ReadFile", "x.go: syscall.Open",
+		}
 		if !slices.Equal(got, want) {
 			t.Errorf("openCalls = %q, want %q", got, want)
 		}

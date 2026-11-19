@@ -3,8 +3,7 @@ name: CI
 # build: vet, race tests and a release build on Ubuntu with Gio's build dependencies; the
 #   binary is uploaded as an artifact. From M10 it also runs the binary under Xvfb.
 # go-qa: go-qa-ci over the module, an add-on to the plain Go gate in `build`. go-qa installs
-#   its own pinned tools. go-qa-ci is private, so until it is public this job fails at its
-#   install step. It must not be skipped or made optional.
+#   its own pinned tools. It must not be skipped or made optional.
 on:
   push:
     branches: ["**"]
@@ -78,9 +77,7 @@ jobs:
           read -ra pkgs <<< "${APT_PACKAGES}"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
-      - name: Install go-qa at the pinned go-qa-ci commit (fails while go-qa-ci is private)
-        env:
-          GOPRIVATE: github.com/LongTermSupport/go-qa-ci
+      - name: Install go-qa at the pinned go-qa-ci commit
         run: go install "github.com/LongTermSupport/go-qa-ci/cmd/go-qa@$(tr -d '[:space:]' < qa/go-qa-ci.ref)"
       - name: go-qa run --ci
         run: go-qa run --ci

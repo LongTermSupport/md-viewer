@@ -24,8 +24,10 @@ func TestDarkViewColours(t *testing.T) {
 		t.Fatalf("abs testdata: %v", err)
 	}
 	e := newViewEnvIn(t, string(src), dir, Dark, metric1)
-	dark := []color.NRGBA{Dark.Fg, Dark.Canvas, Dark.FgMuted, Dark.Accent, Dark.Border,
-		Dark.BorderMuted, Dark.BgMuted, Dark.CodeBg, Dark.OnAccent}
+	dark := []color.NRGBA{
+		Dark.Fg, Dark.Canvas, Dark.FgMuted, Dark.Accent, Dark.Border,
+		Dark.BorderMuted, Dark.BgMuted, Dark.CodeBg, Dark.OnAccent,
+	}
 	seen := 0
 	for i := range e.view.Len() {
 		_, tr := e.layout(i, 800)
